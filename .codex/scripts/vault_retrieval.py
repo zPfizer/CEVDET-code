@@ -543,6 +543,33 @@ def _stable_entry_snapshot(
     return None, None, True
 
 
+def _is_virtual_companion_view(vault_root: Path, path: Path) -> bool:
+    try:
+        relative = path.relative_to(vault_root)
+    except ValueError:
+        return False
+    return (
+        relative.parent == Path(COMPANION_ROOT)
+        and relative.name in companion_memory.VIEW_NAMES
+        and (vault_root / companion_memory.CANONICAL_RELATIVE).is_file()
+    )
+
+
+def _retrieval_entry_snapshot(
+    vault_root: Path,
+    path: Path,
+    memory: MemoryRead,
+) -> tuple[VaultEntry | None, os.stat_result | None, bool]:
+    """Read a disk note or a canonical-backed Companion view without writing."""
+    if _is_virtual_companion_view(vault_root, path):
+        return entry_from_file(vault_root, path, memory=memory), None, False
+    return _stable_entry_snapshot(
+        vault_root,
+        path,
+        lambda root, source: entry_from_file(root, source, memory=memory),
+    )
+
+
 def _stable_source_snapshot(
     vault_root: Path,
     path: Path,
@@ -870,10 +897,8 @@ def _apply_memory_suppressions(
     visible: list[VaultEntry] = []
     unstable_paths = set(getattr(entries, 'unstable_paths', frozenset()))
     for entry in entries:
-        projected, _post_stat, unstable = _stable_entry_snapshot(
-            vault_root,
-            vault_root / entry.path,
-            lambda root, path: entry_from_file(root, path, memory=memory),
+        projected, _post_stat, unstable = _retrieval_entry_snapshot(
+            vault_root, vault_root / entry.path, memory
         )
         if unstable:
             unstable_paths.add(entry.path)
@@ -1399,10 +1424,8 @@ def _fresh_hits(vault_root: Path, candidates: VaultMap, query: str, top_k: int, 
             if hit.entry.path in checked:
                 continue
             checked.add(hit.entry.path)
-            current, _post_stat, unstable = _stable_entry_snapshot(
-                vault_root,
-                vault_root / hit.entry.path,
-                lambda root, path: entry_from_file(root, path, memory=memory),
+            current, _post_stat, unstable = _retrieval_entry_snapshot(
+                vault_root, vault_root / hit.entry.path, memory
             )
             if unstable:
                 unstable_paths.add(hit.entry.path)

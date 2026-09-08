@@ -40,6 +40,7 @@ Her bağımsız kod işi güncel `origin/main` üzerinden ayrı `codex/` branch 
 
 ## Code Review Rules
 
+- Bu deponun istenen teslim ve doğrulama ortamı Windows/Python 3.14'tür. POSIX-only bulguları ayrı platform sınırı olarak raporla; Windows etkisi olmayan POSIX testlerini bu teslimin merge koşuluna dönüştürme. Genel gizlilik ve veri kaybı bulgularını platform bahanesiyle dışlama.
 - Kişisel kaynak, günlük, knowledge, özel ayar veya çalışma state'inin kod deposuna taşınmasını ve geliştirme ortamında canlı Vault/model aktivasyonunu hata olarak bildir; sentetik fixture ve açıkça yetkilendirilmiş hedef işlemler istisnadır.
 - Kaynak/provenance ve gizlilik tercihlerini atlayan ham veri fallback'lerini, doğrulanmamış işlemi başarılı gösteren yolları bildir; okunamayan veya kullanım dışı kaynakta işlem kapalı kalmalıdır.
 - Kalıcı yazma ve worker kurtarma yollarında atomiklik, tekrar çalıştırılabilirlik ve süreç sahipliği kaybını denetle; eşzamanlılık veya belirsiz sonlandırma sessiz veri ezilmesine ya da yeniden yayınlamaya yol açmamalıdır.

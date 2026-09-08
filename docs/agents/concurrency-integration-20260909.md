@@ -62,12 +62,16 @@ aktif indeks yolu sınandı. Metadata büyümesine ayrıca sınır koymak bu akt
 - FLUSH_BOS receipt'i batch sınırlarını saklar; receipt sonrası coverage kesintisinde
   aynı doğrulanmış boş sonuç tekrar modele gönderilmez.
 
+- Canonical katalog varken generated Companion view dosyaları eksik olabilir.
+  Arama bu sanal entry'leri MemoryRead üzerinden doğrular; fiziksel view zorunluluğu
+  getirmez, raw fallback veya dosya oluşturma yapmaz.
+
 ## Doğrulama
 
 - Eski dalın 666 test sonucu tarihsel kanıttır; güncel code-only sonuç değildir.
 - İlk birleşik 861 test koşusu 8 failure/4 error verdi. Uyarlamalar ve bulunan
   yarışlar giderildi; ara birleşik koşuda 863 test, son yerel Windows koşusunda
-  869 test (91.491 saniye, OK) geçti. GitHub CI sonucu ayrıca raporlanır.
+  870 test (88.631 saniye, OK) geçti. GitHub CI sonucu ayrıca raporlanır.
 - Yayın retry regresyonları eski b800 adayında 2 RED, düzeltmede 2 GREEN verdi.
 - Süreç cleanup, publication ve reader/reflection incelemelerinde bildirilen
   maddi bulgular kaynak düzeltmeleri ve odaklı testlerle giderildi.
