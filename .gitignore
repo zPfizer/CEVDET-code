@@ -161,3 +161,12 @@
 **/settings.local.json
 /.codex/scripts/.state/
 /.codex/tansu-semantic-map.csv
+
+# PR infrastructure: explicit allowed paths
+!/.github/
+/.github/*
+!/.github/pull_request_template.md
+!/.github/workflows/
+/.github/workflows/*
+!/.github/workflows/tests.yml
+!/docs/agents/pr-workflow.md
