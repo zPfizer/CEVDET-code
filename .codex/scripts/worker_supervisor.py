@@ -1,0 +1,1143 @@
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+from contextlib import ExitStack
+from typing import Any, Callable
+import uuid
+
+from file_lock import LockUnavailable, locked
+from process_control import (
+    ProcessTreeTimeout,
+    pid_is_alive,
+    run_with_tree_timeout,
+    spawn_detached,
+)
+from state_store import atomic_write_bytes, atomic_write_json, vault_root_of, write_health
+
+
+JOB_SCHEMA_VERSION = 1
+SUPERVISOR_SCHEMA_VERSION = 1
+JOB_STATES = (
+    "pending",
+    "claimed",
+    "running",
+    "succeeded",
+    "dead-letter",
+    "quarantined",
+)
+JOB_KINDS = {"flush", "maintenance"}
+# Supervisor process'inin admission lease'i; iş süresiyle ilgisizdir.
+SUPERVISOR_LEASE_SECONDS = 90
+LAUNCH_LEASE_SECONDS = 30
+# Tek işin azami süresi ve ondan türeyen iş lease'i; daima timeout'tan büyüktür.
+JOB_TIMEOUT_SECONDS = 300
+JOB_TIMEOUTS = {"flush": JOB_TIMEOUT_SECONDS, "maintenance": 1900}
+JOB_LEASE_GRACE_SECONDS = 30
+MAX_ATTEMPTS = 3
+RETRY_BASE_SECONDS = 5
+# enqueue_flush yazar, worker tüketir: hookin ömrünün sahibi burasıdır.
+# Başarı yolu dosyayı hemen siler; sweep dead-letter/retry rotalarının bıraktığı
+# artıkları toplar, bu yüzden eşik en uzun iş ömründen belirgin şekilde uzundur.
+HOOK_INPUT_NAME = re.compile(r"hookin-[^/]+\.json\Z")
+STALE_HOOK_INPUT_SECONDS = 3_600
+
+
+INVALID_UNICODE_ESCAPE = re.compile(r"\\u(?![0-9a-fA-F]{4})")
+INVALID_JSON_ESCAPE = re.compile(r'\\(?!["\\/bfnrtu])')
+
+
+def _repair_invalid_json_escapes(raw: str) -> str:
+    repaired = INVALID_UNICODE_ESCAPE.sub(r"\\\\u", raw)
+    return INVALID_JSON_ESCAPE.sub(r"\\\\", repaired)
+
+
+def load_hook_input(path: Path) -> dict[str, Any]:
+    raw = path.read_text(encoding="utf-8")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        value = json.loads(_repair_invalid_json_escapes(raw))
+    if not isinstance(value, dict):
+        raise ValueError("hook-input-not-object")
+    return resolve_hook_input(value)
+
+
+def resolve_hook_input(value: dict[str, Any]) -> dict[str, Any]:
+    """Refresh a moved transcript without reopening the transport file."""
+    value = dict(value)
+    transcript = value.get("transcript_path")
+    session_id = value.get("session_id")
+    if isinstance(transcript, str) and transcript and isinstance(session_id, str):
+        if os.name == "nt" and transcript.startswith("\\\\?\\"):
+            transcript = "\\\\" + transcript[8:] if transcript.startswith("\\\\?\\UNC\\") else transcript[4:]
+        source = Path(transcript).expanduser()
+        codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+        archived = codex_home / "archived_sessions" / source.name
+        # Codex moves the rollout before the detached SessionEnd worker reads it.
+        if (not source.exists()
+                and source.resolve().is_relative_to((codex_home / "sessions").resolve())
+                and re.fullmatch(r"[0-9a-f-]{36}", session_id)
+                and source.name.startswith("rollout-")
+                and source.name.endswith(f"-{session_id}.jsonl")
+                and archived.is_file()):
+            value["transcript_path"] = str(archived)
+    return value
+
+
+def enqueue_flush(
+    state_dir: Path,
+    payload: dict[str, Any],
+    reason: str,
+    *,
+    vault_root: Path,
+    launcher: Callable[..., Any] = subprocess.Popen,
+) -> Path:
+    """Own the bounded transport from creation through worker cleanup."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    hook_input = state_dir / f"hookin-{uuid.uuid4().hex}.json"
+    transport = {key: payload.get(key) for key in ('session_id', 'transcript_path')}
+    atomic_write_json(hook_input, transport)
+    return enqueue_job(
+        state_dir, "flush",
+        {"hook_input": str(hook_input), "reason": reason,
+         "event_iso": dt.datetime.now().astimezone().isoformat()},
+        vault_root=vault_root, launcher=launcher,
+    )
+
+
+class _UnrecoverableWorkerInput(RuntimeError):
+    pass
+
+
+def enqueue_maintenance(
+    state_dir: Path, *, vault_root: Path, start_supervisor: bool = True,
+    launcher: Callable[..., Any] = subprocess.Popen,
+) -> Path:
+    """A separate lane keeps slow compilation from delaying conversation saves."""
+    lane = state_dir / "maintenance"
+    with locked(lane / "maintenance-admission"):
+        pending = None
+        with locked(lane / "worker-queue"):
+            for candidate in (_job_root(lane) / "pending").glob("*.json"):
+                job = _load_job_quarantined(lane, candidate)
+                if job is not None and job['kind'] == 'maintenance':
+                    pending = candidate
+                    break
+        if pending is None:
+            pending = enqueue_job(lane, "maintenance", {}, start_supervisor=False)
+    if start_supervisor:
+        ensure_supervisor(lane, vault_root=vault_root, launcher=launcher)
+    return pending
+
+
+def _job_timeout(kind: str) -> int:
+    if not isinstance(kind, str):
+        raise ValueError("worker-job-kind-invalid")
+    try:
+        return JOB_TIMEOUTS[kind]
+    except KeyError as exc:
+        raise ValueError("worker-job-kind-invalid") from exc
+
+
+def _job_lease_seconds(kind: str) -> int:
+    return _job_timeout(kind) + JOB_LEASE_GRACE_SECONDS
+
+
+def _report_terminal_maintenance(state_dir: Path, job: dict[str, Any]) -> None:
+    if job.get('kind') == 'maintenance' and job.get('status') == 'dead-letter':
+        write_health(state_dir.parent, component='compile',
+                     error='maintenance:' + str(job.get('last_error', 'worker-failed')))
+
+
+def _managed_hook_input(path: Path, state_dir: Path) -> bool:
+    try:
+        same_parent = path.absolute().parent.resolve() == state_dir.resolve()
+    except OSError:
+        return False
+    return same_parent and HOOK_INPUT_NAME.fullmatch(path.name) is not None
+
+
+def _sweep_stale_hook_inputs(state_dir: Path, now_epoch: float) -> None:
+    if not state_dir.exists():
+        return
+    referenced: set[Path] = set()
+    for state in ("pending", "claimed", "running", "dead-letter"):
+        for job_path in (_job_root(state_dir) / state).glob("*.json"):
+            try:
+                payload = _load_job(job_path).get("payload", {})
+            except ValueError:
+                return
+            hook_input = payload.get("hook_input") if isinstance(payload, dict) else None
+            if isinstance(hook_input, str) and hook_input:
+                referenced.add(Path(hook_input).resolve(strict=False))
+    for candidate in state_dir.glob("hookin-*.json"):
+        try:
+            if (
+                candidate.resolve(strict=False) not in referenced
+                and now_epoch - candidate.lstat().st_mtime >= STALE_HOOK_INPUT_SECONDS
+            ):
+                candidate.unlink()
+        except OSError:
+            # Kayıp ya da kilitli artık: sweep hiçbir zaman supervisor'ı düşürmez.
+            continue
+
+
+def _job_id_from_path(path: Path) -> str | None:
+    match = re.fullmatch(r"job-([0-9a-f]{32})\.json", path.name)
+    return match.group(1) if match else None
+
+
+def _finite_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except (OverflowError, ValueError):
+        return False
+
+
+def _validate_job(path: Path, value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("worker-job-not-object")
+    state = path.parent.name
+    job_id = value.get("job_id")
+    if state == "quarantined":
+        if (
+            value.get("schema_version") != JOB_SCHEMA_VERSION
+            or value.get("status") != "quarantined"
+            or not isinstance(job_id, str)
+            or re.fullmatch(r"[0-9a-f]{32}", job_id) is None
+            or path.name != f"job-{job_id}.json"
+            or not isinstance(value.get("payload_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["payload_sha256"]) is None
+            or not isinstance(value.get("reason_code"), str)
+            or value["reason_code"]
+            not in {"worker-job-json-invalid", "worker-job-schema-invalid"}
+        ):
+            raise ValueError("worker-quarantine-tombstone-invalid")
+        return value
+    if state not in JOB_STATES or state == "quarantined":
+        raise ValueError("worker-job-state-invalid")
+    if (
+        value.get("schema_version") != JOB_SCHEMA_VERSION
+        or not isinstance(job_id, str)
+        or re.fullmatch(r"[0-9a-f]{32}", job_id) is None
+        or path.name != f"job-{job_id}.json"
+        or not isinstance(value.get("kind"), str)
+        or value["kind"] not in JOB_KINDS
+        or value.get("status") != state
+        or not isinstance(value.get("payload"), dict)
+        or isinstance(value.get("generation"), bool)
+        or not isinstance(value.get("generation"), int)
+        or value["generation"] < 1
+        or isinstance(value.get("attempt"), bool)
+        or not isinstance(value.get("attempt"), int)
+        or not 0 <= value["attempt"] <= MAX_ATTEMPTS
+        or isinstance(value.get("enqueue_sequence"), bool)
+        or not isinstance(value.get("enqueue_sequence"), int)
+        or value["enqueue_sequence"] < 1
+        or any(
+            key in value and not _finite_number(value[key])
+            for key in (
+                "enqueued_ts",
+                "retry_scheduled_ts",
+                "next_attempt_ts",
+                "claimed_ts",
+                "running_ts",
+                "adopted_ts",
+                "recovered_ts",
+                "finished_ts",
+                "lease_until",
+            )
+        )
+    ):
+        raise ValueError("worker-job-schema-invalid")
+    if state in {"claimed", "running"} and (
+        value["attempt"] < 1
+        or not isinstance(value.get("claim_token"), str)
+        or re.fullmatch(r"[0-9a-f]{32}", value["claim_token"]) is None
+        or isinstance(value.get("owner_pid"), bool)
+        or not isinstance(value.get("owner_pid"), int)
+        or value["owner_pid"] < 1
+        or isinstance(value.get("lease_until"), bool)
+        or not isinstance(value.get("lease_until"), (int, float))
+        or value["lease_until"] <= 0
+    ):
+        raise ValueError("worker-job-schema-invalid")
+    if state in {"succeeded", "dead-letter"} and (
+        not isinstance(value.get("finished_ts"), int)
+        or value.get("claim_token") is not None
+    ):
+        raise ValueError("worker-job-schema-invalid")
+    return value
+
+
+def _load_job(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("worker-job-json-invalid") from exc
+    return _validate_job(path, value)
+
+
+def _quarantine_job(state_dir: Path, path: Path, reason_code: str) -> None:
+    try:
+        payload = path.read_bytes()
+        job_id = _job_id_from_path(path) or hashlib.sha256(
+            path.name.encode("utf-8") + b"\0" + payload
+        ).hexdigest()[:32]
+        quarantine = _job_root(state_dir) / "quarantined"
+        tombstone = quarantine / f"job-{job_id}.json"
+        payload_path = tombstone.with_suffix(".payload")
+        payload_sha256 = hashlib.sha256(payload).hexdigest()
+        atomic_write_bytes(payload_path, payload)
+        atomic_write_json(
+            tombstone,
+            {
+                "schema_version": JOB_SCHEMA_VERSION,
+                "job_id": job_id,
+                "status": "quarantined",
+                "reason_code": reason_code,
+                "payload_sha256": payload_sha256,
+                "payload_file": payload_path.name,
+                "source_state": path.parent.name,
+                "quarantined_ts": int(time.time()),
+            },
+            sort_keys=True,
+        )
+        path.unlink()
+    except OSError as exc:
+        raise ValueError("worker-quarantine-failed") from exc
+
+
+def _load_job_quarantined(state_dir: Path, path: Path) -> dict[str, Any] | None:
+    try:
+        return _load_job(path)
+    except ValueError as exc:
+        reason = (
+            "worker-job-json-invalid"
+            if str(exc) == "worker-job-json-invalid"
+            else "worker-job-schema-invalid"
+        )
+        _quarantine_job(state_dir, path, reason)
+        return None
+
+
+def _job_root(state_dir: Path) -> Path:
+    return state_dir / "worker-jobs"
+
+
+def _ensure_job_dirs(state_dir: Path) -> None:
+    for name in JOB_STATES:
+        (_job_root(state_dir) / name).mkdir(parents=True, exist_ok=True)
+
+
+def migrate_legacy_failed_jobs(
+    state_dir: Path,
+    *,
+    now: float | None = None,
+    _fail_after: str | None = None,
+) -> int:
+    observed_now = time.time() if now is None else now
+    source_dir = _job_root(state_dir) / "failed"
+    if not source_dir.is_dir():
+        return 0
+    _ensure_job_dirs(state_dir)
+    migrated = 0
+    with locked(state_dir / "worker-queue"):
+        for source in sorted(source_dir.glob("job-*.json")):
+            try:
+                original = json.loads(source.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError("worker-legacy-state-invalid") from exc
+            job_id = _job_id_from_path(source)
+            if (
+                not isinstance(original, dict)
+                or job_id is None
+                or original.get("job_id") != job_id
+                or original.get("status") != "failed"
+                or not isinstance(original.get("kind"), str)
+                or original["kind"] not in JOB_KINDS
+                or not isinstance(original.get("payload"), dict)
+            ):
+                raise ValueError("worker-legacy-state-invalid")
+            after = dict(original)
+            after.update(
+                {
+                    "schema_version": JOB_SCHEMA_VERSION,
+                    "status": "dead-letter",
+                    "terminal_reason": "legacy-failed",
+                    "retryable": False,
+                    "finished_ts": int(observed_now),
+                    "lease_until": 0,
+                }
+            )
+            after.pop("claim_token", None)
+            destination = _job_root(state_dir) / "dead-letter" / source.name
+            atomic_write_json(destination, after, sort_keys=True)
+            if _fail_after == "destination":
+                raise RuntimeError("worker-migration-injected:destination")
+            receipt = state_dir / f"worker-migration-{job_id}.json"
+            atomic_write_json(
+                receipt,
+                {
+                    "schema_version": 1,
+                    "status": "durable",
+                    "job_id": job_id,
+                    "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                    "destination_sha256": hashlib.sha256(
+                        destination.read_bytes()
+                    ).hexdigest(),
+                    "migrated_ts": int(observed_now),
+                },
+                sort_keys=True,
+            )
+            if _fail_after == "receipt":
+                raise RuntimeError("worker-migration-injected:receipt")
+            source.unlink()
+            migrated += 1
+    return migrated
+
+
+def inspect_worker_queue(state_dir: Path) -> dict[str, Any]:
+    root = _job_root(state_dir)
+    counts = {state: 0 for state in JOB_STATES}
+    invalid = 0
+    generation = 0
+    for state in JOB_STATES:
+        for path in sorted((root / state).glob("*.json")):
+            try:
+                job = _load_job(path)
+                if state == "quarantined":
+                    payload_path = path.with_name(str(job.get("payload_file", "")))
+                    if (
+                        not payload_path.is_file()
+                        or hashlib.sha256(payload_path.read_bytes()).hexdigest()
+                        != job["payload_sha256"]
+                    ):
+                        raise ValueError("worker-quarantine-payload-invalid")
+            except ValueError:
+                invalid += 1
+                continue
+            counts[state] += 1
+            value = job.get("generation", 0)
+            if isinstance(value, int) and not isinstance(value, bool):
+                generation = max(generation, value)
+    status = (
+        "error"
+        if invalid or counts["quarantined"]
+        else "warning"
+        if any(counts[state] for state in ("pending", "claimed", "running", "dead-letter"))
+        else "ok"
+    )
+    digest = hashlib.sha256(
+        json.dumps(
+            {"counts": counts, "generation": generation, "invalid": invalid},
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": 1,
+        "status": status,
+        "generation": generation,
+        "digest": digest,
+        "counts": counts,
+        "invalid": invalid,
+    }
+
+
+def _supervisor_receipt_path(state_dir: Path) -> Path:
+    return state_dir / "worker-supervisor.json"
+
+
+def _default_vault_root(state_dir: Path) -> Path:
+    try:
+        return vault_root_of(state_dir)
+    except IndexError as exc:
+        raise ValueError("worker-state-root-invalid") from exc
+
+
+def enqueue_job(
+    state_dir: Path,
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    start_supervisor: bool = True,
+    vault_root: Path | None = None,
+    launcher: Callable[..., Any] = subprocess.Popen,
+    now: float | None = None,
+) -> Path:
+    if not isinstance(kind, str) or kind not in JOB_KINDS:
+        raise ValueError("worker-job-kind-invalid")
+    if not isinstance(payload, dict):
+        raise ValueError("worker-job-payload-invalid")
+    observed_now = time.time() if now is None else now
+    _ensure_job_dirs(state_dir)
+    job_id = uuid.uuid4().hex
+    with locked(state_dir / "worker-queue"):
+        sequence_path = state_dir / "worker-sequence.json"
+        try:
+            sequence_state = json.loads(sequence_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            sequence_state = {}
+        previous_sequence = (
+            sequence_state.get("enqueue_sequence", 0)
+            if isinstance(sequence_state, dict)
+            else 0
+        )
+        enqueue_sequence = (
+            previous_sequence + 1
+            if isinstance(previous_sequence, int) and previous_sequence >= 0
+            else 1
+        )
+        atomic_write_json(
+            sequence_path,
+            {
+                "schema_version": JOB_SCHEMA_VERSION,
+                "enqueue_sequence": enqueue_sequence,
+            },
+        )
+        job = {
+            "schema_version": JOB_SCHEMA_VERSION,
+            "job_id": job_id,
+            "kind": kind,
+            "status": "pending",
+            "generation": 1,
+            "attempt": 0,
+            "enqueue_sequence": enqueue_sequence,
+            "enqueued_ts": int(observed_now),
+            "payload": payload,
+        }
+        path = _job_root(state_dir) / "pending" / f"job-{job_id}.json"
+        atomic_write_json(path, job)
+    if start_supervisor:
+        ensure_supervisor(
+            state_dir,
+            vault_root=vault_root or _default_vault_root(state_dir),
+            launcher=launcher,
+            now=observed_now,
+        )
+    return path
+
+
+def ensure_supervisor(
+    state_dir: Path,
+    *,
+    vault_root: Path,
+    launcher: Callable[..., Any] = subprocess.Popen,
+    now: float | None = None,
+) -> bool:
+    observed_now = time.time() if now is None else now
+    state_dir.mkdir(parents=True, exist_ok=True)
+    admission_lock = state_dir / "worker-admission"
+    token = ""
+    with locked(admission_lock):
+        receipt_path = _supervisor_receipt_path(state_dir)
+        try:
+            current = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            current = {}
+        if isinstance(current, dict):
+            lease_until = current.get("lease_until", 0)
+            owner_pid = current.get("owner_pid", 0)
+            if ((current.get("status") == "launching"
+                 and isinstance(lease_until, (int, float)) and lease_until > observed_now)
+                    or (current.get("status") == "running"
+                        and isinstance(owner_pid, int) and pid_is_alive(owner_pid))):
+                return False
+        previous_generation = (
+            current.get("generation", 0) if isinstance(current, dict) else 0
+        )
+        token = uuid.uuid4().hex
+        atomic_write_json(
+            receipt_path,
+            {
+                "schema_version": SUPERVISOR_SCHEMA_VERSION,
+                "status": "launching",
+                "generation": (
+                    previous_generation + 1
+                    if isinstance(previous_generation, int)
+                    else 1
+                ),
+                "launch_token": token,
+                "owner_pid": 0,
+                "lease_until": observed_now + LAUNCH_LEASE_SECONDS,
+                "updated_ts": int(observed_now),
+            },
+        )
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--vault",
+        str(vault_root),
+        "--state-dir",
+        str(state_dir),
+        "--token",
+        token,
+    ]
+    try:
+        spawn_detached(
+            command,
+            popen_factory=launcher,
+            cwd=vault_root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+    except OSError:
+        with locked(admission_lock):
+            current = json.loads(
+                _supervisor_receipt_path(state_dir).read_text(encoding="utf-8")
+            )
+            if isinstance(current, dict) and current.get("launch_token") == token:
+                current.update(
+                    {
+                        "status": "failed",
+                        "lease_until": 0,
+                        "updated_ts": int(observed_now),
+                    }
+                )
+                atomic_write_json(_supervisor_receipt_path(state_dir), current)
+        raise
+    return True
+
+
+def recover_stale_jobs(state_dir: Path, *, now: float | None = None) -> int:
+    observed_now = time.time() if now is None else now
+    _ensure_job_dirs(state_dir)
+    recovered = 0
+    with locked(state_dir / "worker-queue"):
+        # A crash can occur between the atomic JSON update and directory move.
+        # Complete only a valid recorded transition; never overwrite another job.
+        transitions = {'pending': {'claimed'}, 'claimed': {'running', 'pending', 'dead-letter'},
+                       'running': {'pending', 'succeeded', 'dead-letter'}}
+        for source_state, targets in transitions.items():
+            for path in sorted((_job_root(state_dir) / source_state).glob('*.json')):
+                try:
+                    value = json.loads(path.read_text(encoding='utf-8'))
+                    target = value.get('status') if isinstance(value, dict) else None
+                    if not isinstance(target, str) or target not in targets:
+                        continue
+                    destination = _job_root(state_dir) / target / path.name
+                    _validate_job(destination, value)
+                    if destination.exists():
+                        raise ValueError('worker-transition-target-exists')
+                    os.replace(path, destination)
+                except (OSError, UnicodeError, ValueError):
+                    # The normal loader preserves malformed records in quarantine.
+                    continue
+        for source_state in ("claimed", "running"):
+            for path in sorted((_job_root(state_dir) / source_state).glob("*.json")):
+                job = _load_job_quarantined(state_dir, path)
+                if job is None:
+                    continue
+                owner_pid = job.get("owner_pid", 0)
+                if isinstance(owner_pid, int) and pid_is_alive(owner_pid):
+                    continue
+                job["generation"] = int(job.get("generation", 0)) + 1
+                job.pop("claim_token", None)
+                job.pop("owner_pid", None)
+                job.pop("lease_until", None)
+                job["recovered_ts"] = int(observed_now)
+                if int(job.get("attempt", 0)) >= MAX_ATTEMPTS:
+                    job["status"] = "dead-letter"
+                    job['finished_ts'] = int(observed_now)
+                    job['last_error'] = 'worker-lease-expired'
+                    job['terminal_reason'] = 'retry-exhausted'
+                    job['retryable'] = False
+                    destination = _job_root(state_dir) / "dead-letter" / path.name
+                else:
+                    job["status"] = "pending"
+                    job["next_attempt_ts"] = observed_now + _retry_delay(
+                        int(job.get("attempt", 0)),
+                        RETRY_BASE_SECONDS,
+                    )
+                    destination = _job_root(state_dir) / "pending" / path.name
+                atomic_write_json(path, job)
+                os.replace(path, destination)
+                _report_terminal_maintenance(state_dir, job)
+                recovered += 1
+    return recovered
+
+
+def _claim_next_job(
+    state_dir: Path,
+    *,
+    now: float,
+    lease_seconds: int | None = None,
+) -> tuple[Path, dict[str, Any]] | None:
+    with locked(state_dir / "worker-queue"):
+        candidates: list[tuple[tuple[int, int, str], Path, dict[str, Any]]] = []
+        for path in (_job_root(state_dir) / "pending").glob("*.json"):
+            job = _load_job_quarantined(state_dir, path)
+            if job is None:
+                continue
+            next_attempt = job.get("next_attempt_ts", 0)
+            if not isinstance(next_attempt, (int, float)) or next_attempt > now:
+                continue
+            enqueue_sequence = job.get("enqueue_sequence")
+            sequence_sort = (
+                enqueue_sequence
+                if isinstance(enqueue_sequence, int) and enqueue_sequence >= 0
+                else 2**63 - 1
+            )
+            enqueued_ts = job.get("enqueued_ts", 0)
+            timestamp_sort = int(enqueued_ts) if isinstance(enqueued_ts, (int, float)) else 0
+            candidates.append(
+                (
+                    (sequence_sort, timestamp_sort, str(job.get("job_id", path.name))),
+                    path,
+                    job,
+                )
+            )
+        pending = min(candidates, default=None, key=lambda item: item[0])
+        if pending is None:
+            return None
+        _sort_key, pending_path, job = pending
+        effective_lease = (
+            _job_lease_seconds(str(job["kind"]))
+            if lease_seconds is None
+            else lease_seconds
+        )
+        token = uuid.uuid4().hex
+        job.update(
+            {
+                "status": "claimed",
+                "generation": int(job.get("generation", 0)) + 1,
+                "attempt": int(job.get("attempt", 0)) + 1,
+                "claim_token": token,
+                "owner_pid": os.getpid(),
+                "supervisor_pid": os.getpid(),
+                "lease_until": now + effective_lease,
+                "claimed_ts": int(now),
+            }
+        )
+        job.pop("next_attempt_ts", None)
+        atomic_write_json(pending_path, job)
+        claimed = _job_root(state_dir) / "claimed" / pending_path.name
+        os.replace(pending_path, claimed)
+        job["status"] = "running"
+        job["generation"] += 1
+        job["running_ts"] = int(now)
+        atomic_write_json(claimed, job)
+        running = _job_root(state_dir) / "running" / pending_path.name
+        os.replace(claimed, running)
+        return running, job
+
+
+def _retry_delay(attempt: int, base_seconds: int) -> int:
+    if base_seconds < 1:
+        raise ValueError("worker-retry-base-invalid")
+    bounded_attempt = max(1, attempt)
+    return base_seconds * (1 << (bounded_attempt - 1))
+
+
+def _finish_job(
+    state_dir: Path,
+    running: Path,
+    expected: dict[str, Any],
+    *,
+    status: str,
+    error: str = "",
+    terminal_reason: str = "",
+    now: float | None = None,
+    retry_base_seconds: int = RETRY_BASE_SECONDS,
+) -> None:
+    observed_now = time.time() if now is None else now
+    with locked(state_dir / "worker-queue"):
+        current = _load_job(running)
+        if (
+            current.get("claim_token") != expected.get("claim_token")
+            or current.get("job_id") != expected.get("job_id")
+        ):
+            raise ValueError("worker-job-claim-drift")
+        current["generation"] = int(current.get("generation", 0)) + 1
+        attempt = int(current.get("attempt", 0))
+        terminal = status
+        if status == "failed":
+            current["last_error"] = error or "worker-job-failed"
+            failures = current.get("failures", [])
+            if not isinstance(failures, list):
+                failures = []
+            failures.append(
+                {
+                    "attempt": attempt,
+                    "ts": int(observed_now),
+                    "error": current["last_error"],
+                }
+            )
+            current["failures"] = failures[-MAX_ATTEMPTS:]
+            if attempt >= MAX_ATTEMPTS:
+                terminal = "dead-letter"
+                current["terminal_reason"] = "retry-exhausted"
+                current["retryable"] = False
+                current["finished_ts"] = int(observed_now)
+            else:
+                terminal = "pending"
+                current["retry_scheduled_ts"] = int(observed_now)
+                current["next_attempt_ts"] = observed_now + _retry_delay(
+                    attempt,
+                    retry_base_seconds,
+                )
+                current.pop("claim_token", None)
+                current.pop("owner_pid", None)
+        elif status == "dead-letter":
+            current["last_error"] = error or "worker-job-unrecoverable-input"
+            current["terminal_reason"] = terminal_reason or "unrecoverable-input"
+            current["retryable"] = False
+            current["finished_ts"] = int(observed_now)
+            current.pop("retry_scheduled_ts", None)
+            current.pop("next_attempt_ts", None)
+        else:
+            current["finished_ts"] = int(observed_now)
+            current.pop("next_attempt_ts", None)
+        if terminal != "pending":
+            current.pop("claim_token", None)
+        current["status"] = terminal
+        current["lease_until"] = 0
+        atomic_write_json(running, current)
+        destination = _job_root(state_dir) / terminal / running.name
+        os.replace(running, destination)
+        _report_terminal_maintenance(state_dir, current)
+
+
+def _dispatch_job(vault_root: Path, state_dir: Path, job: dict[str, Any]) -> None:
+    payload = job.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("worker-job-payload-invalid")
+    kind = job.get("kind")
+    if kind == "maintenance":
+        import compile as compiler
+        import compile_state
+        from state_store import state_dir_of
+
+        memory_state = state_dir_of(vault_root)
+        with locked(memory_state / "compile", timeout=0):
+            if compiler._run_locked(vault_root, memory_state, False, 2, None):
+                raise RuntimeError("worker-maintenance-failed")
+        if compile_state.has_changes(vault_root):
+            enqueue_maintenance(memory_state, vault_root=vault_root, start_supervisor=False)
+        return
+    if kind == "flush":
+        import flush
+
+        hook_input = payload.get("hook_input")
+        reason = payload.get("reason")
+        event_iso = payload.get("event_iso")
+        if (
+            not isinstance(hook_input, str)
+            or not hook_input
+            or not isinstance(reason, str)
+            or not reason
+            or not isinstance(event_iso, str)
+            or not event_iso
+        ):
+            raise ValueError("worker-flush-payload-invalid")
+        hook_path = Path(hook_input)
+        try:
+            hook_payload = load_hook_input(hook_path)
+        except FileNotFoundError as exc:
+            raise _UnrecoverableWorkerInput("hook-input-missing") from exc
+        transcript_value = hook_payload.get("transcript_path")
+        transcript_path = (
+            Path(transcript_value).expanduser()
+            if isinstance(transcript_value, str) and transcript_value
+            else None
+        )
+        if transcript_path is not None and not transcript_path.is_file():
+            raise _UnrecoverableWorkerInput("transcript-missing")
+        args = argparse.Namespace(hook_input=hook_path, reason=reason)
+        try:
+            result = flush.flush_once(
+                args,
+                dt.datetime.fromisoformat(event_iso),
+                vault_root,
+                state_dir,
+                hook_input=hook_payload,
+            )
+        except FileNotFoundError as exc:
+            if transcript_path is not None and not transcript_path.is_file():
+                raise _UnrecoverableWorkerInput("transcript-missing") from exc
+            raise
+        if result != 0:
+            raise RuntimeError(f"worker-flush-failed:{result}")
+        return
+    raise ValueError("worker-job-kind-invalid")
+
+
+def _adopt_job(
+    state_dir: Path,
+    running: Path,
+    *,
+    now: float,
+    lease_seconds: int | None = None,
+) -> dict[str, Any]:
+    with locked(state_dir / "worker-queue"):
+        job = _load_job(running)
+        if job.get("status") != "running" or not job.get("claim_token"):
+            raise ValueError("worker-job-not-claimable")
+        job["owner_pid"] = os.getpid()
+        effective_lease = (
+            _job_lease_seconds(str(job["kind"]))
+            if lease_seconds is None
+            else lease_seconds
+        )
+        job["lease_until"] = now + effective_lease
+        job["adopted_ts"] = int(now)
+        job["generation"] = int(job.get("generation", 0)) + 1
+        atomic_write_json(running, job)
+        return job
+
+
+def execute_job_file(
+    vault_root: Path,
+    state_dir: Path,
+    running: Path,
+    *,
+    now: Callable[[], float] = time.time,
+) -> int:
+    job = _adopt_job(state_dir, running, now=now())
+    try:
+        _dispatch_job(vault_root, state_dir, job)
+    except _UnrecoverableWorkerInput as exc:
+        _finish_job(
+            state_dir,
+            running,
+            job,
+            status="dead-letter",
+            error=str(exc),
+            terminal_reason="unrecoverable-input",
+            now=now(),
+        )
+        return 1
+    except Exception as exc:
+        _finish_job(
+            state_dir,
+            running,
+            job,
+            status="failed",
+            error=exc.__class__.__name__,
+            now=now(),
+            retry_base_seconds=60 if job["kind"] == "maintenance" else RETRY_BASE_SECONDS,
+        )
+        return 1
+    _finish_job(
+        state_dir,
+        running,
+        job,
+        status="succeeded",
+        now=now(),
+    )
+    # Keep the input recoverable until the durable success transition is complete.
+    hook_input = job.get("payload", {}).get("hook_input")
+    if isinstance(hook_input, str) and _managed_hook_input(Path(hook_input), state_dir):
+        try:
+            Path(hook_input).unlink(missing_ok=True)
+        except OSError:
+            pass  # The existing unreferenced-input sweep can finish cleanup.
+    return 0
+
+
+def _run_claimed_job(
+    vault_root: Path,
+    state_dir: Path,
+    running: Path,
+    *,
+    timeout: float | None = None,
+) -> None:
+    job = _load_job(running)
+    effective_timeout = _job_timeout(str(job["kind"])) if timeout is None else timeout
+    with locked(state_dir / f"worker-child-{job['job_id']}", timeout=0):
+        result = run_with_tree_timeout(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--vault",
+                str(vault_root),
+                "--state-dir",
+                str(state_dir),
+                "--execute-job",
+                str(running),
+            ],
+            timeout=effective_timeout,
+            cwd=vault_root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    if result.returncode not in {0, 1}:
+        raise RuntimeError("worker-job-child-failed")
+    if running.exists():
+        # A child may exit before publishing its result. Complete recorded moves,
+        # or requeue its abandoned lease; process exit alone is never success.
+        recover_stale_jobs(state_dir)
+        if running.exists():
+            raise RuntimeError("worker-child-result-missing")
+
+
+def _has_pending(state_dir: Path) -> bool:
+    with locked(state_dir / "worker-queue"):
+        for path in (_job_root(state_dir) / "pending").glob("*.json"):
+            job = _load_job_quarantined(state_dir, path)
+            if job is None:
+                continue
+            return True
+    return False
+
+
+def _settle_supervisor(
+    state_dir: Path,
+    receipt_path: Path,
+    *,
+    owner_pid: int,
+    now: float,
+) -> bool:
+    with locked(state_dir / "worker-admission"):
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            receipt = {}
+        if not isinstance(receipt, dict) or receipt.get("owner_pid") != owner_pid:
+            return True
+        if _has_pending(state_dir):
+            receipt.update(
+                {
+                    "status": "running",
+                    "lease_until": now + SUPERVISOR_LEASE_SECONDS,
+                    "updated_ts": int(now),
+                }
+            )
+            atomic_write_json(receipt_path, receipt)
+            return False
+        receipt.update(
+            {
+                "status": "idle",
+                "lease_until": 0,
+                "updated_ts": int(now),
+            }
+        )
+        atomic_write_json(receipt_path, receipt)
+        return True
+
+
+def run_supervisor(
+    vault_root: Path,
+    state_dir: Path,
+    *,
+    launch_token: str = "",
+    now: Callable[[], float] = time.time,
+    job_runner: Callable[..., Any] = _run_claimed_job,
+) -> int:
+    _ensure_job_dirs(state_dir)
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(locked(state_dir / "worker-supervisor", timeout=0))
+        except LockUnavailable:
+            return 0
+        receipt_path = _supervisor_receipt_path(state_dir)
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            receipt = {}
+        if launch_token and (
+            not isinstance(receipt, dict)
+            or receipt.get("launch_token") != launch_token
+        ):
+            return 0
+        generation = receipt.get("generation", 0) if isinstance(receipt, dict) else 0
+        atomic_write_json(
+            receipt_path,
+            {
+                "schema_version": SUPERVISOR_SCHEMA_VERSION,
+                "status": "running",
+                "generation": generation + 1 if isinstance(generation, int) else 1,
+                "launch_token": launch_token,
+                "owner_pid": os.getpid(),
+                "lease_until": now() + SUPERVISOR_LEASE_SECONDS,
+                "updated_ts": int(now()),
+            },
+        )
+        migrate_legacy_failed_jobs(state_dir, now=now())
+        recover_stale_jobs(state_dir, now=now())
+        _sweep_stale_hook_inputs(state_dir, now())
+        while True:
+            claimed = _claim_next_job(state_dir, now=now())
+            if claimed is None:
+                if _settle_supervisor(
+                    state_dir,
+                    receipt_path,
+                    owner_pid=os.getpid(),
+                    now=now(),
+                ):
+                    break
+                time.sleep(1)  # Keep delayed retries alive without holding admission/queue locks.
+                continue
+            running, job = claimed
+            try:
+                job_runner(vault_root, state_dir, running)
+            except ProcessTreeTimeout:
+                if running.exists():
+                    latest = _load_job_quarantined(state_dir, running)
+                    if latest is not None:
+                        _finish_job(
+                            state_dir,
+                            running,
+                            latest,
+                            status="failed",
+                            error="ProcessTreeTimeout",
+                            now=now(),
+                        )
+            except Exception as exc:
+                if running.exists():
+                    latest = _load_job_quarantined(state_dir, running)
+                    if latest is not None:
+                        _finish_job(
+                            state_dir,
+                            running,
+                            latest,
+                            status="failed",
+                            error=exc.__class__.__name__,
+                            now=now(),
+                        )
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--vault", required=True, type=Path)
+    parser.add_argument("--state-dir", required=True, type=Path)
+    parser.add_argument("--token", default="")
+    parser.add_argument("--drain", action="store_true")
+    parser.add_argument("--execute-job", type=Path)
+    args = parser.parse_args()
+    vault_root = args.vault.resolve(strict=True)
+    state_dir = args.state_dir.resolve()
+    if args.execute_job is not None:
+        running = args.execute_job.resolve(strict=True)
+        try:
+            running.relative_to((_job_root(state_dir) / "running").resolve(strict=True))
+        except ValueError as exc:
+            raise ValueError("worker-execute-path-invalid") from exc
+        return execute_job_file(vault_root, state_dir, running)
+    return run_supervisor(
+        vault_root,
+        state_dir,
+        launch_token=args.token,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
