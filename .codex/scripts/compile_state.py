@@ -186,8 +186,9 @@ def publication_snapshot(vault_root: Path) -> PublicationSnapshot:
     state_dir = state_dir_of(Path(vault_root))
     pending = load_publication(state_dir) is not None
     publication_id = load_publication_token(state_dir)
+    pending_after_token = load_publication(state_dir) is not None
     return PublicationSnapshot(
-        pending=pending,
+        pending=pending or pending_after_token,
         publication_id=publication_id,
     )
 

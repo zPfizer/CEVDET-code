@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import vault_retrieval
 import doctor
+import hook
 import intake_contract
 import memory_ledger
 
@@ -249,6 +250,34 @@ class RetrievalRaceTests(unittest.TestCase):
             projected.unstable_paths,
             frozenset({disappearing.relative_to(root).as_posix()}),
         )
+
+    def test_hook_does_not_offer_raw_search_after_incomplete_retrieval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / ".codex/scripts/.state"
+            state.mkdir(parents=True)
+            with (
+                mock.patch.object(
+                    hook,
+                    "load_suppressed_hashes",
+                    return_value=frozenset({"0" * 64}),
+                ),
+                mock.patch.object(
+                    hook,
+                    "retrieve_vault_context_detailed",
+                    side_effect=OSError("vault-retrieval-incomplete"),
+                ),
+            ):
+                context = hook.handle_user_prompt(
+                    {"session_id": "race", "prompt": "Atlas kararı"},
+                    state,
+                    vault_root=root,
+                )
+
+        self.assertIn("Vault Arama Sorunu", context)
+        self.assertIn("kaynak tutarlılığı doğrulanmadan", context)
+        self.assertIn("Ham bilgi dosyalarına veya eski önbelleğe geçme", context)
+        self.assertNotIn("Mevcut dosya aramasıyla ilgili kaynaklara ulaşmayı dene", context)
 
 
 class DiagnosticBoundaryTests(unittest.TestCase):

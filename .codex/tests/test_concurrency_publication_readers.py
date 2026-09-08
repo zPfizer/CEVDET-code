@@ -37,6 +37,25 @@ class PublicationReaderTests(unittest.TestCase):
         compile_state.save_publication_token(self.state, 'a' * 32)
         compile_state.clear_publication(self.state)
 
+    def test_snapshot_detects_journal_created_while_reading_token(self):
+        read_token = compile_state.load_publication_token
+        def token(state):
+            self.pending()
+            return read_token(state)
+        with mock.patch.object(compile_state, 'load_publication_token', side_effect=token):
+            self.assertTrue(compile_state.publication_snapshot(self.root).pending)
+
+    def test_closing_snapshot_rejects_journal_created_while_reading_token(self):
+        memory = ledger.MemoryRead(self.root, frozenset())
+        memory.read_source(self.source)
+        read_token = compile_state.load_publication_token
+        def token(state):
+            self.pending()
+            return read_token(state)
+        with mock.patch.object(compile_state, 'load_publication_token', side_effect=token):
+            with self.assertRaisesRegex(ledger.MemoryPreferenceError, 'publication-pending'):
+                memory.check_knowledge_snapshot()
+
     def test_pending_blocks_direct_knowledge_read(self):
         self.pending()
         with self.assertRaisesRegex(ledger.MemoryPreferenceError, 'publication-pending'):

@@ -790,13 +790,22 @@ def handle_user_prompt(
                     'Ham notlara veya eski önbelleğe geçme; hafızadan kişisel bilgi yanıtlama. '
                     'Tercih kaydının onarılması gerektiğini kısa biçimde bildir.'
                 )
-            context.insert(
-                0,
-                "[Vault Arama Sorunu]\n"
-                "Vault araması tamamlanamadı; bilgi yok sonucuna varma. "
-                "Mevcut dosya aramasıyla ilgili kaynaklara ulaşmayı dene. "
-                "Ulaşamazsan bunu kısa ve açık söyle; teknik kayıtları cevaba dökme.",
-            )
+            if isinstance(exc, OSError) and str(exc) == "vault-retrieval-incomplete":
+                context.insert(
+                    0,
+                    "[Vault Arama Sorunu]\n"
+                    "Vault araması kaynak tutarlılığı doğrulanmadan tamamlanamadı; "
+                    "bilgi yok sonucuna varma. Ham bilgi dosyalarına veya eski önbelleğe "
+                    "geçme; eksik doğrulamayı açıkça bildir.",
+                )
+            else:
+                context.insert(
+                    0,
+                    "[Vault Arama Sorunu]\n"
+                    "Vault araması tamamlanamadı; bilgi yok sonucuna varma. "
+                    "Mevcut dosya aramasıyla ilgili kaynaklara ulaşmayı dene. "
+                    "Ulaşamazsan bunu kısa ve açık söyle; teknik kayıtları cevaba dökme.",
+                )
             try:
                 atomic_write(
                     state_dir / "runtime-vault-retrieval.json",

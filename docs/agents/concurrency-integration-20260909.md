@@ -66,12 +66,17 @@ aktif indeks yolu sınandı. Metadata büyümesine ayrıca sınır koymak bu akt
   Arama bu sanal entry'leri MemoryRead üzerinden doğrular; fiziksel view zorunluluğu
   getirmez, raw fallback veya dosya oluşturma yapmaz.
 
+- Publication snapshot token okumasından sonra journal'ı yeniden kontrol eder.
+- Kaynak kararsızlığı nedeniyle tamamlanamayan retrieval, hook'ta ham dosya/eski
+  cache fallback'ine yönlendirilmez. Bu son iki sınır da bağımsız kapanış
+  incelemesi ve kontrollü regresyonlarla doğrulandı.
+
 ## Doğrulama
 
 - Eski dalın 666 test sonucu tarihsel kanıttır; güncel code-only sonuç değildir.
 - İlk birleşik 861 test koşusu 8 failure/4 error verdi. Uyarlamalar ve bulunan
   yarışlar giderildi; ara birleşik koşuda 863 test, son yerel Windows koşusunda
-  870 test (88.631 saniye, OK) geçti. GitHub CI sonucu ayrıca raporlanır.
+  873 test (87.712 saniye, OK) geçti. GitHub CI sonucu ayrıca raporlanır.
 - Yayın retry regresyonları eski b800 adayında 2 RED, düzeltmede 2 GREEN verdi.
 - Süreç cleanup, publication ve reader/reflection incelemelerinde bildirilen
   maddi bulgular kaynak düzeltmeleri ve odaklı testlerle giderildi.
