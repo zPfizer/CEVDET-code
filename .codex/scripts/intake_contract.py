@@ -162,15 +162,20 @@ def _git_new_paths(vault_root: Path) -> tuple[Path, ...]:
     )
     paths: set[Path] = set()
     for command in commands:
-        result = subprocess.run(
-            command,
-            cwd=vault_root,
-            check=False,
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            raise ValueError("intake-git-status-failed")
-        for raw in result.stdout.decode("utf-8", errors="strict").split("\0"):
+        try:
+            result = subprocess.run(
+                command,
+                cwd=vault_root,
+                check=False,
+                capture_output=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                raise ValueError("intake-git-status-failed")
+            output = result.stdout.decode("utf-8", errors="strict")
+        except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
+            raise ValueError("intake-git-status-failed") from exc
+        for raw in output.split("\0"):
             if raw:
                 paths.add(Path(raw))
     return tuple(sorted(paths, key=lambda item: item.as_posix()))
@@ -184,7 +189,21 @@ def main(
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="*", type=Path)
     args = parser.parse_args(argv)
-    paths = tuple(args.paths) if args.paths else _git_new_paths(vault_root)
+    if args.paths:
+        paths = tuple(args.paths)
+    else:
+        try:
+            paths = _git_new_paths(vault_root)
+        except ValueError:
+            print(json.dumps({
+                "status": "fail",
+                "checked": 0,
+                "violations": [{
+                    "path": "<git>",
+                    "issues": ["intake-git-status-failed"],
+                }],
+            }, ensure_ascii=True, sort_keys=True))
+            return 1
     findings: list[dict[str, object]] = []
     checked = 0
     for relative in paths:

@@ -1,6 +1,6 @@
 # Audit bulgularının uygulama paketleri
 
-Tarih: 8 Eylül 2026. Durum: planlandı; runtime uygulaması yapılmadı.
+Tarih: 8 Eylül 2026. Bu tarihsel paket planıdır; güncel concurrency aktarımı ve açık kalan sınırlar [entegrasyon kaydında](concurrency-integration-20260909.md) tutulur. Aynı düzeltmeyi yeniden uygulamadan önce o kaydı ve güncel PR/commit durumunu kontrol et.
 
 Bu kayıt, PR #1/#2 içerik incelemesindeki geçerli adayları eski auditlerle eşler.
 Bütün geçmiş auditlerin kapandığı veya bütün bulguların burada toplandığı iddiası değildir.

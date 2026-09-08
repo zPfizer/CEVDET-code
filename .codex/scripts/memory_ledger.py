@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from contextlib import contextmanager
 import datetime as dt
 import hashlib
@@ -11,6 +11,7 @@ from typing import Callable, Iterator, Sequence
 import unicodedata
 
 from file_lock import locked
+from compile_state import PolicyError, PublicationSnapshot, require_publication_snapshot
 from state_store import atomic_write_text
 from profile_guard import PROFILE_RELATIVE, check_profile
 from user_evidence import filter_evidence, USER_LINK, proof_for_link
@@ -549,6 +550,19 @@ class MemoryRead:
 
     _vault_root: Path
     _hashes: frozenset[str]
+    _publication: PublicationSnapshot | None = field(default=None, init=False, repr=False, compare=False)
+
+    def check_knowledge_snapshot(self) -> None:
+        # Track only knowledge consumers; an interrupted compile must not block daily/Companion writes.
+        try:
+            current = require_publication_snapshot(self._vault_root, self._publication)
+        except PolicyError as exc:
+            raise MemoryPreferenceError(f'memory-{exc}') from exc
+        object.__setattr__(self, '_publication', current)
+
+    def _check_source_publication(self, relative: str) -> None:
+        if self._publication is not None or relative.startswith(('knowledge/', '.codex/private-memory/views/')):
+            self.check_knowledge_snapshot()
 
     @property
     def active(self) -> bool:
@@ -574,6 +588,7 @@ class MemoryRead:
             return None
         text = self.filter(text)
         root = self._vault_root.resolve(strict=True)
+        self._check_source_publication(source_relative)
         if PurePosixPath(source_relative).parts[0] != 'daily':
             lines = []
             for line in text.splitlines(keepends=True):
@@ -590,7 +605,9 @@ class MemoryRead:
         if source_relative == PROFILE_RELATIVE and check_profile(
             root, text, read_source=lambda path: self.read_source(path)[1],
         ):
+            self._check_source_publication(source_relative)
             return None
+        self._check_source_publication(source_relative)
         return sanitize_text(text, max_chars=None)[0]
 
     def read_source(self, path: Path, *, relative: str | None = None) -> tuple[Path, str | None]:
@@ -614,6 +631,7 @@ class MemoryRead:
             and self.excludes(_COMPANION_SOURCE_ALIASES[resolved_identity])
         ):
             return source_relative, None
+        self._check_source_publication(resolved_identity)
         if resolved_identity in _COMPANION_SOURCE_ALIASES.values() and (root / _COMPANION_CANONICAL).is_file():
             from companion_memory import render_views
             text = render_views(root, hashes=self._hashes, memory=self).get(source.name)
@@ -632,9 +650,14 @@ class MemoryRead:
 
         def read(path: Path) -> str | None:
             relative = path.resolve().relative_to(self._vault_root.resolve()).as_posix()
-            return None if self.excludes(relative) else self.filter(path.read_text(encoding='utf-8'))
+            self._check_source_publication(relative)
+            text = None if self.excludes(relative) else self.filter(path.read_text(encoding='utf-8'))
+            self._check_source_publication(relative)
+            return text
 
-        return check_profile(self._vault_root, read_source=read)
+        issues = check_profile(self._vault_root, read_source=read)
+        self._check_source_publication(PROFILE_RELATIVE)
+        return issues
 
     def views(
         self,
@@ -646,12 +669,17 @@ class MemoryRead:
         if not self.active or not write:
             return {}
         try:
-            return materialize_memory_views(
+            for relative, _title in sources:
+                self._check_source_publication(relative)
+            views = materialize_memory_views(
                 self._vault_root,
                 sources,
                 self._hashes,
                 alias_sources=alias_sources,
             )
+            if self._publication is not None:
+                self.check_knowledge_snapshot()
+            return views
         except (OSError, ValueError) as exc:
             if str(exc) == 'memory-preferences-changed':
                 raise MemoryPreferenceError('memory-preferences-changed') from exc
@@ -667,12 +695,17 @@ class MemoryRead:
         if not self.active:
             return {}, {}
         try:
-            return _render_memory_views(
+            for relative, _title in sources:
+                self._check_source_publication(relative)
+            views = _render_memory_views(
                 self._vault_root,
                 sources,
                 self._hashes,
                 alias_sources=alias_sources,
             )
+            if self._publication is not None:
+                self.check_knowledge_snapshot()
+            return views
         except (OSError, ValueError) as exc:
             raise MemoryPreferenceError('memory-view-unavailable') from exc
 
@@ -682,7 +715,10 @@ def memory_read(vault_root: Path) -> Iterator[MemoryRead]:
     """Reject a completed read if a concurrent preference change made it stale."""
     private = vault_root / '.codex/private-memory'
     hashes = load_suppressed_hashes(private)
-    yield MemoryRead(vault_root, hashes)
+    memory = MemoryRead(vault_root, hashes)
+    yield memory
+    if memory._publication is not None:
+        memory.check_knowledge_snapshot()
     if load_suppressed_hashes(private) != hashes:
         raise MemoryPreferenceError('memory-preferences-changed')
 

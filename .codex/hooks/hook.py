@@ -80,6 +80,7 @@ SESSION_SECTION_TARGET_CHARS = {
 KNOWLEDGE_INDEX_CONTEXT_TARGET_CHARS = SESSION_SECTION_TARGET_CHARS["Bilgi İndeksi"]
 
 from file_lock import locked  # noqa: E402
+from companion_memory import has_pending_reflection, request_reflection  # noqa: E402
 from memory_ledger import (  # noqa: E402
     load_suppressed_hashes,
     MemoryDirective,
@@ -114,6 +115,11 @@ from state_store import (  # noqa: E402
 
 USER_PROMPT_CONTEXT_TARGET_CHARS = 3_800
 LOCAL_MEMORY_ROOT = CODEX_DIR / "private-memory"
+MEMORY_PUBLICATION_WARNING = (
+    '[Hafıza Güncellemesi] Bilgi yayınının tutarlılığı henüz doğrulanamadı. '
+    'Ham bilgi dosyalarına veya eski önbelleğe geçme; bilgi yok sonucuna varma. '
+    'Eksik doğrulamayı kısa biçimde bildir.'
+)
 
 _LEADING_SKILL_LINK = re.compile(
     r"^\s*\[\$[^\]\r\n]+\]\(([^)\r\n]+)\)\s*",
@@ -458,10 +464,10 @@ def build_session_context(
 ) -> str:
     sections: list[str] = []
     reflection = state_dir / "needs-reflection"
-    if reflection.is_file():
+    if has_pending_reflection(state_dir):
         detail = _read_limited(reflection, 1)
         sections.append(
-            "[Hafıza Uyarısı]\nÖnceki oturum ilişki hafızasını güncellemeden bitti. "
+            "[Hafıza Uyarısı]\nÖnceki oturumun hafıza güncellemesi henüz doğrulanmadı. "
             + detail
         )
         # Reading the warning is not evidence that the missing update completed.
@@ -517,6 +523,7 @@ def build_session_context(
         last_session = _last_session(source('Son Oturum'), memory=memory)
         rules = _read_limited(source('Kurallar'), None, memory=memory)
         journal = _last_journal(source('Son Journal'), memory=memory)
+        memory.check_knowledge_snapshot()
         index = _compact_knowledge_index(source('Bilgi İndeksi'), memory=memory)
         daily = _recent_daily_tail(
             vault_root,
@@ -575,13 +582,12 @@ def _increment_prompt_count(
     record_path: Path,
     *,
     meaningful: bool = False,
-    last_session_mtime: float = 0,
 ) -> int:
     with locked(record_path):
         try:
             record = json.loads(record_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            record = {"prompt_count": 0, "last_session_mtime": last_session_mtime}
+            record = {"prompt_count": 0}
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError("conversation-state-unreadable") from exc
         if not isinstance(record, dict):
@@ -714,14 +720,10 @@ def handle_user_prompt(
                 "aşağıdaki vault kaynağını belirt, belirsiz veya eski bilgiyi kesinleştirme."
             )
     record_path = state_dir / f"conversation-{session_key(session_id)}.json"
-    last_session = vault_root / "🔮 850-Companion" / "Last-Session.md"
     try:
         count = _increment_prompt_count(
             record_path,
             meaningful=meaningful_prompt,
-            last_session_mtime=(
-                last_session.stat().st_mtime if last_session.exists() else 0
-            ),
         )
     except (OSError, ValueError):
         count = 0
@@ -781,6 +783,8 @@ def handle_user_prompt(
                 )
         except (OSError, UnicodeError, ValueError) as exc:
             if isinstance(exc, MemoryPreferenceError):
+                if str(exc).startswith('memory-publication-'):
+                    return MEMORY_PUBLICATION_WARNING
                 return (
                     '[Hafıza Tercihi Sorunu] Unutma tercihleri güvenilir biçimde okunamadı. '
                     'Ham notlara veya eski önbelleğe geçme; hafızadan kişisel bilgi yanıtlama. '
@@ -856,27 +860,12 @@ def _mark_reflection_if_needed(payload: dict[str, Any]) -> None:
             raise ValueError("conversation-state-not-object-for-reflection")
         count_value = record.get("prompt_count", 0)
         count = count_value if isinstance(count_value, int) else 0
-        previous_value = record.get("last_session_mtime", 0)
-        previous_mtime = (
-            float(previous_value)
-            if isinstance(previous_value, (int, float))
-            else 0
-        )
-        meaningful_prompt_seen = record.pop("meaningful_prompt_seen", False) is True
+        meaningful_prompt_seen = record.get("meaningful_prompt_seen", False) is True
+        if meaningful_prompt_seen or count >= 5:
+            request_reflection(STATE_DIR, session_id)
+        record.pop("meaningful_prompt_seen", None)
         record["reflection_checked"] = True
         atomic_write_json(conversation, record)
-    last_session = MEMORY_DIR / "Last-Session.md"
-    current_mtime = last_session.stat().st_mtime if last_session.exists() else 0
-    if (meaningful_prompt_seen or count >= 5) and current_mtime <= previous_mtime:
-        reason = (
-            "meaningful-sessionend"
-            if meaningful_prompt_seen
-            else "prompt-count-fallback"
-        )
-        atomic_write(
-            STATE_DIR / "needs-reflection",
-            f"{reason}: oturum {count} kullanıcı mesajıyla kapandı. session={session_key(session_id)}\n",
-        )
 
 
 def enqueue_flush(
@@ -1052,8 +1041,8 @@ def _run_session_end_cleanup(
         return
     failures: list[str] = []
     steps = (
-        ("flush", lambda: enqueue_flush(payload, "sessionend")),
         ("reflection", lambda: _mark_reflection_if_needed(payload)),
+        ("flush", lambda: enqueue_flush(payload, "sessionend")),
     )
     for name, step in steps:
         try:
@@ -1061,7 +1050,7 @@ def _run_session_end_cleanup(
         except Exception:
             failures.append(name)
     if failures:
-        raise ValueError("session-end-cleanup-partial:" + ",".join(failures))
+        raise ValueError("session-end-cleanup-partial:" + ",".join(sorted(failures)))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1093,11 +1082,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 and bool(session_id)
                 and is_read_only_turn(STATE_DIR, session_id)
             )
-            emitted_context = build_session_context(
-                VAULT_ROOT,
-                STATE_DIR,
-                write_views=not read_only,
-            )
+            try:
+                emitted_context = build_session_context(
+                    VAULT_ROOT,
+                    STATE_DIR,
+                    write_views=not read_only,
+                )
+            except MemoryPreferenceError as exc:
+                if not str(exc).startswith('memory-publication-'):
+                    raise
+                emitted_context = MEMORY_PUBLICATION_WARNING
             try:
                 if read_only:
                     emitted_context += (
