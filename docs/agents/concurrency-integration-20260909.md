@@ -41,6 +41,10 @@ aktif indeks yolu sınandı. Metadata büyümesine ayrıca sınır koymak bu akt
 - Eski sıkı wrapper-exit testi Job Object active_processes=0 iken kısa süre daha
   canlı PID görebiliyordu. Bounded sonlanma sinyali bekleniyor; sabit sleep ile
   assertion gizlenmedi. PID readiness fixture'ı dosyanın tam yazılmasını bekler.
+- Normal owned Windows launch, CI gibi breakaway izni vermeyen host job içinde
+  nested Job Object olarak açılır; atomik sahiplik korunur. Yalnız açık
+  `spawn_detached` çağrısı breakaway ister. Gerçek kısıtlı host fixture
+  başlangıçta AccessDenied verdi; düzeltmeden sonra süreç paketi geçti.
 - İç model cleanup hatası tuple/genel OSError yolunda sıradan retry'ye dönüşmüyor.
   Worker lane fence'i ve child fence'in parent'a taşınması korundu. Doğrudan
   compiler CLI yolu maintenance lane'ini durdurur; belirsiz süreçte stage korunur.
@@ -59,13 +63,13 @@ aktif indeks yolu sınandı. Metadata büyümesine ayrıca sınır koymak bu akt
 - Eski dalın 666 test sonucu tarihsel kanıttır; güncel code-only sonuç değildir.
 - İlk birleşik 861 test koşusu 8 failure/4 error verdi. Uyarlamalar ve bulunan
   yarışlar giderildi; ara birleşik koşuda 863 test, son yerel Windows koşusunda
-  866 test (86.011 saniye, OK) geçti. GitHub CI sonucu ayrıca raporlanır.
+  867 test (89.246 saniye, OK) geçti. GitHub CI sonucu ayrıca raporlanır.
 - Yayın retry regresyonları eski b800 adayında 2 RED, düzeltmede 2 GREEN verdi.
 - Süreç cleanup, publication ve reader/reflection incelemelerinde bildirilen
   maddi bulgular kaynak düzeltmeleri ve odaklı testlerle giderildi.
 - Windows tam komut: `python -B -X utf8 -m unittest discover -s .codex/tests -q`.
-- CI'da ayrıca gerçek Linux süreç grubu testleri çalışır. Bu dar kontrol tüm
-  POSIX ürününün veya Windows testlerinin POSIX karşılığının doğrulandığı anlamına gelmez.
+- Teslim kapsamı Windows'tur. Kullanıcının kapsam düzeltmesiyle ek Linux CI işi
+  kaldırıldı; gerçek POSIX için tam doğrulama iddiası verilmez.
 - Code-only checkout'ta populated Vault doctor çalıştırılmadı. Eski iki doctor
   FAIL'i yeni çalışma için PASS veya güncel sağlık sonucu sayılmaz. Canlı App,
   gerçek model ve fiziksel güç kesintisi doğrulanmadı; hook'lar açılmadı.

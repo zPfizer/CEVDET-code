@@ -1537,8 +1537,6 @@ class ProcessControlTests(unittest.TestCase):
                 "run",
                 side_effect=subprocess.TimeoutExpired(["taskkill"], 10),
             ),
-            mock.patch.object(process_control.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True),
-            mock.patch.object(process_control.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True),
             mock.patch.object(process_control.os, "name", "nt"),
         ):
             try:

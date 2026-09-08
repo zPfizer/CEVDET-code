@@ -350,7 +350,7 @@ def _create_process_with_job(
     storage, attribute_pointer, keep_alive = _attribute_list_for_job(job, startup_info)
     del proc_attrs, thread_attrs
     command_buffer = ctypes.create_unicode_buffer(command_line) if command_line is not None else None
-    flags = int(creation_flags) | _EXTENDED_STARTUPINFO_PRESENT | _CREATE_BREAKAWAY_FROM_JOB
+    flags = int(creation_flags) | _EXTENDED_STARTUPINFO_PRESENT
     if env_mapping is not None:
         flags |= _CREATE_UNICODE_ENVIRONMENT
     native_startup = _native_startup_info(startup_info, attribute_pointer)
@@ -387,9 +387,9 @@ def _launch_windows_owned(
     # there is no suspended, unassigned process window for an owner crash.
     job = _create_windows_job()
     launch_options = dict(options)
-    launch_options["creationflags"] = int(
-        launch_options.get("creationflags", 0)
-    ) | _CREATE_BREAKAWAY_FROM_JOB
+    # Normal owned children remain inside host job constraints (e.g. CI).
+    # Only spawn_detached requests an explicit breakaway.
+    launch_options["creationflags"] = int(launch_options.get("creationflags", 0))
     startup_info = launch_options.get("startupinfo")
     startup_info = (
         subprocess.STARTUPINFO()

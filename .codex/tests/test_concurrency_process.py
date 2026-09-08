@@ -41,6 +41,32 @@ def _read_pid(path: Path, timeout: float = 5.0) -> int:
 
 @unittest.skipUnless(os.name == "nt", "Windows Job Object contract")
 class WindowsProcessControlTests(unittest.TestCase):
+    def test_owned_launch_works_inside_a_non_breakaway_host_job(self):
+        original_create_job = process_control._create_windows_job
+
+        def restricted_host_job():
+            job = original_create_job()
+            limits = process_control._JobObjectExtendedLimitInformation()
+            limits.basic_limit_information.limit_flags = process_control._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            api = process_control._windows_kernel32()
+            if not api.SetInformationJobObject(job, process_control._JOBOBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(limits), ctypes.sizeof(limits)):
+                process_control._close_windows_handle(job)
+                raise OSError('could not configure synthetic host job')
+            return job
+
+        child = (
+            "import sys,subprocess; sys.path.insert(0,sys.argv[1]); import process_control as pc; "
+            "r=pc.run_with_tree_timeout([sys.executable,'-c','print(12345)'],timeout=5,stdout=subprocess.PIPE,text=True); "
+            "print(r.stdout,end=''); sys.exit(r.returncode)"
+        )
+        with mock.patch.object(process_control, '_create_windows_job', side_effect=restricted_host_job):
+            result = process_control.run_with_tree_timeout(
+                [sys.executable, '-c', child, str(Path(process_control.__file__).parent)],
+                timeout=10, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+        self.assertEqual(result.stdout.strip(), b'12345')
+
     def _kill_test_pid(self, pid: int | None) -> None:
         if pid is not None and process_control.pid_is_alive(pid):
             subprocess.run(

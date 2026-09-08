@@ -32,17 +32,3 @@ jobs:
           TMP: ${{ runner.temp }}
         run: python -B -X utf8 -m unittest discover -s .codex/tests -q
 
-  posix-process-tests:
-    name: Process tests (Linux)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.14'
-      - name: Real POSIX process contract
-        working-directory: .codex/tests
-        run: python -B -X utf8 -m unittest test_codex_brain.ProcessControlTests test_concurrency_process.PosixCleanupContractTests -v
