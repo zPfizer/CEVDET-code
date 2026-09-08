@@ -16,7 +16,7 @@ Yerel Vault ve eski Vault Git geçmişi bu depodan ayrıdır.
 
 ## İlk aktarım
 
-İlk PR, daha önce hazırlanmış kod aktarımı ile PR altyapısını getirir; uzak `main` başlangıçta yalnız README ve ignore kurallarını içerir. İlk PR merge edilmeden bağımsız geliştirmeyi boş uzak `main` üzerinden başlatma. Merge sonrası güncel `origin/main` temel alınır.
+Kod aktarımı PR #1, PR altyapısı ise onun üzerine kurulan PR #2 içindedir. #2 önce `codex/initial-code-import` branch'ini hedefler; #1 merge edildikten sonra #2 tabanını `main` yap ve diff ile CI sonucunu yeniden doğrula. Squash merge nedeniyle #1 commit'i geçmişte korunmazsa #2'nin yalnız altyapı commit'lerini güncel `origin/main` üzerine rebase et. İlk aktarım tamamlanmadan bağımsız geliştirmeyi boş uzak `main` üzerinden başlatma.
 
 ## Yerel Vault'a teslim
 
@@ -24,6 +24,6 @@ PR merge edilmesi canlı Vault'u değiştirmez. Açık hedef ve uygulama yetkisi
 
 ## İnceleme kurulumu
 
-Codex ayarlarında bu depo için otomatik Code review etkinleştirilir. Review kuralları kök `AGENTS.md` içindedir. Bunlar CI veya kullanıcı merge onayının yerine geçmez. GitHub hesap planı branch protection desteklemiyorsa sunucu tarafı zorunluluk varmış gibi raporlama.
+Codex ayarlarında bu depo için `Review my PRs` ve `On every push` etkinleştirilmiştir. Review kuralları kök `AGENTS.md` içindedir. Bunlar CI veya kullanıcı merge onayının yerine geçmez. GitHub hesap planı branch protection desteklemiyorsa sunucu tarafı zorunluluk varmış gibi raporlama.
 
 Kaynak: https://learn.chatgpt.com/docs/third-party/github (8 Eylül 2026).
