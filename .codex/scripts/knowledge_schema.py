@@ -7,6 +7,7 @@ import re
 import stat
 import unicodedata
 from user_evidence import USER_ANCHOR, USER_LINK, proof_for_link
+from compile_state import PolicyError, require_publication_snapshot
 
 
 CONCEPT_FIELDS = ("title", "aliases", "tags", "sources", "created", "updated")
@@ -732,6 +733,23 @@ def _validate_derived_connection(
 
 
 def validate_knowledge_tree(
+    root: Path,
+    *,
+    changed_paths: Sequence[str] = (),
+    previous_texts: Mapping[str, str] | None = None,
+) -> KnowledgeSchemaReport:
+    try:
+        publication = require_publication_snapshot(root)
+        report = _validate_knowledge_tree(root, changed_paths=changed_paths, previous_texts=previous_texts)
+        require_publication_snapshot(root, publication)
+        return report
+    except PolicyError as exc:
+        return KnowledgeSchemaReport(0, 0, 0, (f'knowledge:{exc}',))
+    except (OSError, UnicodeError):
+        return KnowledgeSchemaReport(0, 0, 0, ('knowledge:source-unreadable',))
+
+
+def _validate_knowledge_tree(
     root: Path,
     *,
     changed_paths: Sequence[str] = (),

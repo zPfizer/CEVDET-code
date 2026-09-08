@@ -112,6 +112,28 @@ class CompanionSplitTests(unittest.TestCase):
             })
             self.assertEqual(before, {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()})
 
+    def test_retrieval_reads_canonical_only_views_without_creating_missing_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            companion = _seed(root)
+            companion_memory.migrate(root)
+            companion_memory.publish(root, root / ".state", _summary("Kehribar kararı korundu."),
+                                     EVENT, "a" * 64, "one", frozenset())
+            for name in companion_memory.VIEW_NAMES:
+                (companion / name).unlink()
+            before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+            result = vault_retrieval.retrieve_vault_context_detailed(
+                root, "Kehribar kararı", write_cache=False,
+            )
+
+            self.assertGreater(result.hits, 0)
+            self.assertIn("Kehribar", result.text)
+            self.assertEqual(before, {
+                path.relative_to(root): path.read_bytes()
+                for path in root.rglob("*") if path.is_file()
+            })
+
     def test_source_read_and_search_prefer_new_manual_source_to_existing_stale_view(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

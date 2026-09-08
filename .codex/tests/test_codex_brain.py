@@ -1212,28 +1212,19 @@ class JsonlTailTests(unittest.TestCase):
 
 
 class ProcessControlTests(unittest.TestCase):
-    def test_windows_job_launch_failure_kills_suspended_process(self) -> None:
-        process = mock.Mock(pid=4242)
-
+    @unittest.skipUnless(os.name == "nt", "Windows native launch contract")
+    def test_windows_job_launch_failure_closes_job_without_running_child(self) -> None:
+        import _winapi
+        original_create = _winapi.CreateProcess
         with (
             mock.patch.object(process_control, "_create_windows_job", return_value=7),
-            mock.patch.object(process_control.subprocess, "Popen", return_value=process) as launch,
-            mock.patch.object(
-                process_control,
-                "_assign_windows_job",
-                side_effect=OSError("job assignment failed"),
-            ),
+            mock.patch.object(process_control.subprocess, "Popen", side_effect=OSError("native launch failed")) as launch,
             mock.patch.object(process_control, "_close_windows_handle") as close,
-            self.assertRaises(OSError),
+            self.assertRaisesRegex(OSError, "native launch failed"),
         ):
             process_control._launch_windows_owned(["child"], {})
-
-        self.assertTrue(
-            launch.call_args.kwargs["creationflags"]
-            & process_control._CREATE_SUSPENDED
-        )
-        process.kill.assert_called_once_with()
-        process.wait.assert_called_once_with(timeout=2)
+        self.assertEqual(launch.call_args.kwargs["startupinfo"].lpAttributeList[process_control._JOB_ATTRIBUTE_KEY], 7)
+        self.assertIs(_winapi.CreateProcess, original_create)
         close.assert_called_once_with(7)
 
     def test_stdin_input_is_consumed_by_communicate_not_popen(self) -> None:
@@ -1436,13 +1427,16 @@ class ProcessControlTests(unittest.TestCase):
 
         def fake_launch(_command, options, *, owned):
             launch_options.update(options)
-            self.assertFalse(owned)
+            self.assertTrue(owned)
             return process
 
         with mock.patch.object(process_control, "_launch_process", side_effect=fake_launch):
             process_control.run_with_tree_timeout(["child"], timeout=1)
             self.assertTrue(launch_options["creationflags"] & subprocess.CREATE_NO_WINDOW)
-        with mock.patch.object(process_control.subprocess, "run") as cleanup:
+        process._beyin_process_identity = "test-process"
+        with mock.patch.object(process_control.subprocess, "run") as cleanup, \
+             mock.patch.object(process_control, "process_is_same", return_value=True):
+            cleanup.return_value.returncode = 0
             process_control.terminate_process_tree(process)
             self.assertTrue(cleanup.call_args.kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW)
         with mock.patch.object(memory_compile.subprocess, "run") as git:
@@ -1537,6 +1531,7 @@ class ProcessControlTests(unittest.TestCase):
 
         with (
             mock.patch.object(process_control, "_launch_process", return_value=StuckProcess()),
+            mock.patch.object(process_control, "process_identity", return_value="win32:test"),
             mock.patch.object(
                 process_control.subprocess,
                 "run",
@@ -2175,6 +2170,37 @@ class CodexRunnerTests(unittest.TestCase):
                     self.assertIsNone(reason)
                     self.assertEqual(text, prompt)
 
+    def test_large_unicode_prompt_reaches_stdin_without_argv_truncation(self) -> None:
+        def stub_argv(output_path: Path, *, sandbox: str, stage: Path | None) -> list[str]:
+            del sandbox, stage
+            return [
+                "-c",
+                (
+                    "import hashlib,sys\n"
+                    "from pathlib import Path\n"
+                    "payload=sys.stdin.buffer.read()\n"
+                    "Path(sys.argv[1]).write_text(\n"
+                    "    f'{len(payload)}:{hashlib.sha256(payload).hexdigest()}',\n"
+                    "    encoding='ascii'\n"
+                    ")\n"
+                ),
+                str(output_path),
+            ]
+
+        prompt = "Çözüm\0🔮" * 15_000
+        payload = prompt.encode("utf-8")
+        expected = f"{len(payload)}:{hashlib.sha256(payload).hexdigest()}"
+        with (
+            mock.patch.object(codex_runner, "find_codex", return_value=sys.executable),
+            mock.patch.object(codex_runner, "_exec_argv", side_effect=stub_argv),
+        ):
+            text, reason = codex_runner.run_exec(
+                prompt,
+                sandbox="read-only",
+                timeout=10,
+            )
+        self.assertEqual((text, reason), (expected, None))
+
     def test_child_environment_is_allowlisted_and_excludes_parent_secret(self) -> None:
         captured: dict[str, object] = {}
 
@@ -2237,6 +2263,7 @@ class CodexRunnerTests(unittest.TestCase):
         self.assertEqual(bounded.call_args.kwargs["timeout"], 240)
         self.assertEqual(bounded.call_args.kwargs["stdout"], subprocess.DEVNULL)
         self.assertEqual(bounded.call_args.kwargs["stderr"], subprocess.DEVNULL)
+        self.assertEqual(bounded.call_args.kwargs["input"], "özetle".encode("utf-8"))
         self.assertNotIn("capture_output", bounded.call_args.kwargs)
         self.assertNotIn("check", bounded.call_args.kwargs)
 
@@ -3876,12 +3903,12 @@ class HookTests(unittest.TestCase):
                 mock.patch.object(hook, "MEMORY_DIR", memory),
             ):
                 hook._mark_reflection_if_needed(payload)
-            marker = (state / "needs-reflection").read_text(encoding="utf-8")
+            pending = hook.has_pending_reflection(state)
             record = self._session_record(state, payload["session_id"])
 
         self.assertEqual(record["prompt_count"], 1)
         self.assertNotIn("meaningful_prompt_seen", record)
-        self.assertIn("meaningful-sessionend", marker)
+        self.assertTrue(pending)
 
     def test_nonmeaningful_short_session_end_does_not_mark_companion_refresh(
         self,
@@ -3915,8 +3942,9 @@ class HookTests(unittest.TestCase):
                 mock.patch.object(hook, "MEMORY_DIR", memory),
             ):
                 hook._mark_reflection_if_needed(payload)
+            pending = hook.has_pending_reflection(state)
 
-        self.assertFalse((state / "needs-reflection").exists())
+        self.assertFalse(pending)
 
     def test_fresh_first_messy_prompt_emits_complete_behavior_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

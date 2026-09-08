@@ -33,3 +33,14 @@ Doküman veya skill değişikliğinde yalnız ilgili diff'i ve referans yolları
 ## Teslim akışı
 
 Branch -> yerel testler -> özel GitHub'a push -> PR -> kullanıcı onayı -> merge sırasını koru. Merge sonrasında yerel Vault'a yalnız onaylanmış runtime kodu aktarılır. Bu checkout'tan canlı hook veya model ingestion kendiliğinden çalıştırılmaz.
+
+## PR düzeni
+
+Her bağımsız kod işi güncel `origin/main` üzerinden ayrı `codex/` branch ve worktree kullanır; ilk aktarım merge edilene kadar `docs/agents/pr-workflow.md` içindeki başlangıç sınırı geçerlidir. Aynı worktree'de eşzamanlı görev çalıştırma. PR şablonunu doldur, son commit'in CI ve inceleme sonuçlarını doğrula; yalnız kullanıcı onayıyla merge et. Tam akış: `docs/agents/pr-workflow.md`.
+
+## Code Review Rules
+
+- Bu deponun istenen teslim ve doğrulama ortamı Windows/Python 3.14'tür. POSIX-only bulguları ayrı platform sınırı olarak raporla; Windows etkisi olmayan POSIX testlerini bu teslimin merge koşuluna dönüştürme. Genel gizlilik ve veri kaybı bulgularını platform bahanesiyle dışlama.
+- Kişisel kaynak, günlük, knowledge, özel ayar veya çalışma state'inin kod deposuna taşınmasını ve geliştirme ortamında canlı Vault/model aktivasyonunu hata olarak bildir; sentetik fixture ve açıkça yetkilendirilmiş hedef işlemler istisnadır.
+- Kaynak/provenance ve gizlilik tercihlerini atlayan ham veri fallback'lerini, doğrulanmamış işlemi başarılı gösteren yolları bildir; okunamayan veya kullanım dışı kaynakta işlem kapalı kalmalıdır.
+- Kalıcı yazma ve worker kurtarma yollarında atomiklik, tekrar çalıştırılabilirlik ve süreç sahipliği kaybını denetle; eşzamanlılık veya belirsiz sonlandırma sessiz veri ezilmesine ya da yeniden yayınlamaya yol açmamalıdır.

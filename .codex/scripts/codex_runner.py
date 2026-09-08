@@ -8,7 +8,11 @@ import shutil
 import subprocess
 import tempfile
 
-from process_control import ProcessTreeTimeout, run_with_tree_timeout
+from process_control import (
+    ProcessTreeCleanupError,
+    ProcessTreeTimeout,
+    run_with_tree_timeout,
+)
 
 
 MEMORY_MODEL = "gpt-5.6-terra"
@@ -135,6 +139,7 @@ def run_exec(
     timeout: float,
     stage: Path | None = None,
     forbidden_root: Path | None = None,
+    propagate_cleanup_error: bool = False,
 ) -> tuple[str | None, str | None]:
     """Run one bounded, sandboxed, hook-disabled `codex exec`.
 
@@ -147,6 +152,8 @@ def run_exec(
     the run happens in the private temporary directory that holds the output
     file. ``forbidden_root`` refuses to run when that temporary directory
     landed inside a tree the sandbox must not be able to write.
+    Queue adapters set ``propagate_cleanup_error`` so an unverified child tree
+    reaches the durable worker fence instead of becoming a retryable reason.
     """
     try:
         codex = find_codex()
@@ -187,6 +194,10 @@ def run_exec(
                 return output_path.read_text(encoding="utf-8").strip(), None
             except OSError:
                 return None, None
+    except ProcessTreeCleanupError:
+        if propagate_cleanup_error:
+            raise
+        return None, "codex-cleanup-error"
     except ProcessTreeTimeout:
         return None, "codex-timeout"
     except OSError:

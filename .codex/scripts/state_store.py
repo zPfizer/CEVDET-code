@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import stat
 import tempfile
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from file_lock import locked
 
 
 HEALTH_SCHEMA_VERSION = 2
 STATE_DIR_PARTS = (".codex", "scripts", ".state")
+REPLACE_RETRY_SECONDS = 1.0
+REPLACE_RETRY_SLEEP_SECONDS = 0.02
+_WINDOWS_SHARE_ERRORS = frozenset({5, 32, 33})
 
 
 def session_scope(session_id: str | None) -> str:
@@ -39,6 +43,50 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_windows_share_error(exc: OSError) -> bool:
+    """Only Win32 sharing/lock violations are retryable replace races."""
+    return os.name == "nt" and getattr(exc, "winerror", None) in _WINDOWS_SHARE_ERRORS
+
+
+def replace_with_retry(
+    source: Path,
+    destination: Path,
+    *,
+    timeout: float = REPLACE_RETRY_SECONDS,
+    deadline: float | None = None,
+    before_replace: Callable[[], object] | None = None,
+) -> None:
+    """Replace without deleting the destination; bound Windows share retries."""
+    try:
+        timeout = float(timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("replace-timeout-invalid") from exc
+    if not math.isfinite(timeout):
+        raise ValueError("replace-timeout-invalid")
+    if deadline is None:
+        deadline = time.monotonic() + max(0.0, timeout)
+    else:
+        try:
+            deadline = float(deadline)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("replace-deadline-invalid") from exc
+        if not math.isfinite(deadline):
+            raise ValueError("replace-deadline-invalid")
+    while True:
+        if before_replace is not None:
+            before_replace()
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as exc:
+            if not _is_windows_share_error(exc):
+                raise
+            remaining = deadline - time.monotonic()
+            if not math.isfinite(remaining) or remaining <= 0:
+                raise
+            time.sleep(min(REPLACE_RETRY_SLEEP_SECONDS, remaining))
+
+
 def atomic_write_text(
     path: Path,
     text: str,
@@ -46,6 +94,7 @@ def atomic_write_text(
     fsync: bool = True,
     newline: str | None = None,
     keep_mode: bool = False,
+    deadline: float | None = None,
 ) -> None:
     """Aynı dizinde temp + `os.replace`; temp adı daima `.{ad}.*.tmp`.
 
@@ -68,12 +117,17 @@ def atomic_write_text(
                 os.fsync(handle.fileno())
         if mode is not None:
             temporary.chmod(mode)
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path, deadline=deadline)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def atomic_write_bytes(path: Path, payload: bytes) -> None:
+def atomic_write_bytes(
+    path: Path,
+    payload: bytes,
+    *,
+    deadline: float | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=path.parent,
@@ -86,7 +140,7 @@ def atomic_write_bytes(path: Path, payload: bytes) -> None:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path, deadline=deadline)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -100,6 +154,7 @@ def atomic_write_json(
     sort_keys: bool = False,
     fsync: bool = True,
     newline: str | None = None,
+    deadline: float | None = None,
 ) -> None:
     """`atomic_write_text` + sondaki `\\n`; biçim anahtarları json.dumps'a gider.
 
@@ -112,7 +167,13 @@ def atomic_write_json(
         separators=separators,
         sort_keys=sort_keys,
     )
-    atomic_write_text(path, encoded + "\n", fsync=fsync, newline=newline)
+    atomic_write_text(
+        path,
+        encoded + "\n",
+        fsync=fsync,
+        newline=newline,
+        deadline=deadline,
+    )
 
 
 def _load_health(path: Path) -> dict[str, Any]:

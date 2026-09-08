@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
 import re
+import uuid
 from typing import Any
 
 from file_lock import locked
@@ -14,7 +16,7 @@ from memory_ledger import (
     MemoryRead, contains_suppressed_unit, filter_suppressed_text, is_session_only,
     memory_read, memory_write_guard, sanitize_text, suppression_guard,
 )
-from state_store import atomic_write_bytes, atomic_write_json, atomic_write_text
+from state_store import atomic_write_bytes, atomic_write_json, atomic_write_text, session_scope
 from user_evidence import EVIDENCE, SOURCE
 
 
@@ -70,6 +72,83 @@ def _canonical_path(root: Path) -> Path:
     if daily.is_symlink() or daily.is_junction() or (daily.exists() and not daily.is_dir()):
         raise ValueError('companion-canonical-path-invalid')
     return _safe_path(root, ('daily', CANONICAL_RELATIVE.name), 'companion-canonical-path-invalid')
+
+
+@dataclass(frozen=True)
+class ReflectionToken:
+    request_id: str | None
+    legacy_digest: str | None
+
+
+def _reflection_path(state: Path, session_id: str) -> Path:
+    directory = state / 'reflection-requests'
+    if directory.is_symlink() or directory.is_junction():
+        raise ValueError('reflection-state-invalid')
+    return directory / f'{session_scope(session_id)}.json'
+
+
+def _reflection_bytes(path: Path) -> bytes | None:
+    if path.is_symlink() or path.is_junction():
+        raise ValueError('reflection-state-invalid')
+    try:
+        with path.open('rb') as source:
+            payload = source.read(4097)
+    except FileNotFoundError:
+        return None
+    if len(payload) > 4096:
+        raise ValueError('reflection-state-too-large')
+    return payload
+
+
+def capture_reflection(state: Path, session_id: str) -> ReflectionToken:
+    """Capture the request before reading the transcript; never mutate on read."""
+    payload = _reflection_bytes(_reflection_path(state, session_id))
+    request_id = None
+    if payload is not None:
+        try:
+            record = json.loads(payload.decode('utf-8'))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError('reflection-request-invalid') from exc
+        if (not isinstance(record, dict) or type(record.get('schema')) is not int
+                or record['schema'] != 1 or record.get('session_key') != session_scope(session_id)
+                or not isinstance(record.get('request_id'), str)
+                or re.fullmatch(r'[0-9a-f]{32}', record['request_id']) is None):
+            raise ValueError('reflection-request-invalid')
+        request_id = record['request_id']
+    legacy = _reflection_bytes(state / 'needs-reflection')
+    legacy_digest = None
+    if legacy is not None:
+        owners = set(re.findall(rb'\bsession=([0-9a-f]{64})\b', legacy))
+        if owners == {session_scope(session_id).encode('ascii')}:
+            legacy_digest = hashlib.sha256(legacy).hexdigest()
+    return ReflectionToken(request_id, legacy_digest)
+
+
+def request_reflection(state: Path, session_id: str) -> None:
+    # ponytail: one short reflection lock; split only if this becomes contention.
+    with memory_write_guard(state, session_id), locked(state / 'reflection'):
+        atomic_write_json(_reflection_path(state, session_id), {
+            'schema': 1,
+            'session_key': session_scope(session_id),
+            'request_id': uuid.uuid4().hex,
+        })
+
+
+def has_pending_reflection(state: Path) -> bool:
+    directory = _reflection_path(state, '').parent
+    return (state / 'needs-reflection').is_file() or any(directory.glob('*.json'))
+
+
+def acknowledge_reflection(state: Path, session_id: str, expected: ReflectionToken) -> None:
+    """Caller holds its memory-write guard and has committed complete coverage."""
+    if expected.request_id is None and expected.legacy_digest is None:
+        return
+    with locked(state / 'reflection'):
+        current = capture_reflection(state, session_id)
+        if expected.request_id is not None and current.request_id == expected.request_id:
+            _reflection_path(state, session_id).unlink(missing_ok=True)
+        if expected.legacy_digest is not None and current.legacy_digest == expected.legacy_digest:
+            (state / 'needs-reflection').unlink(missing_ok=True)
 
 
 def _without_evidence_metadata(text: str) -> str:
@@ -562,9 +641,6 @@ def publish(root: Path, state: Path, summary: str, event: dt.datetime,
                 if not path.is_file() or path.read_bytes() != payload:
                     _write_projection(path, payload)
             atomic_write_json(canonical_path, _catalog_payload(records, metadata), sort_keys=True)
-            reflection = state / 'needs-reflection'
-            if reflection.is_file() and f'session={session_key}' in reflection.read_text(encoding='utf-8'):
-                reflection.unlink()
 
 
 def _main(argv: list[str] | None = None) -> int:

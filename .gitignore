@@ -161,3 +161,27 @@
 **/settings.local.json
 /.codex/scripts/.state/
 /.codex/tansu-semantic-map.csv
+
+# PR infrastructure: explicit allowed paths
+!/.github/
+/.github/*
+!/.github/pull_request_template.md
+!/.github/workflows/
+/.github/workflows/*
+!/.github/workflows/tests.yml
+!/docs/agents/pr-workflow.md
+!/docs/agents/audit-packages-20260908.md
+!/.codex/tests/test_concurrency_checkpoint.py
+!/.codex/tests/test_concurrency_integration.py
+!/.codex/tests/test_concurrency_process.py
+!/.codex/tests/test_concurrency_publication.py
+!/.codex/tests/test_concurrency_publication_readers.py
+!/.codex/tests/test_concurrency_queue.py
+!/.codex/tests/test_concurrency_readers.py
+!/.codex/tests/test_concurrency_reflection.py
+!/.codex/tests/test_concurrency_replace.py
+!/.codex/tests/test_concurrency_transcript.py
+!/.codex/tests/test_concurrency_worker_cleanup.py
+!/.codex/tests/test_concurrency_publication_retry.py
+!/.codex/tests/test_concurrency_compile_cleanup.py
+!/docs/agents/concurrency-integration-20260909.md

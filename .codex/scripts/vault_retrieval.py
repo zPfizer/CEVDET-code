@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import math
+import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
@@ -35,6 +36,7 @@ MAX_CONTEXT_CHARS = 2_600
 MAX_EXCERPT_CHARS = 460
 CACHE_VERSION = 16
 CACHE_RELATIVE_PATH = Path(".codex/scripts/.state/vault-retrieval-cache.json")
+SOURCE_READ_ATTEMPTS = 3
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 MARKDOWN_LINK = re.compile(r"(?<!!)\[([^\]]*)\]\(([^)]+)\)")
 
@@ -175,6 +177,7 @@ class VaultMap(list[VaultEntry]):
         document_frequency: Counter[str],
         corpus_size: int | None = None,
         cache_result: dict[str, int | str] | None = None,
+        unstable_paths: frozenset[str] = frozenset(),
     ) -> None:
         super().__init__(entries)
         self.document_frequency = document_frequency
@@ -186,6 +189,7 @@ class VaultMap(list[VaultEntry]):
             "bytes": 0,
             "limit": MAX_CACHE_BYTES,
         }
+        self.unstable_paths = unstable_paths
 
 
 @dataclass(frozen=True)
@@ -501,6 +505,172 @@ def _source_snapshot(
     return relative, text, hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _source_signature(file_stat: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_mode,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+    )
+
+
+def _stable_entry_snapshot(
+    vault_root: Path,
+    path: Path,
+    read_entry: Callable[[Path, Path], VaultEntry | None],
+) -> tuple[VaultEntry | None, os.stat_result | None, bool]:
+    """Read one parsed note between matching lstat calls."""
+    for attempt in range(SOURCE_READ_ATTEMPTS):
+        try:
+            before = path.lstat()
+            if not stat.S_ISREG(before.st_mode):
+                return None, None, True
+            before_hash = _source_sha256(path)
+            entry = read_entry(vault_root, path)
+            after_hash = _source_sha256(path)
+            after = path.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            if attempt + 1 == SOURCE_READ_ATTEMPTS:
+                return None, None, True
+            continue
+        if before_hash != after_hash or _source_signature(before) != _source_signature(after):
+            if attempt + 1 == SOURCE_READ_ATTEMPTS:
+                return None, None, True
+            continue
+        return entry, after, False
+    return None, None, True
+
+
+def _is_virtual_companion_view(vault_root: Path, path: Path) -> bool:
+    try:
+        relative = path.relative_to(vault_root)
+    except ValueError:
+        return False
+    return (
+        relative.parent == Path(COMPANION_ROOT)
+        and relative.name in companion_memory.VIEW_NAMES
+        and (vault_root / companion_memory.CANONICAL_RELATIVE).is_file()
+    )
+
+
+def _retrieval_entry_snapshot(
+    vault_root: Path,
+    path: Path,
+    memory: MemoryRead,
+) -> tuple[VaultEntry | None, os.stat_result | None, bool]:
+    """Read a disk note or a canonical-backed Companion view without writing."""
+    if _is_virtual_companion_view(vault_root, path):
+        return entry_from_file(vault_root, path, memory=memory), None, False
+    return _stable_entry_snapshot(
+        vault_root,
+        path,
+        lambda root, source: entry_from_file(root, source, memory=memory),
+    )
+
+
+def _stable_source_snapshot(
+    vault_root: Path,
+    path: Path,
+    *,
+    memory: MemoryRead | None = None,
+) -> tuple[Path | None, str | None, str | None, os.stat_result | None, bool]:
+    """Read projected source text while bounding replace/disappearance races."""
+    for attempt in range(SOURCE_READ_ATTEMPTS):
+        try:
+            before = path.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            before = None
+        if before is not None and not stat.S_ISREG(before.st_mode):
+            return None, None, None, before, True
+        try:
+            relative, text, content_sha256 = _source_snapshot(vault_root, path, memory=memory)
+        except (FileNotFoundError, NotADirectoryError):
+            if attempt + 1 == SOURCE_READ_ATTEMPTS:
+                return None, None, None, None, True
+            continue
+        try:
+            after = path.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            after = None
+        if before is not None and after is None:
+            if attempt + 1 == SOURCE_READ_ATTEMPTS:
+                return None, None, None, None, True
+            continue
+        if before is None and after is not None:
+            if attempt + 1 == SOURCE_READ_ATTEMPTS:
+                return None, None, None, None, True
+            continue
+        if after is not None and not stat.S_ISREG(after.st_mode):
+            return None, None, None, after, True
+        if before is not None and after is not None and _source_signature(before) != _source_signature(after):
+            if attempt + 1 == SOURCE_READ_ATTEMPTS:
+                return None, None, None, None, True
+            continue
+        return relative, text, content_sha256, after, False
+    return None, None, None, None, True
+
+
+def _stable_raw_hash(path: Path) -> tuple[str | None, os.stat_result | None, bool]:
+    for attempt in range(SOURCE_READ_ATTEMPTS):
+        try:
+            before = path.lstat()
+            if not stat.S_ISREG(before.st_mode):
+                return None, None, True
+            value = _source_sha256(path)
+            after = path.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            if attempt + 1 == SOURCE_READ_ATTEMPTS:
+                return None, None, True
+            continue
+        if _source_signature(before) != _source_signature(after):
+            if attempt + 1 == SOURCE_READ_ATTEMPTS:
+                return None, None, True
+            continue
+        return value, after, False
+    return None, None, True
+
+
+def _stable_note_snapshot(
+    vault_root: Path,
+    path: Path,
+    read_entry: Callable[[Path, Path], VaultEntry | None],
+) -> tuple[
+    VaultEntry | None,
+    Path | None,
+    str | None,
+    str | None,
+    str | None,
+    os.stat_result | None,
+    bool,
+]:
+    """Bind entry, projected text and raw hash to one bounded source read."""
+    for attempt in range(SOURCE_READ_ATTEMPTS):
+        try:
+            before = path.lstat()
+            if not stat.S_ISREG(before.st_mode):
+                return None, None, None, None, None, before, True
+            before_hash = _source_sha256(path)
+            entry = read_entry(vault_root, path)
+            relative, text, content_sha256 = _source_snapshot(vault_root, path)
+            after_hash = _source_sha256(path)
+            after = path.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            if attempt + 1 == SOURCE_READ_ATTEMPTS:
+                return None, None, None, None, None, None, True
+            continue
+        if (
+            before_hash != after_hash
+            or _source_signature(before) != _source_signature(after)
+        ):
+            if attempt + 1 == SOURCE_READ_ATTEMPTS:
+                return None, None, None, None, None, None, True
+            continue
+        return entry, relative, text, content_sha256, after_hash, after, False
+    return None, None, None, None, None, None, True
+
+
 def _entry_from_file_with_content(
     vault_root: Path,
     path: Path,
@@ -723,19 +893,24 @@ def _apply_memory_suppressions(
     memory: MemoryRead,
 ) -> VaultMap:
     if not memory.active:
-        return (
-            entries
-            if isinstance(entries, VaultMap)
-            else VaultMap(entries, _document_frequency(entries))
-        )
+        return entries if isinstance(entries, VaultMap) else VaultMap(entries, _document_frequency(entries))
     visible: list[VaultEntry] = []
+    unstable_paths = set(getattr(entries, 'unstable_paths', frozenset()))
     for entry in entries:
-        # ponytail: re-read with controls to mask metadata too; cache projections
-        # by suppression revision only if this path becomes a measured bottleneck.
-        projected = entry_from_file(vault_root, vault_root / entry.path, memory=memory)
+        projected, _post_stat, unstable = _retrieval_entry_snapshot(
+            vault_root, vault_root / entry.path, memory
+        )
+        if unstable:
+            unstable_paths.add(entry.path)
+            continue
         if projected is not None:
             visible.append(projected)
-    return VaultMap(visible, _document_frequency(visible))
+    return VaultMap(
+        visible,
+        _document_frequency(visible),
+        cache_result=entries.cache_result if isinstance(entries, VaultMap) else None,
+        unstable_paths=frozenset(unstable_paths),
+    )
 
 
 def build_vault_map(
@@ -744,224 +919,201 @@ def build_vault_map(
     write_cache: bool = True,
     read_entry: Callable[[Path, Path], VaultEntry | None] = entry_from_file,
 ) -> VaultMap:
-    """Korpus indeksi; `write_cache=False` yalnız okur, `read_entry` disk notlarını okur."""
+    """Korpus indeksi; unstable sources are omitted and never cached."""
     vault_root = vault_root.resolve(strict=True)
     companion_names = (
         frozenset(companion_memory.VIEW_NAMES)
         if (vault_root / companion_memory.CANONICAL_RELATIVE).is_file() else frozenset()
     )
+    publication = MemoryRead(vault_root, frozenset())
+    publication.check_knowledge_snapshot()
     cache_path = vault_root / CACHE_RELATIVE_PATH
     cache_result: dict[str, int | str] = {
-        "status": "disabled" if not write_cache else "unknown",
-        "stored": 0,
-        "total": 0,
-        "bytes": 0,
-        "limit": MAX_CACHE_BYTES,
+        'status': 'disabled' if not write_cache else 'unknown',
+        'stored': 0,
+        'total': 0,
+        'bytes': 0,
+        'limit': MAX_CACHE_BYTES,
     }
     with ExitStack() as cache_lock:
         cache_write_allowed = write_cache
         if write_cache:
             try:
-                # Cache bir hızlandırma: kilit alınamazsa harita yine kurulur,
-                # yalnız yazma atlanır.
                 cache_lock.enter_context(locked(cache_path, timeout=0))
             except (LockUnavailable, OSError):
                 cache_write_allowed = False
-                cache_result["status"] = "locked"
-        # Okuma kilit istemez: yazan taraf atomik replace kullanır, okuyan ya
-        # eski ya yeni tam içeriği görür.
+                cache_result['status'] = 'locked'
         cache = _load_cache(cache_path)
-        cached_files = cache.get("files")
+        cached_files = cache.get('files')
         if not isinstance(cached_files, dict):
             cached_files = {}
         next_files: dict[str, object] = {}
         entries: list[VaultEntry] = []
+        unstable_paths: set[str] = set()
         changed = not bool(cache)
-        # Root documents are searchable data; hidden infrastructure is never traversed.
-        content_roots = [vault_root / name for name in (*RETRIEVAL_CONTENT_ROOTS, "docs", "tasks")]
-        path_groups = [vault_root.glob("*.md")]
+        content_roots = [vault_root / name for name in (*RETRIEVAL_CONTENT_ROOTS, 'docs', 'tasks')]
+        path_groups = [vault_root.glob('*.md')]
         for root in content_roots:
             if not root.is_dir() or root.is_symlink():
                 continue
-            excluded = frozenset({"sources"}) if root == vault_root / COMPANION_ROOT else frozenset()
+            excluded = frozenset({'sources'}) if root == vault_root / COMPANION_ROOT else frozenset()
             path_groups.append(markdown_paths(root, excluded_root_dirs=excluded))
         for paths in path_groups:
             for path in sorted(paths):
                 if path.parent == vault_root / COMPANION_ROOT and path.name in companion_names:
                     continue
                 try:
+                    relative = path.relative_to(vault_root).as_posix()
+                except ValueError:
+                    continue
+                try:
                     file_stat = path.lstat()
                     if not stat.S_ISREG(file_stat.st_mode):
                         continue
                     if any(parent.is_symlink() or parent.is_junction()
-                           for parent in path.parents if parent != vault_root and parent.is_relative_to(vault_root)):
+                           for parent in path.parents
+                           if parent != vault_root and parent.is_relative_to(vault_root)):
                         continue
-                    relative = path.relative_to(vault_root).as_posix()
-                except (OSError, ValueError):
+                except (FileNotFoundError, NotADirectoryError):
+                    unstable_paths.add(relative)
+                    changed = True
                     continue
-                source_relative, source_text, content_sha256 = _source_snapshot(vault_root, path)
+
+                source_relative, source_text, content_sha256, source_stat, unstable = _stable_source_snapshot(
+                    vault_root, path
+                )
+                if unstable:
+                    unstable_paths.add(relative)
+                    changed = True
+                    continue
                 if source_relative is None:
                     continue
+                if source_stat is not None:
+                    file_stat = source_stat
                 cached = cached_files.get(relative)
                 entry: VaultEntry | None = None
                 source_hash: str | None = None
+                post_stat: os.stat_result | None = file_stat
+                cache_hit = False
                 if isinstance(cached, dict):
-                    # Stat alanları hızlı bağlamdır; içerik özeti aynı boyut ve
-                    # zaman damgaları korunmuş olsa bile cache'i doğrular.
                     signature_matches = (
-                        cached.get("size") == file_stat.st_size
-                        and cached.get("mtime_ns") == file_stat.st_mtime_ns
-                        and cached.get("ctime_ns") == file_stat.st_ctime_ns
+                        cached.get('dev') == file_stat.st_dev
+                        and cached.get('ino') == file_stat.st_ino
+                        and cached.get('size') == file_stat.st_size
+                        and cached.get('mtime_ns') == file_stat.st_mtime_ns
+                        and cached.get('ctime_ns') == file_stat.st_ctime_ns
                         and isinstance(content_sha256, str)
-                        and isinstance(cached.get("content_sha256"), str)
-                        and cached.get("content_sha256") == content_sha256
+                        and cached.get('content_sha256') == content_sha256
                     )
-                    if signature_matches and isinstance(cached.get("source_sha256"), str):
-                        try:
-                            source_hash = _source_sha256(path)
-                            signature_matches = (
-                                source_hash == cached.get("source_sha256")
-                            )
-                            if signature_matches:
-                                entry = _entry_from_payload(cached.get("entry"))
-                                if entry.path != relative:
+                    if signature_matches and isinstance(cached.get('source_sha256'), str):
+                        source_hash, raw_stat, raw_unstable = _stable_raw_hash(path)
+                        if raw_unstable:
+                            unstable_paths.add(relative)
+                            changed = True
+                            continue
+                        if raw_stat is not None and _source_signature(raw_stat) != _source_signature(file_stat):
+                            signature_matches = False
+                            file_stat = raw_stat
+                            post_stat = raw_stat
+                        if signature_matches and source_hash == cached.get('source_sha256'):
+                            try:
+                                entry = _entry_from_payload(cached.get('entry'))
+                            except (TypeError, ValueError):
+                                entry = None
+                            else:
+                                if entry.path == relative:
+                                    cache_hit = True
+                                else:
                                     entry = None
-                        except (TypeError, ValueError):
-                            entry = None
-                    elif signature_matches:
-                        signature_matches = False
-                if entry is None:
-                    entry, source_hash = _read_entry_snapshot(
+                if not cache_hit or relative == '🔮 850-Companion/Profile.md':
+                    previous_entry = entry
+                    (
+                        entry,
+                        source_relative,
+                        source_text,
+                        content_sha256,
+                        source_hash,
+                        post_stat,
+                        unstable,
+                    ) = _stable_note_snapshot(
                         vault_root, path, read_entry
                     )
-                    source_relative, source_text, content_sha256 = _source_snapshot(
-                        vault_root, path
-                    )
+                    if unstable:
+                        unstable_paths.add(relative)
+                        changed = True
+                        continue
                     if source_relative is None or source_text is None:
                         entry = None
-                    changed = True
-                elif relative == '🔮 850-Companion/Profile.md':
-                    # A cited knowledge record can change without touching the profile.
-                    current, source_hash = _read_entry_snapshot(
-                        vault_root, path, read_entry
-                    )
-                    source_relative, source_text, content_sha256 = _source_snapshot(
-                        vault_root, path
-                    )
-                    if source_relative is None or source_text is None:
-                        current = None
-                    changed = changed or current != entry
-                    entry = current
-                post_stat = path.lstat()
-                if (
-                    post_stat.st_size != file_stat.st_size
-                    or post_stat.st_mtime_ns != file_stat.st_mtime_ns
-                    or post_stat.st_ctime_ns != file_stat.st_ctime_ns
-                ):
-                    entry, source_hash = _read_entry_snapshot(
-                        vault_root, path, read_entry
-                    )
-                    source_relative, source_text, content_sha256 = _source_snapshot(
-                        vault_root, path
-                    )
-                    if source_relative is None or source_text is None:
-                        entry = None
-                    stable_stat = path.lstat()
-                    if (
-                        stable_stat.st_size != post_stat.st_size
-                        or stable_stat.st_mtime_ns != post_stat.st_mtime_ns
-                        or stable_stat.st_ctime_ns != post_stat.st_ctime_ns
-                    ):
-                        raise OSError('vault-source-changing-during-read')
-                    post_stat = stable_stat
-                    changed = True
-                final_source_hash = _source_sha256(path)
-                if source_hash is not None and final_source_hash != source_hash:
-                    entry, source_hash = _read_entry_snapshot(
-                        vault_root, path, read_entry
-                    )
-                    source_relative, source_text, content_sha256 = _source_snapshot(
-                        vault_root, path
-                    )
-                    if source_relative is None or source_text is None:
-                        entry = None
-                    stable_stat = path.lstat()
-                    if (
-                        stable_stat.st_size != post_stat.st_size
-                        or stable_stat.st_mtime_ns != post_stat.st_mtime_ns
-                        or stable_stat.st_ctime_ns != post_stat.st_ctime_ns
-                    ):
-                        raise OSError('vault-source-changing-during-read')
-                    post_stat = stable_stat
-                    final_source_hash = source_hash
-                    changed = True
-                if entry is not None:
+                    changed = changed or not cache_hit or entry != previous_entry
+                if entry is not None and post_stat is not None and source_hash is not None:
                     entries.append(entry)
                     next_files[relative] = {
-                        "size": post_stat.st_size,
-                        "mtime_ns": post_stat.st_mtime_ns,
-                        "ctime_ns": post_stat.st_ctime_ns,
-                        "content_sha256": content_sha256,
-                        "source_sha256": final_source_hash,
-                        "entry": _entry_payload(entry),
+                        'dev': post_stat.st_dev,
+                        'ino': post_stat.st_ino,
+                        'size': post_stat.st_size,
+                        'mtime_ns': post_stat.st_mtime_ns,
+                        'ctime_ns': post_stat.st_ctime_ns,
+                        'content_sha256': content_sha256,
+                        'source_sha256': source_hash,
+                        'entry': _entry_payload(entry),
                     }
         if set(next_files) != set(cached_files):
             changed = True
-
-        document_frequency_payload = cache.get("document_frequency")
+        document_frequency_payload = cache.get('document_frequency')
         if (
             not changed
             and isinstance(document_frequency_payload, dict)
-            and all(
-                isinstance(term, str) and isinstance(count, int) and count >= 0
-                for term, count in document_frequency_payload.items()
-            )
+            and all(isinstance(term, str) and isinstance(count, int) and count >= 0
+                    for term, count in document_frequency_payload.items())
         ):
             document_frequency = Counter(document_frequency_payload)
         else:
             document_frequency = _document_frequency(entries)
             changed = True
-
+        if unstable_paths:
+            # ponytail: partial scans never overwrite a complete cache; retry next read.
+            cache_write_allowed = False
+        publication.check_knowledge_snapshot()
         if changed and cache_write_allowed:
-            generation = cache.get("generation", 0)
+            generation = cache.get('generation', 0)
             payload, status, stored, encoded_size = _bounded_cache_payload(
                 generation=generation,
                 files=next_files,
                 document_frequency=document_frequency,
             )
             cache_result = {
-                "status": status,
-                "stored": stored,
-                "total": len(next_files),
-                "bytes": encoded_size,
-                "limit": MAX_CACHE_BYTES,
+                'status': status,
+                'stored': stored,
+                'total': len(next_files),
+                'bytes': encoded_size,
+                'limit': MAX_CACHE_BYTES,
             }
             if payload is not None:
                 try:
                     if not _save_cache(cache_path, payload):
-                        cache_result["status"] = "unavailable"
+                        cache_result['status'] = 'unavailable'
                     else:
-                        cache_result["bytes"] = cache_path.stat().st_size
+                        cache_result['bytes'] = cache_path.stat().st_size
                 except OSError:
-                    cache_result["status"] = "unavailable"
+                    cache_result['status'] = 'unavailable'
         elif not write_cache:
             cache_result = {
-                "status": "disabled",
-                "stored": len(cached_files),
-                "total": len(next_files),
-                "bytes": cache_path.stat().st_size if cache_path.is_file() else 0,
-                "limit": MAX_CACHE_BYTES,
+                'status': 'disabled',
+                'stored': len(cached_files),
+                'total': len(next_files),
+                'bytes': cache_path.stat().st_size if cache_path.is_file() else 0,
+                'limit': MAX_CACHE_BYTES,
             }
-        elif cache_result["status"] != "locked":
+        elif cache_result['status'] != 'locked':
             cache_result = {
-                "status": "partial" if cache.get("truncated") is True else "full",
-                "stored": len(cached_files),
-                "total": len(next_files),
-                "bytes": cache_path.stat().st_size if cache_path.is_file() else 0,
-                "limit": MAX_CACHE_BYTES,
+                'status': 'partial' if cache.get('truncated') is True else 'full',
+                'stored': len(cached_files),
+                'total': len(next_files),
+                'bytes': cache_path.stat().st_size if cache_path.is_file() else 0,
+                'limit': MAX_CACHE_BYTES,
             }
+    publication.check_knowledge_snapshot()
     if companion_names:
-        # Three derived notes are cheap to rebuild; keep their dependencies out of the file cache.
         memory = MemoryRead(vault_root, frozenset())
         for name, text in companion_memory.render_views(vault_root, memory=memory).items():
             path = vault_root / COMPANION_ROOT / name
@@ -969,7 +1121,13 @@ def build_vault_map(
             if entry is not None:
                 entries.append(entry)
         document_frequency = _document_frequency(entries)
-    return VaultMap(entries, document_frequency, cache_result=cache_result)
+    publication.check_knowledge_snapshot()
+    return VaultMap(
+        entries,
+        document_frequency,
+        cache_result=cache_result,
+        unstable_paths=frozenset(unstable_paths),
+    )
 
 
 def _is_personal_query(query_terms: frozenset[str]) -> bool:
@@ -1045,18 +1203,15 @@ def _route_allows(entry: VaultEntry, route: str | None) -> bool:
 def _routed(entries: list[VaultEntry], route: str | None) -> VaultMap:
     """Route filtresinin TEK yeri; korpus istatistikleri filtreden etkilenmez."""
     document_frequency = (
-        entries.document_frequency
-        if isinstance(entries, VaultMap)
-        else _document_frequency(entries)
+        entries.document_frequency if isinstance(entries, VaultMap) else _document_frequency(entries)
     )
-    corpus_size = (
-        entries.corpus_size if isinstance(entries, VaultMap) else len(entries)
-    )
+    corpus_size = entries.corpus_size if isinstance(entries, VaultMap) else len(entries)
     return VaultMap(
         [entry for entry in entries if _route_allows(entry, route)],
         document_frequency,
         corpus_size,
-        entries.cache_result if isinstance(entries, VaultMap) else None,
+        cache_result=entries.cache_result if isinstance(entries, VaultMap) else None,
+        unstable_paths=getattr(entries, 'unstable_paths', frozenset()),
     )
 
 
@@ -1259,23 +1414,28 @@ def _context_item(hit: VaultHit, displayed_path: str) -> str:
 def _fresh_hits(vault_root: Path, candidates: VaultMap, query: str, top_k: int, memory: MemoryRead) -> list[VaultHit]:
     """Check selected sources before emission, including changes to cited daily proof."""
     checked: set[str] = set()
+    unstable_paths = set(getattr(candidates, 'unstable_paths', frozenset()))
     while True:
         hits = _rank(candidates, query, top_k=top_k)
+        if not hits and unstable_paths:
+            raise OSError('vault-retrieval-incomplete')
         replacements: dict[str, VaultEntry | None] = {}
         for hit in hits:
             if hit.entry.path in checked:
                 continue
             checked.add(hit.entry.path)
-            try:
-                current = entry_from_file(vault_root, vault_root / hit.entry.path, memory=memory)
-            except FileNotFoundError:
+            current, _post_stat, unstable = _retrieval_entry_snapshot(
+                vault_root, vault_root / hit.entry.path, memory
+            )
+            if unstable:
+                unstable_paths.add(hit.entry.path)
                 current = None
             if current != hit.entry:
                 replacements[hit.entry.path] = current
         if not replacements:
             return hits
         frequency = Counter(candidates.document_frequency)
-        updated = []
+        updated: list[VaultEntry] = []
         removed = 0
         for entry in candidates:
             current = replacements.get(entry.path, entry)
@@ -1287,7 +1447,13 @@ def _fresh_hits(vault_root: Path, candidates: VaultMap, query: str, top_k: int, 
                     removed += 1
             if current is not None:
                 updated.append(current)
-        candidates = VaultMap(updated, +frequency, max(len(updated), candidates.corpus_size - removed))
+        candidates = VaultMap(
+            updated,
+            +frequency,
+            max(len(updated), candidates.corpus_size - removed),
+            cache_result=candidates.cache_result,
+            unstable_paths=frozenset(unstable_paths),
+        )
 
 
 def _view_aliases(entries: Sequence[VaultEntry]) -> dict[str, VaultEntry | None]:
@@ -1366,6 +1532,7 @@ def retrieve_vault_context_detailed(
     if not _retrieval_terms(query):
         return VaultContextResult("skipped", "", 0, 0, (), max_chars)
     with memory_read(vault_root) as memory:
+        memory.check_knowledge_snapshot()
         # Route filtresi sorgu başına TEK geçiş: sonuç hem aday havuzu hem sayaç.
         # Cache'lenen korpus document_frequency'si `_routed` üzerinden korunur.
         indexed = _apply_memory_suppressions(
