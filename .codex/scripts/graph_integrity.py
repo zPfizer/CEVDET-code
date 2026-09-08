@@ -1,0 +1,237 @@
+from __future__ import annotations
+
+from pathlib import Path
+import re
+from typing import Sequence
+
+from knowledge_schema import (
+    WIKILINK,
+    _connects,
+    canonical_concept_target,
+    parse_frontmatter,
+    wikilink_target,
+)
+from state_store import atomic_write_text
+from vault_corpus import NoteIndex, by_key, by_stem, resolve_link
+
+
+DAILY_GRAPH_LINK = "[[knowledge/index|Bilgi Tabanı]]"
+# Infrastructure markdown that lives in the vault but is not a graph node.
+GRAPH_EXCLUDED_DIRS = frozenset({".agents", ".scratch", "docs", "tasks"})
+
+
+class GraphPolicyError(ValueError):
+    pass
+
+
+_DAILY_HEADING = re.compile(r"(?m)^[ \t]{0,3}#[ \t]+Günlük Log:[^\r\n]*\r?$")
+_CONNECTION_HEADING = re.compile(
+    r"(?m)^[ \t]{0,3}##[ \t]+Bağlantı[ \t]*(?:#+[ \t]*)?\r?$"
+)
+_FENCE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _blank(chars: list[str], start: int, end: int) -> None:
+    for index in range(start, end):
+        if chars[index] not in "\r\n":
+            chars[index] = " "
+
+
+def _is_escaped(text: str, index: int) -> bool:
+    slashes = 0
+    index -= 1
+    while index >= 0 and text[index] == "\\":
+        slashes += 1
+        index -= 1
+    return slashes % 2 == 1
+
+
+def _blank_inline_code(chars: list[str], text: str) -> None:
+    index = 0
+    while index < len(text):
+        if text[index] != "`" or _is_escaped(text, index):
+            index += 1
+            continue
+        delimiter_end = index + 1
+        while delimiter_end < len(text) and text[delimiter_end] == "`":
+            delimiter_end += 1
+        delimiter = text[index:delimiter_end]
+        close = text.find(delimiter, delimiter_end)
+        while close >= 0:
+            if close and text[close - 1] == "`":
+                close = text.find(delimiter, close + 1)
+                continue
+            if close + len(delimiter) < len(text) and text[close + len(delimiter)] == "`":
+                close = text.find(delimiter, close + 1)
+                continue
+            break
+        if close < 0:
+            # An unmatched delimiter is ordinary text; advance past it.
+            index = delimiter_end
+            continue
+        _blank(chars, index, close + len(delimiter))
+        index = close + len(delimiter)
+
+
+def _markdown_body(text: str, *, mask_frontmatter: bool = True) -> str:
+    """Mask frontmatter and Markdown code so offsets remain usable for inserts."""
+    chars = list(text)
+    lines: list[tuple[int, int, int, str]] = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        lines.append((offset, offset + len(content), offset + len(line), content))
+        offset += len(line)
+    if offset < len(text) or not lines:
+        lines.append((offset, len(text), len(text), text[offset:]))
+
+    frontmatter_end = -1
+    if lines and lines[0][3].strip() == "---":
+        frontmatter_end = len(lines) - 1
+        for index, frontmatter_line in enumerate(lines[1:], start=1):
+            if frontmatter_line[3].strip() == "---":
+                frontmatter_end = index
+                break
+        if mask_frontmatter:
+            for start, end, _line_end, _content in lines[: frontmatter_end + 1]:
+                _blank(chars, start, end)
+
+    fence_char: str | None = None
+    fence_length = 0
+    for index, (start, end, _line_end, content) in enumerate(lines):
+        if index <= frontmatter_end:
+            continue
+        if fence_char is not None:
+            _blank(chars, start, end)
+            if re.fullmatch(
+                rf"[ ]{{0,3}}{re.escape(fence_char)}{{{fence_length},}}[ \t]*",
+                content,
+            ):
+                fence_char = None
+            continue
+        fence = _FENCE.match(content)
+        if fence is not None:
+            fence_char = fence.group(1)[0]
+            fence_length = len(fence.group(1))
+            _blank(chars, start, end)
+            continue
+    _blank_inline_code(chars, "".join(chars))
+    return "".join(chars)
+
+
+def _insert_after_heading(
+    text: str,
+    match: re.Match[str],
+    newline: str,
+    content: str,
+) -> str:
+    line_end = text.find("\n", match.end())
+    line_end = len(text) if line_end < 0 else line_end + 1
+    return text[:line_end] + newline + content + newline + text[line_end:]
+
+
+def daily_with_graph_link(text: str, date_text: str, newline: str) -> str:
+    if not text:
+        return (
+            f"# Günlük Log: {date_text}{newline}{newline}"
+            f"{DAILY_GRAPH_LINK}{newline}{newline}## Oturumlar{newline}"
+        )
+    body = _markdown_body(text)
+    heading = _DAILY_HEADING.search(body)
+    if heading is None:
+        raise GraphPolicyError(f"daily-heading-invalid:{date_text}.md")
+    if DAILY_GRAPH_LINK in body:
+        return text
+    return _insert_after_heading(text, heading, newline, DAILY_GRAPH_LINK)
+
+
+def ensure_daily_graph_link(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    raw = path.read_bytes()
+    text = raw.decode("utf-8")
+    newline = "\r\n" if b"\r\n" in raw else "\n"
+    updated = daily_with_graph_link(text, path.stem, newline)
+    if updated == text:
+        return False
+    atomic_write_text(path, updated, newline="\n")
+    return True
+
+
+def normalize_connection_links(root: Path) -> int:
+    connections = root / "knowledge" / "connections"
+    if not connections.is_dir():
+        return 0
+    pending: list[tuple[Path, str]] = []
+    for path in sorted(connections.rglob("*.md")):
+        raw = path.read_bytes()
+        text = raw.decode("utf-8")
+        newline = "\r\n" if b"\r\n" in raw else "\n"
+        slugs = _connects(text)
+        if slugs is None:
+            raise GraphPolicyError(f"connection-connects:{path.name}")
+        concepts = root / "knowledge" / "concepts"
+        for slug in slugs:
+            if not (concepts / f"{slug}.md").is_file():
+                raise GraphPolicyError(
+                    f"connection-concept-missing:{path.name}:{slug}"
+                )
+        body = _markdown_body(text)
+        heading = _CONNECTION_HEADING.search(body)
+        if heading is None:
+            raise GraphPolicyError(f"connection-heading-missing:{path.name}")
+        linked = {
+            wikilink_target(match.group(1)) for match in WIKILINK.finditer(body)
+        }
+        missing = [
+            slug for slug in slugs if canonical_concept_target(slug) not in linked
+        ]
+        if not missing:
+            continue
+        links = []
+        for slug in missing:
+            concept = concepts / f"{slug}.md"
+            title_value = parse_frontmatter(
+                concept.read_text(encoding="utf-8")
+            ).get("title")
+            title = title_value if isinstance(title_value, str) and title_value else slug
+            links.append(f"[[knowledge/concepts/{slug}|{title}]]")
+        updated = _insert_after_heading(
+            text,
+            heading,
+            newline,
+            " ↔ ".join(links),
+        )
+        pending.append((path, updated))
+    for path, updated in pending:
+        atomic_write_text(path, updated, newline="\n")
+    return len(pending)
+
+
+def graph_notes(notes: Sequence[NoteIndex]) -> list[NoteIndex]:
+    return [
+        note
+        for note in notes
+        if not GRAPH_EXCLUDED_DIRS.intersection(note.relative.parts)
+    ]
+
+
+def graph_summary(notes: Sequence[NoteIndex]) -> tuple[int, list[str]]:
+    files = graph_notes(notes)
+    keyed = by_key(files)
+    stems = by_stem(files)
+    degree = {note.key: 0 for note in files}
+    for source in files:
+        for match in WIKILINK.finditer(
+            _markdown_body(source.text, mask_frontmatter=False)
+        ):
+            target = wikilink_target(match.group(1))
+            if not target:
+                continue
+            note = resolve_link(target, keyed, stems)
+            if note is None or note is source:
+                continue
+            degree[source.key] += 1
+            degree[note.key] += 1
+    isolated = sorted(key for key, count in degree.items() if count == 0)
+    return len(files), isolated
