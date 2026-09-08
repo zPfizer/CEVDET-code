@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import re
 import sys
 import tempfile
 import unittest
@@ -12,52 +11,10 @@ VAULT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(VAULT / ".codex" / "scripts"))
 
 import tag_taxonomy  # noqa: E402
-import tansu_semantic_metadata  # noqa: E402
 
 
-TANSU = VAULT / "🏰 300-Projects" / "Tansu X Veri Havuzu"
-SEMANTIC_MAP = TANSU / "tansu-semantik-kullanim-haritasi.md"
 TAXONOMY = VAULT / ".codex" / "tag-taxonomy.json"
 SEMANTIC_SCHEMA = VAULT / ".codex" / "tansu-semantic-schema.json"
-
-FOCUS_TAG_BY_HEADING = {
-    "Sinyal ve Strateji": "sinyal-stratejisi",
-    "Backtest ve Doğrulama": "backtest-doğrulama",
-    "Veri ve Kanıt": "veri-kanıtı",
-    "Piyasa ve Rejim": "piyasa-rejimi",
-    "Temel Analiz ve Değerleme": "temel-analiz-değerleme",
-    "Risk ve Pozisyon": "risk-pozisyon",
-    "Portföy ve Tahsis": "portföy-tahsisi",
-    "İcra ve Likidite": "icra-likidite",
-    "Outcome ve Öğrenme": "sonuç-öğrenme",
-    "Raporlama ve Karar Yüzeyi": "raporlama-karar-yüzeyi",
-}
-
-MAP_ENTRY = re.compile(
-    r"^- `\d+` · \[\[Tansu X Veri Havuzu/([^|\]]+)\|"
-)
-
-
-def expected_focus_tags() -> dict[str, set[str]]:
-    expected: dict[str, set[str]] = {}
-    current_tag: str | None = None
-    for line in SEMANTIC_MAP.read_text(encoding="utf-8").splitlines():
-        if line.startswith("### "):
-            current_tag = FOCUS_TAG_BY_HEADING.get(line.removeprefix("### ").strip())
-            continue
-        match = MAP_ENTRY.match(line)
-        if current_tag is not None and match is not None:
-            expected.setdefault(match.group(1), set()).add(current_tag)
-    return expected
-
-
-def inline_tags(path: Path) -> set[str]:
-    for line in path.read_text(encoding="utf-8").splitlines()[:80]:
-        if line.startswith("tags:"):
-            raw = line.split(":", 1)[1].strip().strip("[]")
-            return {tag.strip() for tag in raw.split(",") if tag.strip()}
-    return set()
-
 
 class TansuSemanticTagTests(unittest.TestCase):
     def test_semantic_tags_are_project_scoped(self) -> None:

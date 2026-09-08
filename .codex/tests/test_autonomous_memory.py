@@ -12,7 +12,6 @@ import compile as compiler
 import companion_memory
 import subprocess
 from file_lock import LockUnavailable
-import hashlib
 import argparse
 import json
 from memory_ledger import mark_session_only

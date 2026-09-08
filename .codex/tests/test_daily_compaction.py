@@ -207,7 +207,7 @@ class DailyCompactionTests(unittest.TestCase):
         self.assertFalse(previous.exists())
 
     def test_legacy_compaction_is_dry_by_default_and_preserves_daily_bytes(self):
-        receipt, image = self.legacy()
+        _receipt, image = self.legacy()
         self.day.write_bytes(self.day.read_bytes() + b'\nLater independent append.\n')
         before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
         report = daily_store.compact_completed(self.root, self.state)
