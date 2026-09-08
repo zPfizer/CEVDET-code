@@ -27,3 +27,5 @@ PR merge edilmesi canlı Vault'u değiştirmez. Açık hedef ve uygulama yetkisi
 Codex ayarlarında bu depo için `Review my PRs` ve `On every push` etkinleştirilmiştir. Review kuralları kök `AGENTS.md` içindedir. Bunlar CI veya kullanıcı merge onayının yerine geçmez. GitHub hesap planı branch protection desteklemiyorsa sunucu tarafı zorunluluk varmış gibi raporlama.
 
 Kaynak: https://learn.chatgpt.com/docs/third-party/github (8 Eylül 2026).
+
+Eski audit uygulamalarına başlamadan önce [eşlenmiş uygulama paketlerine](audit-packages-20260908.md) bak; tarihsel çözümü güncel kodla karşılaştırmadan yeniden uygulama.

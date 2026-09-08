@@ -170,3 +170,4 @@
 /.github/workflows/*
 !/.github/workflows/tests.yml
 !/docs/agents/pr-workflow.md
+!/docs/agents/audit-packages-20260908.md
