@@ -26,6 +26,7 @@ from jsonl_tail import IncompleteRecord, iter_records, seek_tail
 from knowledge_schema import markdown_headings
 from memory_ledger import is_session_only, sanitize_text, load_suppressed_hashes
 from memory_ledger import is_read_only_turn, memory_write_guard, MemoryReadOnlyError
+from process_control import ProcessTreeCleanupError
 from worker_supervisor import load_hook_input, resolve_hook_input
 from state_store import (
     atomic_write_json,
@@ -74,7 +75,6 @@ DIRECTIVE_SHAPED = re.compile(
     r"TAL[İI]MAT|KOMUT|IGNORE\s+(?:ALL|ANY|PREVIOUS)"
     r")\s*[:：]"
 )
-
 
 
 def write_health(
@@ -517,6 +517,8 @@ def _is_recent_duplicate(
     *,
     reason: str | None = None,
     transcript_digest: str | None = None,
+    batch_start: int | None = None,
+    batch_end: int | None = None,
 ) -> bool:
     # Dedupe kararı yalnız oturumun receipt dosyasından okunur.
     state = _load_json_object(_session_state_path(state_dir, session_id), {})
@@ -527,7 +529,14 @@ def _is_recent_duplicate(
             transcript_digest=transcript_digest,
             statuses={"ok"},
         )
-        return receipt is not None
+        if receipt is None:
+            return False
+        if batch_start is None and batch_end is None:
+            return True
+        return (
+            receipt.get("batch_start") == batch_start
+            and receipt.get("batch_end") == batch_end
+        )
     stored_key = state.get("session_key")
     if stored_key is None:
         if state.get("session_id") != session_id:
@@ -555,6 +564,8 @@ def _write_flush_state(
     idempotency_key: str = "",
     daily_file: str = "",
     event_iso: str = "",
+    batch_start: int | None = None,
+    batch_end: int | None = None,
 ) -> None:
     session_path = _session_state_path(state_dir, session_id)
     existing = _load_json_object(session_path, {})
@@ -582,8 +593,10 @@ def _write_flush_state(
         ("idempotency_key", idempotency_key),
         ("daily_file", daily_file),
         ("event_iso", event_iso),
+        ("batch_start", batch_start),
+        ("batch_end", batch_end),
     ):
-        if value:
+        if value is not None and value != "":
             latest[key] = value
     if idempotency_key:
         receipts[idempotency_key] = {
@@ -602,6 +615,8 @@ def _find_flush_receipt(
     *,
     transcript_digest: str,
     statuses: set[str],
+    batch_start: int | None = None,
+    batch_end: int | None = None,
 ) -> dict[str, Any] | None:
     receipts = state.get("receipts", {})
     if not isinstance(receipts, dict):
@@ -613,6 +628,18 @@ def _find_flush_receipt(
         and receipt.get("transcript_digest") == transcript_digest
         and receipt.get("status") in statuses
         and receipt.get("detail") != "below-minimum-turns"
+        and (
+            batch_start is None
+            or (
+                receipt.get("batch_start") == batch_start
+                and receipt.get("batch_end") == batch_end
+            )
+            or (
+                statuses == {"prepared"}
+                and "batch_start" not in receipt
+                and "batch_end" not in receipt
+            )
+        )
     ]
     if not candidates:
         return None
@@ -655,16 +682,16 @@ def _flush_idempotency_key(
     reason: str,
     transcript_digest: str,
     summary_digest: str,
+    *,
+    batch_start: int | None = None,
+    batch_end: int | None = None,
 ) -> str:
     if reason not in {"sessionend", "precompact", "turnend"}:
         raise ValueError("flush-reason-invalid")
-    payload = "\0".join(
-        (
-            _session_key(session_id),
-            transcript_digest,
-            summary_digest,
-        )
-    )
+    values = [_session_key(session_id), transcript_digest, summary_digest]
+    if batch_start is not None or batch_end is not None:
+        values.extend((str(batch_start), str(batch_end)))
+    payload = "\0".join(values)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -679,6 +706,7 @@ def run_codex(prompt: str, vault_root: Path, *, timeout: float = 240) -> tuple[s
         sandbox="read-only",
         timeout=timeout,
         forbidden_root=vault_root,
+        propagate_cleanup_error=True,
     )
     if reason is None and summary is None:
         return None, "codex-output-missing"
@@ -715,7 +743,8 @@ def maybe_trigger_compile(
     popen_factory: Callable[..., Any] | None = None,
 ) -> bool:
     """Queue changed knowledge independently of clock time and the save process."""
-    if not compile_state.has_changes(vault_root):
+    if (compile_state.load_publication(state_dir_of(vault_root)) is None
+            and not compile_state.has_changes(vault_root)):
         return False
     from worker_supervisor import enqueue_maintenance
 
@@ -762,6 +791,8 @@ def flush_once(
         return 0
     state_dir.mkdir(parents=True, exist_ok=True)
     with locked(_session_lock_target(state_dir, session_id)):
+        import companion_memory
+        reflection_token = companion_memory.capture_reflection(state_dir, session_id)
         try:
             hashes = load_suppressed_hashes(vault_root / '.codex/private-memory')
             index = transcript_index.open_or_update(
@@ -922,6 +953,8 @@ def flush_once(
                     if end < len(all_chunks):
                         from worker_supervisor import enqueue_flush
                         enqueue_flush(state_dir, hook_input, args.reason, vault_root=vault_root)
+                    elif not incomplete_tail:
+                        companion_memory.acknowledge_reflection(state_dir, session_id, reflection_token)
             except MemoryReadOnlyError:
                 return
         def fail_incomplete_tail() -> int:
@@ -936,6 +969,8 @@ def flush_once(
             return 0
 
         if all_chunks and not bounded_refs:
+            if not incomplete_tail:
+                complete_coverage()
             try:
                 with memory_write_guard(state_dir, session_id):
                     maybe_trigger_compile(vault_root, event_time)
@@ -1033,9 +1068,18 @@ def flush_once(
             )
         except MemoryReadOnlyError:
             return 0
+        except ProcessTreeCleanupError:
+            raise
         except (OSError, ValueError) as exc:
             attachment_error = str(exc) if str(exc).startswith('attachment-') else 'attachment-capture-failed'
             _record_flush_failure(state_dir, session_id, now_epoch, attachment_error)
+            return 1
+        try:
+            index.verify_source_current()
+            if load_suppressed_hashes(vault_root / '.codex/private-memory') != hashes:
+                raise ValueError('memory-preferences-changed')
+        except (OSError, ValueError) as exc:
+            _record_flush_failure(state_dir, session_id, now_epoch, str(exc))
             return 1
         transcript, turn_count = format_turns(turns)
         if (turns and needs_context(turns[0][1]) and evidence_turns
@@ -1087,6 +1131,8 @@ def flush_once(
             now_epoch,
             reason=args.reason,
             transcript_digest=transcript_digest,
+            batch_start=start,
+            batch_end=end,
         ):
             complete_coverage()
             try:
@@ -1103,6 +1149,8 @@ def flush_once(
             session_state,
             transcript_digest=transcript_digest,
             statuses={"prepared"},
+            batch_start=start,
+            batch_end=end,
         )
         if prepared is not None:
             idempotency_key = prepared.get("idempotency_key")
@@ -1235,11 +1283,15 @@ def flush_once(
                     reason=args.reason,
                     transcript_digest=transcript_digest,
                     summary_digest=summary_digest,
+                    batch_start=start,
+                    batch_end=end,
                     idempotency_key=_flush_idempotency_key(
                         session_id,
                         args.reason,
                         transcript_digest,
                         summary_digest,
+                        batch_start=start,
+                        batch_end=end,
                     ),
                 )
                 clear_health(state_dir, "flush", session_id=session_id)
@@ -1272,6 +1324,8 @@ def flush_once(
                 args.reason,
                 transcript_digest,
                 summary_digest,
+                batch_start=start,
+                batch_end=end,
             )
             summary_path = _prepared_summary_path(state_dir, idempotency_key)
             try:
@@ -1288,6 +1342,8 @@ def flush_once(
                     idempotency_key=idempotency_key,
                     daily_file=f"{event_time.date().isoformat()}.md",
                     event_iso=event_time.isoformat(),
+                    batch_start=start,
+                    batch_end=end,
                 )
             except OSError:
                 _record_flush_failure(
@@ -1372,6 +1428,8 @@ def flush_once(
                 idempotency_key=idempotency_key,
                 daily_file=f"{event_time.date().isoformat()}.md",
                 event_iso=event_time.isoformat(),
+                batch_start=start,
+                batch_end=end,
             )
         except MemoryReadOnlyError:
             return 0

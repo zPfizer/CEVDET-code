@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -13,12 +14,14 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import ExitStack
 from typing import Callable, Sequence
 import uuid
 
 import codex_runner
 import compile_state
+from process_control import ProcessTreeCleanupError
 from compile_state import (
     CompileState,
     PolicyError,
@@ -43,7 +46,10 @@ from knowledge_schema import (
     validate_knowledge_tree,
 )
 from state_store import (
+    atomic_write_bytes,
     clear_health as clear_component_health,
+    REPLACE_RETRY_SECONDS,
+    replace_with_retry,
     sha256_file as _sha256,
     write_health as write_component_health,
 )
@@ -56,6 +62,11 @@ STATE_DIR = SCRIPT_DIR / ".state"
 DEFAULT_MAX_CALLS = 3
 
 TRIGGER_NAME = re.compile(r"compile-trigger-\d{4}-\d{2}-\d{2}\Z")
+DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+PUBLICATION_OPERATION = re.compile(r"[0-9a-f]{32}\Z")
+PUBLICATION_STAGE = re.compile(r"compile-stage-[A-Za-z0-9._-]+\Z")
+_MAX_SOURCE_SNAPSHOT_BYTES = 64 * 1024 * 1024
+_SOURCE_PREFIX_CHUNK_BYTES = 1024 * 1024
 DIRECTIVE_SHAPED = re.compile(
     r"(?im)^\s*(?:"
     r"UNTRUSTED[_ -]?DIRECTIVE|DIRECTIVE|INSTRUCTION|SYSTEM|ASSISTANT|"
@@ -159,15 +170,129 @@ def clear_health(state_dir: Path, component: str) -> None:
         pass
 
 
-def _git(vault_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _git(
+    vault_root: Path, *args: str, index_file: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    environment = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    if index_file is not None:
+        environment["GIT_INDEX_FILE"] = str(index_file)
     return subprocess.run(
         ["git", "-C", str(vault_root), "-c", "core.quotepath=false", *args],
         text=True,
         capture_output=True,
         check=False,
+        env=environment,
         timeout=30,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
+
+
+def _commit_machine_snapshot(vault_root: Path, label: str) -> tuple[str, str]:
+    """Use Git's index lock and ref CAS; never borrow the user's staging area."""
+    # Plumbing must not silently bypass a repository's porcelain commit policy.
+    signing = _git(vault_root, "config", "--bool", "--get", "commit.gpgsign")
+    hooks = _git(vault_root, "rev-parse", "--git-path", "hooks")
+    if signing.returncode not in {0, 1} or hooks.returncode:
+        return "deferred", "checkpoint-git-policy-unreadable"
+    if signing.stdout.strip() == "true":
+        return "deferred", "checkpoint-signing-policy"
+    hook_root = Path(hooks.stdout.strip())
+    if not hook_root.is_absolute():
+        hook_root = vault_root / hook_root
+    hook_names = ("pre-commit", "prepare-commit-msg", "commit-msg", "post-commit")
+    if any((hook_root / (name + suffix)).is_file()
+           for name in hook_names for suffix in ("", ".exe", ".cmd", ".bat")):
+        return "deferred", "checkpoint-hook-policy"
+    location = _git(vault_root, "rev-parse", "--git-path", "index")
+    if location.returncode or not location.stdout.strip():
+        return "deferred", "git-index-unavailable"
+    index_path = Path(location.stdout.strip())
+    if not index_path.is_absolute():
+        index_path = vault_root / index_path
+    index_path = index_path.absolute()
+    lock_path = Path(str(index_path) + ".lock")
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_TEMPORARY", 0)
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except FileExistsError:
+        return "deferred", "git-index-busy"
+    private_index: Path | None = None
+    try:
+        with os.fdopen(descriptor, "wb"):
+            # Git writers fail explicitly on index.lock; no accepted staging can
+            # arrive between this snapshot and its publication. Windows removes
+            # our sentinel even if the worker process dies (O_TEMPORARY).
+            staged = _git(vault_root, "diff", "--cached", "--name-only")
+            if staged.returncode:
+                return "deferred", "staged-index-unreadable"
+            if staged.stdout.strip():
+                return "deferred", "staged-index-not-empty"
+            branch = _git(vault_root, "symbolic-ref", "--quiet", "HEAD")
+            parent = _git(vault_root, "rev-parse", "--verify", "HEAD")
+            if branch.returncode or branch.stdout.strip() != "refs/heads/main" or parent.returncode:
+                return "deferred", "main-branch-required"
+            parent_oid = parent.stdout.strip()
+            original_index = index_path.read_bytes()
+            fd, name = tempfile.mkstemp(prefix="cevo-checkpoint-", suffix=".index", dir=index_path.parent)
+            os.close(fd)
+            private_index = Path(name)
+            private_index.write_bytes(original_index)
+            added = _git(vault_root, "add", "-A", "--", "daily", "knowledge", index_file=private_index)
+            if added.returncode:
+                return "deferred", "machine-stage-failed"
+            changed = _git(vault_root, "diff", "--cached", "--name-only", "-z", parent_oid,
+                           index_file=private_index)
+            paths = [path for path in changed.stdout.split("\0") if path]
+            if changed.returncode or not paths:
+                return "deferred", "machine-stage-empty-or-unreadable"
+            if any(not path.startswith(("daily/", "knowledge/")) for path in paths):
+                return "deferred", "machine-stage-boundary"
+            tree = _git(vault_root, "write-tree", index_file=private_index)
+            if tree.returncode:
+                return "deferred", "machine-tree-failed"
+            message = f"chore: checkpoint machine memory {label}"
+            commit = _git(vault_root, "commit-tree", tree.stdout.strip(), "-p", parent_oid, "-m", message)
+            if commit.returncode:
+                return "deferred", "machine-commit-failed"
+            commit_oid = commit.stdout.strip()
+            prepared_index = private_index.read_bytes()
+            # Publish the index before the ref: a hard crash leaves staged data,
+            # never an old index that stages a reversal of the committed memory.
+            atomic_write_bytes(index_path, prepared_index)
+            ref_status = "not-updated"
+            try:
+                ref_status = "unknown"
+                updated = _git(vault_root, "update-ref", "-m", message,
+                               "refs/heads/main", commit_oid, parent_oid)
+                ref_status = "updated" if updated.returncode == 0 else "not-updated"
+                if updated.returncode:
+                    return "deferred", "machine-head-changed"
+            except (OSError, subprocess.SubprocessError):
+                try:
+                    observed = _git(vault_root, "rev-parse", "--verify", "refs/heads/main")
+                    if observed.returncode == 0:
+                        descendant = _git(vault_root, "merge-base", "--is-ancestor",
+                                          commit_oid, observed.stdout.strip())
+                        if descendant.returncode == 0:
+                            ref_status = "updated"
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                if ref_status != "updated":
+                    # An ambiguous ref outcome cannot justify staging an undo.
+                    return "deferred", "machine-commit-uncertain"
+            finally:
+                if ref_status == "not-updated":
+                    # A writer ignoring Git's lock must not have its index erased.
+                    if index_path.read_bytes() != prepared_index:
+                        raise OSError("checkpoint-index-drift")
+                    atomic_write_bytes(index_path, original_index)
+            return "committed", commit_oid
+    finally:
+        if private_index is not None:
+            private_index.unlink(missing_ok=True)
+            Path(str(private_index) + ".lock").unlink(missing_ok=True)
+        if os.name != "nt":
+            lock_path.unlink(missing_ok=True)
 
 
 def _checkpoint_machine_outputs(
@@ -201,48 +326,13 @@ def _checkpoint_machine_outputs(
             clear_health(state_dir, "compile")
             return "clean", "no-machine-changes"
 
-        staged_before = _git(vault_root, "diff", "--cached", "--name-only")
-        if staged_before.returncode != 0:
-            detail = "staged-index-unreadable"
-            write_health(state_dir, f"warn:local-checkpoint:{detail}", warning=True)
-            return "deferred", detail
-        if staged_before.stdout.strip():
-            detail = "staged-index-not-empty"
-            write_health(state_dir, f"warn:local-checkpoint:{detail}", warning=True)
-            return "deferred", detail
-
-        added = _git(vault_root, "add", "--", "daily", "knowledge")
-        if added.returncode != 0:
-            detail = "machine-stage-failed"
-            write_health(state_dir, f"warn:local-checkpoint:{detail}", warning=True)
-            return "deferred", detail
-        staged_after = _git(vault_root, "diff", "--cached", "--name-only")
-        staged_paths = [line.strip() for line in staged_after.stdout.splitlines() if line.strip()]
-        if staged_after.returncode != 0 or not staged_paths:
-            _git(vault_root, "restore", "--staged", "--", "daily", "knowledge")
-            detail = "machine-stage-empty-or-unreadable"
-            write_health(state_dir, f"warn:local-checkpoint:{detail}", warning=True)
-            return "deferred", detail
-        if any(not path.startswith(("daily/", "knowledge/")) for path in staged_paths):
-            _git(vault_root, "restore", "--staged", "--", "daily", "knowledge")
-            detail = "machine-stage-boundary"
-            write_health(state_dir, f"warn:local-checkpoint:{detail}", warning=True)
-            return "deferred", detail
-
         label = Path(checkpoint_label).stem or dt.date.today().isoformat()
-        committed = _git(
-            vault_root,
-            "commit",
-            "-m",
-            f"chore: checkpoint machine memory {label}",
-        )
-        if committed.returncode != 0:
-            _git(vault_root, "restore", "--staged", "--", "daily", "knowledge")
-            detail = "machine-commit-failed"
+        outcome, detail = _commit_machine_snapshot(vault_root, label)
+        if outcome != "committed":
             write_health(state_dir, f"warn:local-checkpoint:{detail}", warning=True)
-            return "deferred", detail
+            return outcome, detail
         clear_health(state_dir, "compile")
-        return "committed", _git(vault_root, "rev-parse", "HEAD").stdout.strip()
+        return outcome, detail
     except (OSError, subprocess.SubprocessError):
         detail = "machine-checkpoint-error"
         write_health(state_dir, f"warn:local-checkpoint:{detail}", warning=True)
@@ -654,7 +744,205 @@ def _validate_live_destination(
     return destination
 
 
-def _atomic_copy(source: Path, destination: Path) -> None:
+def _suppression_digest(hashes: frozenset[str]) -> str:
+    return hashlib.sha256("\0".join(sorted(hashes)).encode("utf-8")).hexdigest()
+
+
+def _source_snapshot_matches(
+    source: Path,
+    digest: object,
+    size: object,
+) -> bool:
+    if (
+        not isinstance(digest, str)
+        or type(size) is not int
+        or size < 0
+        or size > _MAX_SOURCE_SNAPSHOT_BYTES
+    ):
+        return False
+    try:
+        source_stat = source.lstat()
+        if stat.S_ISLNK(source_stat.st_mode) or not stat.S_ISREG(source_stat.st_mode):
+            return False
+        if source.resolve(strict=True).parent != source.parent.resolve(strict=True):
+            return False
+        if source_stat.st_size < size:
+            return False
+        digest_state = hashlib.sha256()
+        remaining = size
+        with source.open("rb") as handle:
+            if os.fstat(handle.fileno()).st_size < size:
+                return False
+            while remaining:
+                chunk = handle.read(min(_SOURCE_PREFIX_CHUNK_BYTES, remaining))
+                if not chunk:
+                    return False
+                digest_state.update(chunk)
+                remaining -= len(chunk)
+    except (OSError, OverflowError):
+        return False
+    return digest_state.hexdigest() == digest
+
+
+def _publication_source_path(vault_root: Path, relative: object) -> Path:
+    if not isinstance(relative, str) or "\\" in relative:
+        raise PolicyError("publication-source-invalid")
+    path = Path(relative)
+    if (
+        path.parts[:1] != ("daily",)
+        or len(path.parts) != 2
+        or path.suffix != ".md"
+        or path.as_posix() != relative
+        or any(part in {".", ".."} for part in path.parts)
+    ):
+        raise PolicyError("publication-source-invalid")
+    source = vault_root / path
+    if source.resolve(strict=False).parent != (vault_root / "daily").resolve(strict=False):
+        raise PolicyError("publication-source-invalid")
+    return source
+
+
+def _validate_publication_source_relative(relative: object) -> str:
+    if not isinstance(relative, str) or "\\" in relative:
+        raise PolicyError("publication-source-invalid")
+    path = Path(relative)
+    if (
+        path.parts[:1] != ("daily",)
+        or len(path.parts) != 2
+        or path.suffix != ".md"
+        or path.as_posix() != relative
+        or any(part in {".", ".."} for part in path.parts)
+    ):
+        raise PolicyError("publication-source-invalid")
+    return relative
+
+
+def _publication_stage_path(state_dir: Path, relative: object, *, required: bool = True) -> Path:
+    if (
+        not isinstance(relative, str)
+        or "/" in relative
+        or "\\" in relative
+        or PUBLICATION_STAGE.fullmatch(relative) is None
+    ):
+        raise PolicyError("publication-stage-invalid")
+    state_resolved = state_dir.resolve(strict=False)
+    stage = state_dir / relative
+    if stage.resolve(strict=False).parent != state_resolved:
+        raise PolicyError("publication-stage-invalid")
+    try:
+        stage_stat = stage.lstat()
+    except FileNotFoundError:
+        if required:
+            raise PolicyError("publication-stage-missing")
+        return stage
+    if stat.S_ISLNK(stage_stat.st_mode) or not stat.S_ISDIR(stage_stat.st_mode):
+        raise PolicyError("publication-stage-invalid")
+    if stage.resolve(strict=True).parent != state_resolved:
+        raise PolicyError("publication-stage-invalid")
+    return stage
+
+
+def _validate_publication_journal(
+    state_dir: Path,
+    journal: dict[str, object],
+) -> dict[str, object]:
+    if journal.get("schema_version") != compile_state.PUBLICATION_SCHEMA_VERSION:
+        raise PolicyError("publication-journal-invalid")
+    if journal.get("status") not in {"pending", "complete"}:
+        raise PolicyError("publication-journal-invalid")
+    operation = journal.get("operation_id")
+    if not isinstance(operation, str) or PUBLICATION_OPERATION.fullmatch(operation) is None:
+        raise PolicyError("publication-journal-invalid")
+    timestamp = journal.get("timestamp")
+    if not isinstance(timestamp, str) or not timestamp:
+        raise PolicyError("publication-journal-invalid")
+    source_relative = _validate_publication_source_relative(journal.get("source_relative"))
+    source_digest = journal.get("source_digest")
+    source_size = journal.get("source_size")
+    suppression_digest = journal.get("suppression_digest")
+    if (
+        not isinstance(source_digest, str)
+        or DIGEST.fullmatch(source_digest) is None
+        or type(source_size) is not int
+        or source_size < 0
+        or source_size > _MAX_SOURCE_SNAPSHOT_BYTES
+        or not isinstance(suppression_digest, str)
+        or DIGEST.fullmatch(suppression_digest) is None
+    ):
+        raise PolicyError("publication-journal-invalid")
+    _publication_stage_path(state_dir, journal.get("stage"), required=False)
+    targets = journal.get("targets")
+    if not isinstance(targets, list) or not targets:
+        raise PolicyError("publication-journal-invalid")
+    seen: set[str] = set()
+    for target in targets:
+        if not isinstance(target, dict):
+            raise PolicyError("publication-journal-invalid")
+        relative = target.get("relative")
+        if (
+            not isinstance(relative, str)
+            or relative in seen
+            or not _is_allowed_output_file(relative)
+            or "\\" in relative
+            or Path(relative).as_posix() != relative
+            or any(part in {".", ".."} for part in Path(relative).parts)
+        ):
+            raise PolicyError("publication-journal-invalid")
+        seen.add(relative)
+        before_digest = target.get("before_sha256")
+        after_digest = target.get("after_sha256")
+        if (
+            before_digest is not None
+            and (not isinstance(before_digest, str) or DIGEST.fullmatch(before_digest) is None)
+        ) or not isinstance(after_digest, str) or DIGEST.fullmatch(after_digest) is None:
+            raise PolicyError("publication-journal-invalid")
+        if not isinstance(target.get("completed"), bool):
+            raise PolicyError("publication-journal-invalid")
+    return journal
+
+
+def _live_digest(vault_root: Path, relative: str) -> str | None:
+    destination = vault_root / relative
+    try:
+        target_stat = destination.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(target_stat.st_mode) or not stat.S_ISREG(target_stat.st_mode):
+        raise PolicyError(f"unsafe-live-target:{relative}")
+    return _sha256(destination)
+
+
+def _publication_record(
+    stage: Path,
+    state_dir: Path,
+    source_relative: str,
+    source_digest: str,
+    source_size: int,
+    timestamp: str,
+    suppression_digest: str,
+    targets: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "schema_version": compile_state.PUBLICATION_SCHEMA_VERSION,
+        "status": "pending",
+        "operation_id": uuid.uuid4().hex,
+        "timestamp": timestamp,
+        "source_relative": source_relative,
+        "source_digest": source_digest,
+        "source_size": source_size,
+        "suppression_digest": suppression_digest,
+        "stage": stage.relative_to(state_dir).as_posix(),
+        "targets": targets,
+    }
+
+
+def _atomic_copy(
+    source: Path,
+    destination: Path,
+    *,
+    deadline: float | None = None,
+    validate_destination: Callable[[], object] | None = None,
+) -> None:
     existing_mode = 0o644
     if destination.exists():
         existing_mode = stat.S_IMODE(destination.stat().st_mode)
@@ -670,12 +958,11 @@ def _atomic_copy(source: Path, destination: Path) -> None:
             target.flush()
             os.fsync(target.fileno())
         temporary.chmod(existing_mode)
-        os.replace(temporary, destination)
+        # Recheck the original target before every attempt, including sharing retries.
+        # This is optimistic conflict detection, not an atomic filesystem compare-and-swap.
+        replace_with_retry(temporary, destination, deadline=deadline, before_replace=validate_destination)
     finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+        temporary.unlink(missing_ok=True)
 
 
 def _promote_changes(
@@ -683,9 +970,43 @@ def _promote_changes(
     vault_root: Path,
     changed_files: list[str],
     live_baseline: dict[str, str | None],
+    *,
+    state_dir: Path | None = None,
+    source_relative: str | None = None,
+    source_digest: str | None = None,
+    source_size: int | None = None,
+    timestamp: str | None = None,
+    suppression_digest: str | None = None,
+    deadline: float | None = None,
 ) -> None:
-    destinations = []
+    journal_enabled = all(
+        value is not None
+        for value in (
+            state_dir,
+            source_relative,
+            source_digest,
+            timestamp,
+            suppression_digest,
+        )
+    )
+    if not journal_enabled and any(
+        value is not None
+        for value in (
+            state_dir,
+            source_relative,
+            source_digest,
+            timestamp,
+            suppression_digest,
+        )
+    ):
+        raise PolicyError("publication-metadata-invalid")
+    if journal_enabled and compile_state.load_publication(state_dir) is not None:
+        raise PolicyError("publication-pending")
+    manifest = _manifest(stage)
+    destinations: list[tuple[str, Path, str | None, str]] = []
     for relative in changed_files:
+        if not _is_allowed_output_file(relative):
+            raise PolicyError(f"forbidden-promotion:{relative}")
         if relative not in live_baseline:
             live_baseline[relative] = None
         destination = _validate_live_destination(
@@ -693,9 +1014,70 @@ def _promote_changes(
             relative,
             live_baseline[relative],
         )
-        destinations.append((stage / relative, destination))
-    for source, destination in destinations:
-        _atomic_copy(source, destination)
+        entry = manifest.get(relative)
+        if entry is None or entry[0] != "file":
+            raise PolicyError(f"publication-stage-output-missing:{relative}")
+        destinations.append((relative, destination, live_baseline[relative], entry[1]))
+
+    if not journal_enabled:
+        for relative, destination, _before, _after in destinations:
+            _atomic_copy(
+                stage / relative, destination, deadline=deadline,
+                validate_destination=lambda: _validate_live_destination(vault_root, relative, _before),
+            )
+        return
+
+    journal = _publication_record(
+        stage,
+        state_dir,
+        source_relative,
+        source_digest,
+        source_size
+        if source_size is not None
+        else _publication_source_path(vault_root, source_relative).stat().st_size,
+        timestamp,
+        suppression_digest,
+        [
+            {
+                "relative": relative,
+                "before_sha256": before,
+                "after_sha256": after,
+                "completed": False,
+            }
+            for relative, _destination, before, after in destinations
+        ],
+    )
+    _validate_publication_journal(state_dir, journal)
+    compile_state.save_publication(state_dir, journal)
+
+    replace_deadline = (
+        deadline
+        if deadline is not None
+        else time.monotonic() + REPLACE_RETRY_SECONDS
+    )
+    for index, (relative, destination, before, after) in enumerate(destinations):
+        current = _live_digest(vault_root, relative)
+        if current == after:
+            _validate_live_destination(vault_root, relative, after)
+        elif current == before:
+            _validate_live_destination(vault_root, relative, before)
+            _atomic_copy(
+                stage / relative,
+                destination,
+                deadline=replace_deadline,
+                validate_destination=lambda: _validate_live_destination(vault_root, relative, before),
+            )
+            if _live_digest(vault_root, relative) != after:
+                raise PolicyError(f"publication-target-drift:{relative}")
+        else:
+            _validate_live_destination(vault_root, relative, before)
+        target = journal["targets"][index]
+        if not isinstance(target, dict):
+            raise PolicyError("publication-journal-invalid")
+        target["completed"] = True
+        compile_state.save_publication(state_dir, journal)
+    journal["status"] = "complete"
+    compile_state.save_publication(state_dir, journal)
 
 
 def _run_codex(prompt: str, stage: Path) -> str | None:
@@ -705,6 +1087,7 @@ def _run_codex(prompt: str, stage: Path) -> str | None:
     last message is not part of the contract, the staged tree is.
     """
     prompt_path = stage / ".__alf4_compile_prompt.md"
+    cleanup_unverified = False
     try:
         prompt_path.write_text(prompt, encoding="utf-8")
         _, reason = codex_runner.run_exec(
@@ -713,11 +1096,16 @@ def _run_codex(prompt: str, stage: Path) -> str | None:
             sandbox="workspace-write",
             timeout=900,
             stage=stage,
+            propagate_cleanup_error=True,
         )
+    except ProcessTreeCleanupError:
+        cleanup_unverified = True
+        raise
     except OSError:
         return "codex-exec-error"
     finally:
-        prompt_path.unlink(missing_ok=True)
+        if not cleanup_unverified:
+            prompt_path.unlink(missing_ok=True)
     return reason
 
 
@@ -766,6 +1154,8 @@ def _compile_one(
             state_dir,
             daily_path,
         )
+        if compile_state.load_publication(state_dir) is not None:
+            raise PolicyError("publication-pending")
         phase = "verify-source"
         staged_daily = stage / "daily" / daily_path.name
         if _sha256(staged_daily) != expected_digest:
@@ -842,8 +1232,25 @@ def _compile_one(
                     return 'source-changed', 'source-changed-before-promotion'
                 # Only the snapshot digest is recorded as ingested. Concurrent
                 # appends remain pending for the next compile; no source is replaced.
-                _promote_changes(stage, vault_root, changed_files, live_baseline)
+                _promote_changes(
+                    stage,
+                    vault_root,
+                    changed_files,
+                    live_baseline,
+                    state_dir=state_dir,
+                    source_relative=daily_path.resolve(strict=True)
+                    .relative_to(vault_root.resolve(strict=True))
+                    .as_posix(),
+                    source_digest=expected_digest,
+                    source_size=len(source_snapshot),
+                    timestamp=timestamp,
+                    suppression_digest=_suppression_digest(hashes),
+                )
         return None, ""
+    except ProcessTreeCleanupError:
+        # The unverified child may still be using its stage; the worker fences its lane.
+        stage = None
+        raise
     except NoChangesError as exc:
         return "no-changes", str(exc)
     except PolicyError as exc:
@@ -857,9 +1264,164 @@ def _compile_one(
     finally:
         if stage is not None:
             try:
-                shutil.rmtree(stage)
-            except OSError:
+                journal = compile_state.load_publication(state_dir)
+                if journal is None or journal.get("stage") != stage.name:
+                    shutil.rmtree(stage)
+            except (OSError, ValueError):
                 write_health(state_dir, "stage-cleanup-failed")
+
+
+def _validate_publication_stage(
+    stage: Path,
+    journal: dict[str, object],
+) -> dict[str, tuple[str, str]]:
+    manifest = _manifest(stage)
+    source_relative = journal["source_relative"]
+    if not isinstance(source_relative, str):
+        raise PolicyError("publication-journal-invalid")
+    source_entry = manifest.get(source_relative)
+    if source_entry is None or source_entry[0] != "file":
+        raise PolicyError("publication-source-stage-invalid")
+    targets = journal["targets"]
+    if not isinstance(targets, list):
+        raise PolicyError("publication-journal-invalid")
+    for target in targets:
+        if not isinstance(target, dict):
+            raise PolicyError("publication-journal-invalid")
+        relative = target.get("relative")
+        after_digest = target.get("after_sha256")
+        if not isinstance(relative, str) or not isinstance(after_digest, str):
+            raise PolicyError("publication-journal-invalid")
+        if manifest.get(relative) != ("file", after_digest):
+            raise PolicyError(f"publication-stage-drift:{relative}")
+    return manifest
+
+
+def _recover_pending_publication(
+    vault_root: Path,
+    state_dir: Path,
+) -> dict[str, object] | None:
+    journal = compile_state.load_publication(state_dir)
+    if journal is None:
+        return None
+    journal = _validate_publication_journal(state_dir, journal)
+    private_root = vault_root / ".codex/private-memory"
+    hashes = load_suppressed_hashes(private_root)
+    if _suppression_digest(hashes) != journal["suppression_digest"]:
+        raise PolicyError("publication-preferences-changed")
+    source_relative = journal["source_relative"]
+    source = _publication_source_path(vault_root, source_relative)
+    try:
+        _check_source(source, vault_root, directory=False)
+    except FileNotFoundError as exc:
+        raise PolicyError("publication-source-missing") from exc
+    if not _source_snapshot_matches(
+        source,
+        journal["source_digest"],
+        journal["source_size"],
+    ):
+        raise PolicyError("publication-source-changed")
+
+    stage = _publication_stage_path(
+        state_dir,
+        journal["stage"],
+        required=False,
+    )
+    if journal["status"] == "pending" and stage.exists():
+        _validate_publication_stage(stage, journal)
+    elif journal["status"] != "complete":
+        raise PolicyError("publication-stage-missing")
+
+    with suppression_guard(private_root, hashes):
+        with locked(state_dir / f"daily-{Path(source_relative).stem}"):
+            if not _source_snapshot_matches(
+                source,
+                journal["source_digest"],
+                journal["source_size"],
+            ):
+                raise PolicyError("publication-source-changed")
+            if journal["status"] == "pending" and stage.exists():
+                _validate_publication_stage(stage, journal)
+            targets = journal["targets"]
+            if not isinstance(targets, list):
+                raise PolicyError("publication-journal-invalid")
+            replace_deadline = time.monotonic() + REPLACE_RETRY_SECONDS
+            for target in targets:
+                if not isinstance(target, dict):
+                    raise PolicyError("publication-journal-invalid")
+                relative = target["relative"]
+                before = target["before_sha256"]
+                after = target["after_sha256"]
+                if (
+                    not isinstance(relative, str)
+                    or not isinstance(after, str)
+                ):
+                    raise PolicyError("publication-journal-invalid")
+                current = _live_digest(vault_root, relative)
+                if current == after:
+                    _validate_live_destination(vault_root, relative, after)
+                elif current == before:
+                    if journal["status"] == "complete":
+                        raise PolicyError(f"publication-target-drift:{relative}")
+                    if not stage.exists():
+                        raise PolicyError("publication-stage-missing")
+                    _validate_live_destination(vault_root, relative, before)
+                    _atomic_copy(
+                        stage / relative,
+                        vault_root / relative,
+                        deadline=replace_deadline,
+                        validate_destination=lambda: _validate_live_destination(vault_root, relative, before),
+                    )
+                    if _live_digest(vault_root, relative) != after:
+                        raise PolicyError(f"publication-target-drift:{relative}")
+                else:
+                    _validate_live_destination(vault_root, relative, before)
+                target["completed"] = True
+                compile_state.save_publication(state_dir, journal)
+            journal["status"] = "complete"
+            compile_state.save_publication(state_dir, journal)
+    return journal
+
+
+def _finalize_publication(state_dir: Path) -> None:
+    journal = compile_state.load_publication(state_dir)
+    if journal is None:
+        return
+    journal = _validate_publication_journal(state_dir, journal)
+    if journal["status"] != "complete":
+        raise PolicyError("publication-incomplete")
+    stage = _publication_stage_path(state_dir, journal["stage"], required=False)
+    if stage.exists():
+        shutil.rmtree(stage)
+    operation_id = journal["operation_id"]
+    if not isinstance(operation_id, str):
+        raise PolicyError("publication-journal-invalid")
+    compile_state.save_publication_token(state_dir, operation_id)
+    compile_state.clear_publication(state_dir)
+
+
+def _apply_recovered_publication(
+    state: CompileState,
+    journal: dict[str, object],
+) -> bool:
+    source_relative = journal.get("source_relative")
+    source_digest = journal.get("source_digest")
+    timestamp = journal.get("timestamp")
+    if (
+        not isinstance(source_relative, str)
+        or not isinstance(source_digest, str)
+        or not isinstance(timestamp, str)
+    ):
+        raise PolicyError("publication-journal-invalid")
+    daily_name = Path(source_relative).name
+    if state.ingested.get(daily_name) == source_digest:
+        return False
+    state.ingested[daily_name] = source_digest
+    state.cursor = daily_name
+    state.last_run = timestamp
+    state.last_status = "ok"
+    state.append_run(timestamp, daily_name, "ok")
+    return True
 
 
 def rebuild_knowledge(
@@ -930,6 +1492,7 @@ def rebuild_knowledge(
             )
             if reason is not None:
                 raise PolicyError(f"rebuild-{reason}:{detail}")
+            _finalize_publication(state_dir)
         report = validate_knowledge_tree(build)
         if report.issues:
             raise PolicyError(f"rebuild-knowledge-schema:{report.issues[0]}")
@@ -1018,6 +1581,9 @@ def _run_locked(
     trigger_claim: Path | None,
 ) -> bool:
     """Return True when the run failed semantically; main maps it to an exit code."""
+    from worker_supervisor import has_unverified_process_tree
+    if has_unverified_process_tree(state_dir / "maintenance"):
+        return True
     try:
         state = compile_state.load(state_dir)
     except (OSError, ValueError) as exc:
@@ -1033,6 +1599,29 @@ def _run_locked(
             persist_state=False,
         )
         return True
+    if not dry_run:
+        try:
+            recovered = _recover_pending_publication(vault_root, state_dir)
+        except (OSError, UnicodeError, ValueError) as exc:
+            _record_failure(
+                state_dir,
+                state,
+                "",
+                "publication-recovery-failed",
+                str(exc),
+                trigger_claim,
+            )
+            return True
+        if recovered is not None:
+            try:
+                changed_state = _apply_recovered_publication(state, recovered)
+                if changed_state:
+                    compile_state.save(state_dir, state)
+                _finalize_publication(state_dir)
+            except (OSError, UnicodeError, ValueError) as exc:
+                write_health(state_dir, f"publication-finalize-failed:{exc}")
+                _release_trigger_claim(state_dir, trigger_claim)
+                return True
     try:
         changed = changed_dailies(vault_root, state)
     except (OSError, ValueError) as exc:
@@ -1068,9 +1657,15 @@ def _run_locked(
         state.last_status = "ok"
         try:
             compile_state.save(state_dir, state)
-            clear_health(state_dir, "compile")
         except OSError:
             write_health(state_dir, "state-write-failed")
+            _release_trigger_claim(state_dir, trigger_claim)
+            return True
+        try:
+            _finalize_publication(state_dir)
+            clear_health(state_dir, "compile")
+        except (OSError, UnicodeError, ValueError) as exc:
+            write_health(state_dir, f"publication-finalize-failed:{exc}")
             _release_trigger_claim(state_dir, trigger_claim)
             return True
         _checkpoint_machine_outputs(
@@ -1111,9 +1706,15 @@ def _run_locked(
         state.append_run(timestamp, daily_path.name, "ok")
         try:
             compile_state.save(state_dir, state)
-            clear_health(state_dir, "compile")
         except OSError:
             write_health(state_dir, "state-write-failed")
+            _release_trigger_claim(state_dir, trigger_claim)
+            return True
+        try:
+            _finalize_publication(state_dir)
+            clear_health(state_dir, "compile")
+        except (OSError, UnicodeError, ValueError) as exc:
+            write_health(state_dir, f"publication-finalize-failed:{exc}")
             _release_trigger_claim(state_dir, trigger_claim)
             return True
     _checkpoint_machine_outputs(
@@ -1196,6 +1797,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 trigger_claim,
             )
             return failure_code if failed else 0
+        except ProcessTreeCleanupError as exc:
+            from worker_supervisor import _fence_unverified_process_tree
+            _fence_unverified_process_tree(
+                STATE_DIR / "maintenance", {"job_id": "direct-compile"}, exc, now=time.time(),
+            )
+            write_health(STATE_DIR, "worker-tree-cleanup-unverified")
+            return failure_code
         except Exception as exc:  # Compiler must preserve the hook exit contract.
             try:
                 state = compile_state.load(STATE_DIR)

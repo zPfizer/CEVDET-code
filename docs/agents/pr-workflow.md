@@ -29,3 +29,5 @@ Codex ayarlarında bu depo için `Review my PRs` ve `On every push` etkinleştir
 Kaynak: https://learn.chatgpt.com/docs/third-party/github (8 Eylül 2026).
 
 Eski audit uygulamalarına başlamadan önce [eşlenmiş uygulama paketlerine](audit-packages-20260908.md) bak; tarihsel çözümü güncel kodla karşılaştırmadan yeniden uygulama.
+
+İlk kurulum stack'inde concurrency PR #3, #2 branch'ine alınır; ardından #1 ve birleşik #2 main'e gider. Bu bir kerelik bağımlı kurulumda commit ancestry'yi koruyan merge commit kullanılır; böylece başka PR'ın geçmişini force-push ile yeniden yazmak gerekmez. Normal bağımsız işlerde yukarıdaki squash akışı sürer.

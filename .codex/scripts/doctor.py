@@ -19,7 +19,7 @@ from codex_runner import find_codex
 from graph_integrity import graph_notes, graph_summary
 from knowledge_schema import WIKILINK, validate_knowledge_tree, wikilink_target
 from process_control import pid_is_alive
-from worker_supervisor import STALE_HOOK_INPUT_SECONDS, inspect_worker_queue
+from worker_supervisor import STALE_HOOK_INPUT_SECONDS, inspect_worker_queue, has_unverified_process_tree
 from tag_taxonomy import (
     TaxonomyError,
     audit_inline_tags,
@@ -40,7 +40,7 @@ from vault_corpus import (
     vault_notes,
 )
 from vault_retrieval import MAX_CACHE_BYTES, build_vault_map
-from memory_ledger import memory_read
+from memory_ledger import MemoryPreferenceError, memory_read
 
 
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
@@ -205,7 +205,7 @@ def _git_branch_check(ctx: Context) -> Check:
         )
     except FileNotFoundError:
         return Check("Git", "FAIL", "git yok")
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         return Check("Git", "FAIL", "repo yok")
     if repository.returncode != 0 or repository.stdout.strip().lower() != "true":
         return Check("Git", "FAIL", "repo yok")
@@ -217,7 +217,7 @@ def _git_branch_check(ctx: Context) -> Check:
             check=False,
             timeout=5,
         )
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         return Check("Git", "FAIL", "branch okunamadı")
     branch_name = branch.stdout.strip()
     if branch.returncode != 0:
@@ -695,15 +695,19 @@ def _derived_state_gitignore_check(ctx: Context) -> Check:
     vault = ctx.vault
     state_root = ".codex/scripts/.state"
     expected_tracked = {f"{state_root}/.gitkeep"}
-    tracked = subprocess.run(
-        ["git", "ls-files", "--", state_root],
-        cwd=vault,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        tracked = subprocess.run(
+            ["git", "ls-files", "--", state_root],
+            cwd=vault,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return Check("Derived-state gitignore", "FAIL", "git-ls-files-failed")
     if tracked.returncode != 0:
         return Check("Derived-state gitignore", "FAIL", "git-ls-files-failed")
     tracked_paths = {
@@ -724,13 +728,17 @@ def _derived_state_gitignore_check(ctx: Context) -> Check:
         (f"{state_root}/.gitkeep", False),
     )
     for relative, should_ignore in probes:
-        result = subprocess.run(
-            ["git", "check-ignore", "--no-index", "--quiet", "--", relative],
-            cwd=vault,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        try:
+            result = subprocess.run(
+                ["git", "check-ignore", "--no-index", "--quiet", "--", relative],
+                cwd=vault,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return Check("Derived-state gitignore", "FAIL", "git-check-ignore-failed")
         if result.returncode not in {0, 1} or (result.returncode == 0) != should_ignore:
             return Check(
                 "Derived-state gitignore",
@@ -745,6 +753,12 @@ def _derived_state_gitignore_check(ctx: Context) -> Check:
 
 
 def _worker_queue_check(ctx: Context) -> Check | list[Check]:
+    try:
+        for state in (ctx.state_dir, ctx.state_dir / 'maintenance'):
+            if has_unverified_process_tree(state):
+                return Check('Worker kuyruğu', 'FAIL', f'cleanup-unverified:{state.name}; otomatik işler durdu')
+    except OSError:
+        return Check('Worker kuyruğu', 'FAIL', 'cleanup fence okunamadı')
     now = ctx.now
     root = ctx.state_dir / "worker-jobs"
     counts = {
@@ -1397,8 +1411,11 @@ def _tansu_semantic_metadata_check(ctx: Context) -> Check:
 
 
 def _profile_maintenance_check(ctx: Context) -> Check:
-    with memory_read(ctx.vault) as memory:
-        issues = memory.profile_issues()
+    try:
+        with memory_read(ctx.vault) as memory:
+            issues = memory.profile_issues()
+    except MemoryPreferenceError as exc:
+        return Check("Profil bakımı", "FAIL", str(exc) or "memory-preference-failed")
     return Check('Profil bakımı', 'FAIL' if issues else 'OK',
                  ', '.join(issues) if issues else 'Kaynak, kullanıcı atfı, tarih, tekrar ve bağlam sınırı geçerli.')
 
@@ -1643,6 +1660,12 @@ def run_checks(
             continue
         try:
             produced = check(context)
+        except MemoryPreferenceError as exc:
+            checks.append(Check(name, "FAIL", str(exc) or "memory-preference-failed"))
+            continue
+        except subprocess.SubprocessError:
+            checks.append(Check(name, "FAIL", "alt süreç kontrolü tamamlanamadı"))
+            continue
         except Exception as exc:
             checks.append(
                 Check(

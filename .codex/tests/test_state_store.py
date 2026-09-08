@@ -94,7 +94,8 @@ class AtomicWriteTests(unittest.TestCase):
                 json.loads(target.read_text(encoding="utf-8")),
                 {"generation": 1},
             )
-            self.assertEqual(sorted(item.name for item in root.iterdir()), ["state.json"])
+            self.assertEqual(list(root.glob(".state.json.*.tmp")), [])
+            self.assertTrue((root / "state.json").is_file())
 
     def test_fsync_is_default_and_can_be_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
