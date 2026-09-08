@@ -314,6 +314,43 @@ class FlushTranscriptConcurrencyTests(unittest.TestCase):
         self.assertEqual(model.call_count, 2)
         self.assertEqual(daily_markers, 2)
 
+    def test_flush_bos_receipt_recovers_after_coverage_crash_without_model_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / ".state"
+            state.mkdir()
+            transcript = root / "rollout.jsonl"
+            self._write_rows(transcript, [("user", "Boş flush kararı")])
+            payload = {"session_id": "flush-bos-crash", "transcript_path": str(transcript)}
+            args = argparse.Namespace(hook_input=root / "unused", reason="turnend")
+            coverage_path = state / f"flush-coverage-{flush._session_key('flush-bos-crash')}.json"
+            original_atomic = flush.atomic_write_json
+
+            def crash_coverage(path, value, *extra, **kwargs):
+                if path == coverage_path:
+                    raise OSError("coverage crash")
+                return original_atomic(path, value, *extra, **kwargs)
+
+            with mock.patch.object(flush, "run_codex", return_value=("FLUSH_BOS", None)) as model, \
+                 mock.patch.object(flush, "maybe_trigger_compile"):
+                with mock.patch.object(flush, "atomic_write_json", side_effect=crash_coverage):
+                    with self.assertRaisesRegex(OSError, "coverage crash"):
+                        flush.flush_once(
+                            args, dt.datetime(2026, 9, 8, 12), root, state,
+                            hook_input=payload,
+                        )
+                model.assert_called_once()
+                with mock.patch.object(flush, "run_codex") as retry_model:
+                    self.assertEqual(
+                        flush.flush_once(
+                            args, dt.datetime(2026, 9, 8, 12), root, state,
+                            hook_input=payload,
+                        ),
+                        0,
+                    )
+                retry_model.assert_not_called()
+            self.assertEqual(json.loads(coverage_path.read_text())["count"], 1)
+
     def test_active_index_keeps_transcript_text_out_of_persistent_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

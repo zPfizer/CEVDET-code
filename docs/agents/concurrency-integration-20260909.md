@@ -58,12 +58,16 @@ aktif indeks yolu sınandı. Metadata büyümesine ayrıca sınır koymak bu akt
   gerçek geçici Git kökü ve eşleşen cwd eklendi. Eski suspended-launch mock testi,
   yeni atomik native launch'ın hata/handle temizliği sözleşmesine uyarlandı.
 
+- Filtrelenmiş view wrapper'ları publication hatasının türünü korur.
+- FLUSH_BOS receipt'i batch sınırlarını saklar; receipt sonrası coverage kesintisinde
+  aynı doğrulanmış boş sonuç tekrar modele gönderilmez.
+
 ## Doğrulama
 
 - Eski dalın 666 test sonucu tarihsel kanıttır; güncel code-only sonuç değildir.
 - İlk birleşik 861 test koşusu 8 failure/4 error verdi. Uyarlamalar ve bulunan
   yarışlar giderildi; ara birleşik koşuda 863 test, son yerel Windows koşusunda
-  867 test (89.246 saniye, OK) geçti. GitHub CI sonucu ayrıca raporlanır.
+  869 test (91.491 saniye, OK) geçti. GitHub CI sonucu ayrıca raporlanır.
 - Yayın retry regresyonları eski b800 adayında 2 RED, düzeltmede 2 GREEN verdi.
 - Süreç cleanup, publication ve reader/reflection incelemelerinde bildirilen
   maddi bulgular kaynak düzeltmeleri ve odaklı testlerle giderildi.

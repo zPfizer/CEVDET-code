@@ -680,6 +680,8 @@ class MemoryRead:
             if self._publication is not None:
                 self.check_knowledge_snapshot()
             return views
+        except MemoryPreferenceError:
+            raise
         except (OSError, ValueError) as exc:
             if str(exc) == 'memory-preferences-changed':
                 raise MemoryPreferenceError('memory-preferences-changed') from exc
@@ -706,6 +708,8 @@ class MemoryRead:
             if self._publication is not None:
                 self.check_knowledge_snapshot()
             return views
+        except MemoryPreferenceError:
+            raise
         except (OSError, ValueError) as exc:
             raise MemoryPreferenceError('memory-view-unavailable') from exc
 

@@ -69,6 +69,17 @@ class PublicationReaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ledger.MemoryPreferenceError, 'publication-changed'):
                 ledger.MemoryRead(self.root, frozenset()).read_source(self.source)
 
+    def test_filtered_view_wrappers_preserve_publication_error(self):
+        private = self.root / '.codex/private-memory'
+        ledger.suppress_derived_memory(private, 'synthetic suppressed topic')
+        hashes = ledger.load_suppressed_hashes(private)
+        self.pending()
+        for method in ('views', 'render_views'):
+            with self.subTest(method=method):
+                memory = ledger.MemoryRead(self.root, hashes)
+                with self.assertRaisesRegex(ledger.MemoryPreferenceError, 'memory-publication-pending'):
+                    getattr(memory, method)([('knowledge/index.md', 'Index')])
+
     def test_pending_blocks_filtered_view_materialization_and_read(self):
         private = self.root / '.codex/private-memory'
         ledger.suppress_derived_memory(private, 'gizli konu')

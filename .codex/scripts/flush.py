@@ -1283,6 +1283,8 @@ def flush_once(
                     reason=args.reason,
                     transcript_digest=transcript_digest,
                     summary_digest=summary_digest,
+                    batch_start=start,
+                    batch_end=end,
                     idempotency_key=_flush_idempotency_key(
                         session_id,
                         args.reason,
