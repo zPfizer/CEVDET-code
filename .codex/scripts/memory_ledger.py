@@ -102,7 +102,28 @@ EXPLICIT_WRITE_INTENT = re.compile(
     r"(?:uygulamaya|yazmaya|değişikliğe)\s+geç|"
     r"(?:dosyaları\s+)?(?:değiştirebilirsin|düzenleyebilirsin|"
     r"uygulayabilirsin|yazabilirsin)"
+    r"|(?:(?:[^,;:!?\r\n]+)\s+)?(?:düzelt|değiştir|düzenle|uygula|yaz|onar|yap)"
+    r"(?:\s+lütfen)?"
+    r"|(?:(?:[^,;:!?\r\n]+)\s+)?(?:düzeltebilir|düzeltir|değiştirebilir|değiştirir|"
+    r"düzenleyebilir|düzenler|uygulayabilir|uygular|yazabilir|yazar|"
+    r"onarabilir|onarır|yapabilir|yapar)"
+    r"\s+m[ıiuü]s[ıiuü]n(?:\s*,?\s*lütfen)?\?"
     r")\s*[.!]*\s*$"
+)
+
+NON_COMMITTAL_WRITE = re.compile(
+    r"\b(?:eğer|şayet|uygunsa|mümkünse|istersen(?:iz)?|gerekirse|"
+    r"olursa|belki|sanırım)\b"
+)
+CONDITIONAL_WRITE = re.compile(
+    r"\b\w+(?:(?:[ıiuü]r|[ae]r|[uü]r|acak|ecek|iyor|ıyor|uyor|üyor|"
+    r"miş|mış|muş|müş)(?:sa|se|sam|sem|san|sen|sak|sek|salar|seler|"
+    r"sınız|siniz|sunuz|sünüz|sanız|seniz)|d[iıuü]y?(?:sa|se|sam|sem|"
+    r"san|sen|sak|sek|salar|seler|sınız|siniz|sunuz|sünüz|sanız|seniz)|"
+    r"(?:var|yok)(?:sa|se)|madan|meden)\b"
+)
+ACTION_QUESTION_WORD = re.compile(
+    r"\b(?:ne|nasıl|neden|niçin|hangi|hangisi|kim|ne\s+zaman)\b"
 )
 
 
@@ -288,8 +309,16 @@ def is_read_only_request(text: str) -> bool:
 
 
 def is_explicit_write_intent(text: str) -> bool:
-    # Removing quoted data must not turn a quoted rule into write authorization.
+    # Quoted, read-only, conditional, and speculative text is not authorization.
+    if is_read_only_request(text) or _unquoted_request(text) != text.strip():
+        return False
     folded = unicodedata.normalize("NFKC", text).casefold().replace("i\u0307", "i")
+    if (
+        NON_COMMITTAL_WRITE.search(folded)
+        or CONDITIONAL_WRITE.search(folded)
+        or ACTION_QUESTION_WORD.search(folded)
+    ):
+        return False
     return EXPLICIT_WRITE_INTENT.fullmatch(folded) is not None
 
 

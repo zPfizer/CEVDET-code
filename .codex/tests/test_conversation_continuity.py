@@ -267,6 +267,26 @@ class ConversationContinuityTests(unittest.TestCase):
     def test_explicit_write_prompt_reopens_read_only_scope(self):
         self._check_explicit_write_prompt_reopens_read_only_scope('Ok yap.')
 
+    def test_natural_action_question_reopens_read_only_scope(self):
+        for prompt in ('Düzeltebilir misin?', 'Dosyaları değiştirebilir misin?'):
+            with self.subTest(prompt=prompt):
+                self._check_explicit_write_prompt_reopens_read_only_scope(prompt)
+
+    def test_targeted_fix_command_reopens_read_only_scope(self):
+        self._check_explicit_write_prompt_reopens_read_only_scope(
+            'BIB projesindeki hatayı düzelt.', expect_prompt_enqueue=True
+        )
+
+    def test_conditional_targeted_commands_keep_read_only_scope(self):
+        for prompt in (
+            'Onay verirsem BIB projesindeki hatayı düzelt.',
+            'Onay verdiysem BIB projesindeki hatayı düzelt.',
+            'Onayım varsa BIB projesindeki hatayı düzelt.',
+            'Onaylamadan düzeltme; sadece açıklama yap.',
+        ):
+            with self.subTest(prompt=prompt):
+                self._check_write_prompt_keeps_read_only_scope(prompt)
+
     def test_natural_ordered_write_prompt_reopens_read_only_scope(self):
         self._check_explicit_write_prompt_reopens_read_only_scope('Sırayla hepsini yap')
 
@@ -293,6 +313,29 @@ class ConversationContinuityTests(unittest.TestCase):
                     self.assertEqual(hook.main(['user-prompt']), 0)
                 self.assertTrue(memory_ledger.is_read_only_turn(state, 'quoted-rule'))
                 enqueue.assert_not_called()
+
+    def test_same_prompt_read_only_wins_over_action_question(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / '.codex/scripts/.state'
+            memory_ledger.mark_read_only_turn(state, 'audit')
+            payload = {
+                'session_id': 'audit',
+                'prompt': 'Düzeltebilir misin? Do not modify files or settings.',
+            }
+            with (
+                mock.patch.object(hook, 'VAULT_ROOT', vault),
+                mock.patch.object(hook, 'STATE_DIR', state),
+                mock.patch.object(hook, 'handle_user_prompt', return_value=''),
+                mock.patch.object(hook, 'enqueue_flush') as enqueue,
+                mock.patch.object(hook, 'record_hook_runtime'),
+                mock.patch.object(hook, 'clear_hook_health'),
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))),
+                mock.patch.object(sys, 'stdout', io.StringIO()),
+            ):
+                self.assertEqual(hook.main(['user-prompt']), 0)
+            self.assertTrue(memory_ledger.is_read_only_turn(state, 'audit'))
+            enqueue.assert_not_called()
 
     def test_full_message_fences_are_read_only_but_embedded_or_quoted_text_is_not(self):
         fenced = (
@@ -410,7 +453,9 @@ class ConversationContinuityTests(unittest.TestCase):
                     enqueue.assert_not_called()
                     reflect.assert_not_called()
 
-    def _check_explicit_write_prompt_reopens_read_only_scope(self, prompt):
+    def _check_explicit_write_prompt_reopens_read_only_scope(
+        self, prompt, *, expect_prompt_enqueue=False
+    ):
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
             from test_profile_guard import seed_profile
@@ -449,6 +494,10 @@ class ConversationContinuityTests(unittest.TestCase):
             ):
                 self.assertEqual(hook.main(['user-prompt']), 0)
             self.assertFalse(memory_ledger.is_read_only_turn(state, 'audit'))
+            if expect_prompt_enqueue:
+                enqueue.assert_called_once_with(payload, 'precompact')
+            else:
+                enqueue.assert_not_called()
 
             output = io.StringIO()
             with (
@@ -460,8 +509,27 @@ class ConversationContinuityTests(unittest.TestCase):
             ):
                 self.assertEqual(hook.main(['turn-end', '--strict']), 0)
 
-        enqueue.assert_not_called()
         enqueue_end.assert_called_once_with(payload, 'turnend')
+
+    def _check_write_prompt_keeps_read_only_scope(self, prompt):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / '.codex/scripts/.state'
+            memory_ledger.mark_read_only_turn(state, 'audit')
+            payload = {'session_id': 'audit', 'prompt': prompt}
+            with (
+                mock.patch.object(hook, 'VAULT_ROOT', vault),
+                mock.patch.object(hook, 'STATE_DIR', state),
+                mock.patch.object(hook, 'handle_user_prompt', return_value=''),
+                mock.patch.object(hook, 'enqueue_flush') as enqueue,
+                mock.patch.object(hook, 'record_hook_runtime'),
+                mock.patch.object(hook, 'clear_hook_health'),
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))),
+                mock.patch.object(sys, 'stdout', io.StringIO()),
+            ):
+                self.assertEqual(hook.main(['user-prompt']), 0)
+            self.assertTrue(memory_ledger.is_read_only_turn(state, 'audit'))
+            enqueue.assert_not_called()
 
     def test_read_only_scope_blocks_mixed_forget_write_but_keeps_direct_forget_explicit(self):
         with tempfile.TemporaryDirectory() as temporary:

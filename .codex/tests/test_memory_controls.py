@@ -83,6 +83,11 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Tamam, lütfen hepsini sırayla uygula!": ("write-intent", ""),
             "SIRAYLA HEPSİNİ YAP": ("write-intent", ""),
             "Bunu düzelt.": ("correct", ""),
+            "Düzeltebilir misin?": ("write-intent", ""),
+            "Dosyaları değiştirebilir misin?": ("write-intent", ""),
+            "BIB projesindeki hatayı düzelt.": ("correct", ""),
+            "BIB projesindeki hatayı düzeltebilir misin?": ("write-intent", ""),
+            "Acaba düzeltebilir misin?": ("write-intent", ""),
         }
 
         for prompt, expected in cases.items():
@@ -95,7 +100,6 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Yazar 'Uygula' demiş; ne anlama geliyor?",
             "Belgelerde ‘Bunu düzelt’ geçiyor.",
             "Ok yap?",
-            "Dosyaları değiştirebilir misin?",
             "Dosyaları değiştirme kuralı nedir?",
             "Sırayla hepsini yap?",
             "Sırayla yap?",
@@ -108,6 +112,19 @@ class MemoryDirectiveTests(unittest.TestCase):
             'Alıntıda "Sırayla hepsini yap" yazıyor.',
             "Sadece incele; sırayla hepsini yap.",
             "> Sırayla hepsini yap",
+            '"Düzeltebilir misin?"',
+            "BIB projesindeki hatayı düzeltme.",
+            "Eğer uygunsa BIB projesindeki hatayı düzelt.",
+            "Belki BIB projesindeki hatayı düzelt.",
+            "Onay verirsem BIB projesindeki hatayı düzelt.",
+            "Onay verirseniz BIB projesindeki hatayı düzelt.",
+            "Onay verdiysem BIB projesindeki hatayı düzelt.",
+            "Onayım varsa BIB projesindeki hatayı düzelt.",
+            "Onaylamadan düzeltme; sadece açıklama yap.",
+            "Nasıl düzeltilir?",
+            "BIB projesindeki hatayı nasıl düzeltebilir misin?",
+            "BIB projesindeki hatayı düzeltebilir miyim?",
+            "BIB projesindeki hatayı düzeltebilir misin, olur mu?",
         ):
             with self.subTest(prompt=prompt):
                 self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
