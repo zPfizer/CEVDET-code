@@ -766,9 +766,16 @@ def read_memory_source(vault_root: Path, path: Path) -> str:
                 raise MemorySourceError('memory-view-source-unavailable')
             source_relative = source.relative_to(root).as_posix()
             if memory.active:
+                from vault_retrieval import _apply_memory_suppressions, build_vault_map
+
+                indexed = build_vault_map(root, write_cache=False)
+                visible = _apply_memory_suppressions(root, indexed, memory)
+                # ponytail: render all visible sources for opaque link targets; if a large Vault makes this costly, use requested-only rendering with opaque alias mapping.
+                sources = [(entry.path, entry.title) for entry in visible]
+                if source_relative not in {relative for relative, _title in sources}:
+                    sources.insert(0, (source_relative, PurePosixPath(source_relative).stem))
                 rendered, _paths = memory.render_views(
-                    [(source_relative, PurePosixPath(source_relative).stem)],
-                    alias_sources=[],
+                    sources,
                 )
                 text = rendered.get(source_relative)
             else:

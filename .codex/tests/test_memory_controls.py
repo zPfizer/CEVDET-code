@@ -488,6 +488,8 @@ class SuppressionTests(unittest.TestCase):
             vault = Path(temporary)
             source = vault / "🧠 500-Knowledge/long.md"
             source.parent.mkdir(parents=True)
+            linked = source.parent / "linked-note.md"
+            linked.write_text("# Linked kaynak\nH08 linked kanıtı.\n", encoding="utf-8")
             hidden = "H08-SIZDIRILMAMALI-AYRINTI."
             source.write_text(
                 "# Uzun kaynak\n"
@@ -516,6 +518,9 @@ class SuppressionTests(unittest.TestCase):
             filtered_from_opaque_id = memory_ledger.read_memory_source(
                 vault, opaque_source
             )
+            linked_relative = linked.relative_to(vault).as_posix()
+            linked_opaque = vault / memory_ledger.memory_view_relative_path(linked_relative)
+            linked_filtered = memory_ledger.read_memory_source(vault, linked_opaque)
             with self.assertRaisesRegex(
                 memory_ledger.MemorySourceError, "memory-view-source-unavailable"
             ):
@@ -536,9 +541,15 @@ class SuppressionTests(unittest.TestCase):
         self.assertIn("tail-kanıtı", filtered)
         self.assertGreater(len(filtered), 5000)
         self.assertIn("Ham hedef etiketi", filtered_from_opaque_id)
-        self.assertNotIn("linked-note", filtered_from_opaque_id)
+        self.assertIn(
+            memory_ledger.memory_view_relative_path(
+                linked.relative_to(vault).as_posix()
+            ),
+            filtered_from_opaque_id,
+        )
         self.assertNotIn(hidden, filtered_from_opaque_id)
         self.assertIn("tail-kanıtı", filtered_from_opaque_id)
+        self.assertIn("H08 linked kanıtı.", linked_filtered)
         self.assertEqual(source_after, original)
         self.assertFalse(cache_exists)
         self.assertFalse(view_dir_exists)
