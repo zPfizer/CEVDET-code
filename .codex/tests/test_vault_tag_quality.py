@@ -4,7 +4,7 @@ from contextlib import contextmanager
 import hashlib
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sys
 import tempfile
 import unittest
@@ -261,6 +261,29 @@ class VaultTagQualityTests(unittest.TestCase):
                 self.assertNotIn("yenietiket", output.getvalue())
                 self.assertEqual("eskietiket" in output.getvalue(), bool(inline))
                 self.assertEqual(note.read_text(encoding="utf-8"), changed)
+
+    def test_cli_fails_closed_on_unreadable_note_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            unreadable = tag_taxonomy.NoteIndex(
+                root / "note.md",
+                PurePosixPath("note.md"),
+                "",
+                {},
+                "PermissionError",
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.object(tag_taxonomy, "vault_notes", return_value=(unreadable,)),
+                mock.patch.object(tag_taxonomy.sys, "stdout", output),
+            ):
+                exit_code = tag_taxonomy.main(
+                    ["--root", str(root), "--taxonomy", str(TAXONOMY_PATH)]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("ERROR\tnote-unreadable:note.md:PermissionError", output.getvalue())
+        self.assertNotIn("CANONICAL\t", output.getvalue())
 
     def test_cli_conflict_is_nonzero_and_does_not_claim_migrated(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

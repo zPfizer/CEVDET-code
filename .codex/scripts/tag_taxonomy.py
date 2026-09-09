@@ -306,7 +306,16 @@ def tagged_notes(
 ) -> list[NoteIndex]:
     """Notes the taxonomy governs: everything except the daily log."""
     corpus = vault_notes(root) if notes is None else notes
+    _ensure_notes_readable(corpus)
     return [note for note in corpus if note.root != DAILY_ROOT]
+
+
+def _ensure_notes_readable(notes: Sequence[NoteIndex]) -> None:
+    unreadable = next((note for note in notes if note.error), None)
+    if unreadable is not None:
+        raise OSError(
+            f"note-unreadable:{unreadable.key}:{unreadable.error}"
+        )
 
 
 def _violations(note: NoteIndex, taxonomy: Taxonomy) -> list[TagViolation]:
@@ -381,8 +390,10 @@ def audit_inline_tags(
                 )
         except (OSError, json.JSONDecodeError):
             ignored = ()
+    corpus = vault_notes(root) if notes is None else notes
+    _ensure_notes_readable(corpus)
     violations: list[InlineTagViolation] = []
-    for note in vault_notes(root) if notes is None else notes:
+    for note in corpus:
         relative = note.key
         if any(
             relative == prefix or relative.startswith(f"{prefix}/")
