@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -151,10 +151,27 @@ def wikilink_target(inner: str) -> str:
     return target.split("#", 1)[0].strip().replace("\\", "/")
 
 
+def _is_escaped(text: str, index: int) -> bool:
+    slashes = 0
+    index -= 1
+    while index >= 0 and text[index] == "\\":
+        slashes += 1
+        index -= 1
+    return slashes % 2 == 1
+
+
+def _wikilinks(text: str) -> Iterator[re.Match[str]]:
+    return (
+        match
+        for match in WIKILINK.finditer(text)
+        if not _is_escaped(text, match.start())
+    )
+
+
 def _link_slugs(text: str) -> set[str]:
     return {
         target
-        for match in WIKILINK.finditer(text)
+        for match in _wikilinks(text)
         if (target := wikilink_target(match.group(1)))
     }
 
@@ -369,7 +386,7 @@ def _concept_related_ok(path: Path, text: str) -> bool:
     if not _ordered(text, CONCEPT_HEADINGS):
         return True  # the headings rule already owns this failure
     related = _section(text, CONCEPT_HEADINGS[2], CONCEPT_HEADINGS[3])
-    return len(WIKILINK.findall(related)) >= RELATED_LINKS_MIN
+    return sum(1 for _ in _wikilinks(related)) >= RELATED_LINKS_MIN
 
 
 def _connection_path_ok(path: Path, text: str) -> bool:
