@@ -191,6 +191,10 @@ def _git(
 
 def _commit_machine_snapshot(vault_root: Path, label: str) -> tuple[str, str]:
     """Use Git's index lock and ref CAS; never borrow the user's staging area."""
+    try:
+        _check_secret_path(label)
+    except PolicyError:
+        return "deferred", "source-path-contains-secret"
     # Plumbing must not silently bypass a repository's porcelain commit policy.
     signing = _git(vault_root, "config", "--bool", "--get", "commit.gpgsign")
     hooks = _git(vault_root, "rev-parse", "--git-path", "hooks")
@@ -247,6 +251,11 @@ def _commit_machine_snapshot(vault_root: Path, label: str) -> tuple[str, str]:
             paths = [path for path in changed.stdout.split("\0") if path]
             if changed.returncode or not paths:
                 return "deferred", "machine-stage-empty-or-unreadable"
+            try:
+                for path in paths:
+                    _check_secret_path(path)
+            except PolicyError:
+                return "deferred", "source-path-contains-secret"
             if any(not path.startswith(("daily/", "knowledge/")) for path in paths):
                 return "deferred", "machine-stage-boundary"
             tree = _git(vault_root, "write-tree", index_file=private_index)

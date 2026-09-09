@@ -103,6 +103,50 @@ class CheckpointConcurrencyTests(unittest.TestCase):
         self.assertEqual(self.git('diff', '--cached', '--name-only').stdout, '')
         self.assertEqual(self.git('diff', '--name-only', '--', 'daily', 'knowledge').stdout, '')
 
+    def test_already_ingested_secret_filename_is_rejected_before_checkpoint(self):
+        self.daily.write_text('before\n', encoding='utf-8')
+        secret = self.root / 'daily/password=synthetic.md'
+        secret.write_text('secret\n', encoding='utf-8')
+        original_secret = secret.read_bytes()
+        index_path = self.root / '.git/index'
+        original_index = index_path.read_bytes()
+        parent = self.git('rev-parse', 'HEAD').stdout.strip()
+
+        outcome, detail = compiler._checkpoint_machine_outputs(
+            self.root, self.state, 'already-ingested',
+        )
+
+        self.assertEqual((outcome, detail), ('deferred', 'source-path-contains-secret'))
+        self.assertEqual(self.git('rev-parse', 'HEAD').stdout.strip(), parent)
+        self.assertEqual(index_path.read_bytes(), original_index)
+        self.assertEqual(secret.read_bytes(), original_secret)
+        self.assertFalse((self.root / '.git/index.lock').exists())
+
+    def test_secret_filename_added_to_private_snapshot_is_rejected(self):
+        secret = self.root / 'daily/password=synthetic.md'
+        original_index = (self.root / '.git/index').read_bytes()
+        parent = self.git('rev-parse', 'HEAD').stdout.strip()
+        added = False
+
+        def race(command, **kwargs):
+            nonlocal added
+            if not added and 'add' in command and '-A' in command and 'daily' in command:
+                secret.write_text('secret\n', encoding='utf-8')
+                added = True
+            return self.native_run(command, **kwargs)
+
+        with mock.patch.object(compiler.subprocess, 'run', side_effect=race):
+            outcome, detail = compiler._checkpoint_machine_outputs(
+                self.root, self.state, 'snapshot',
+            )
+
+        self.assertEqual((outcome, detail), ('deferred', 'source-path-contains-secret'))
+        self.assertTrue(added)
+        self.assertEqual(self.git('rev-parse', 'HEAD').stdout.strip(), parent)
+        self.assertEqual((self.root / '.git/index').read_bytes(), original_index)
+        self.assertEqual(secret.read_text(encoding='utf-8'), 'secret\n')
+        self.assertFalse((self.root / '.git/index.lock').exists())
+
     def test_foreign_index_lock_is_preserved(self):
         lock_path = self.root / '.git/index.lock'
         lock_path.write_bytes(b'foreign owner')
