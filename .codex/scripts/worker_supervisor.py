@@ -755,11 +755,36 @@ def migrate_legacy_failed_jobs(
     return migrated
 
 
+def _has_verified_successor(root: Path, job: dict[str, Any]) -> bool:
+    if (
+        job.get("terminal_reason") != "recovered-by-successor"
+        or job.get("retryable") is not False
+    ):
+        return False
+    recovery_job_id = job.get("recovery_job_id")
+    if not isinstance(recovery_job_id, str) or re.fullmatch(
+        r"[A-Za-z0-9_-]{1,128}", recovery_job_id
+    ) is None:
+        return False
+    successor_path = root / "succeeded" / f"job-{recovery_job_id}.json"
+    try:
+        successor = _load_job(successor_path)
+    except ValueError:
+        return False
+    return (
+        successor.get("status") == "succeeded"
+        and successor.get("job_id") == recovery_job_id
+        and successor.get("kind") == job.get("kind")
+        and successor.get("payload") == job.get("payload")
+    )
+
+
 def inspect_worker_queue(state_dir: Path) -> dict[str, Any]:
     root = _job_root(state_dir)
     counts = {state: 0 for state in JOB_STATES}
     invalid = 0
     generation = 0
+    terminal = {"recovered": 0, "unresolved": 0}
     for state in JOB_STATES:
         for path in sorted((root / state).glob("*.json")):
             try:
@@ -774,11 +799,16 @@ def inspect_worker_queue(state_dir: Path) -> dict[str, Any]:
                         raise ValueError("worker-quarantine-payload-invalid")
             except ValueError:
                 invalid += 1
+                if state == "dead-letter":
+                    terminal["unresolved"] += 1
                 continue
             counts[state] += 1
             value = job.get("generation", 0)
             if isinstance(value, int) and not isinstance(value, bool):
                 generation = max(generation, value)
+            if state == "dead-letter":
+                outcome = "recovered" if _has_verified_successor(root, job) else "unresolved"
+                terminal[outcome] += 1
     cleanup_unverified = has_unverified_process_tree(state_dir)
     status = (
         "error"
@@ -790,7 +820,7 @@ def inspect_worker_queue(state_dir: Path) -> dict[str, Any]:
     digest = hashlib.sha256(
         json.dumps(
             {"counts": counts, "generation": generation, "invalid": invalid,
-             "cleanup_unverified": cleanup_unverified},
+             "cleanup_unverified": cleanup_unverified, "terminal": terminal},
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,
@@ -804,6 +834,7 @@ def inspect_worker_queue(state_dir: Path) -> dict[str, Any]:
         "counts": counts,
         "invalid": invalid,
         "cleanup_unverified": cleanup_unverified,
+        "terminal": terminal,
     }
 
 
