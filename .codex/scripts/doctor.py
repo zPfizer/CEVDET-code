@@ -22,6 +22,7 @@ from process_control import pid_is_alive
 from worker_supervisor import (
     STALE_HOOK_INPUT_SECONDS,
     SUPERVISOR_SCHEMA_VERSION,
+    _process_owner_is_active,
     inspect_worker_queue,
     has_unverified_process_tree,
 )
@@ -754,6 +755,84 @@ def _flush_inflight_check(ctx: Context) -> Check:
         if entries_invalid:
             invalid.append(path.name)
             continue
+        reason = receipt.get("reason")
+        if "reason" in receipt and reason not in {
+            "turnend",
+            "precompact",
+            "sessionend",
+        }:
+            invalid.append(path.name)
+            continue
+        identity_fields = ("idempotency_key", "transcript_digest", "summary_digest")
+        identity_present = [field in receipt for field in identity_fields]
+
+        def identity_matches_nested() -> bool:
+            idempotency_key = receipt.get("idempotency_key")
+            item = receipts.get(idempotency_key)
+            if not isinstance(item, dict):
+                return False
+            if any(
+                item.get(field) != receipt.get(field)
+                for field in identity_fields
+            ):
+                return False
+            if item.get("status") != status:
+                return False
+            if item.get("ts") != receipt.get("ts"):
+                return False
+            if item.get("generation") != receipt.get("generation"):
+                return False
+            for field in (
+                "reason",
+                "detail",
+                "daily_file",
+                "event_iso",
+                "batch_start",
+                "batch_end",
+            ):
+                if field in receipt and item.get(field) != receipt.get(field):
+                    return False
+            return True
+
+        if status == "inflight":
+            if (
+                reason not in {"turnend", "precompact", "sessionend"}
+                or type(receipt.get("transcript_digest")) is not str
+                or _HASH64.fullmatch(receipt["transcript_digest"]) is None
+                or "idempotency_key" in receipt
+                or "summary_digest" in receipt
+            ):
+                invalid.append(path.name)
+                continue
+        elif status == "fail":
+            if (
+                not isinstance(receipt.get("detail"), str)
+                or not receipt["detail"]
+                or any(identity_present)
+                or "reason" in receipt
+            ):
+                invalid.append(path.name)
+                continue
+        elif status == "prepared" or any(identity_present):
+            if (
+                not all(identity_present)
+                or reason not in {"turnend", "precompact", "sessionend"}
+                or any(
+                    not isinstance(receipt.get(field), str)
+                    or _HASH64.fullmatch(receipt[field]) is None
+                    for field in identity_fields
+                )
+                or not identity_matches_nested()
+            ):
+                invalid.append(path.name)
+                continue
+        elif status == "ok" and receipt.get("detail") not in {
+            "memory-excluded",
+            "below-minimum-turns",
+            "flush-bos",
+        }:
+            invalid.append(path.name)
+            continue
         if status != "inflight":
             continue
         age = max(0, int(now - timestamp))
@@ -1016,6 +1095,14 @@ def _worker_delayed_job_check(ctx: Context) -> Check:
         ):
             return Check("Worker gecikmiş iş", "FAIL", "supervisor receipt alanları geçersiz")
         supervisor = status
+        if ready_pending and supervisor == "running":
+            lease_until = _finite_timestamp(receipt["lease_until"])
+            if lease_until is None or lease_until <= now or not _process_owner_is_active(receipt):
+                return Check(
+                    "Worker gecikmiş iş",
+                    "FAIL",
+                    "running supervisor ownership geçersiz",
+                )
     evidence = f"ready-pending={ready_pending}; supervisor={supervisor}"
     if ready_pending and supervisor == "idle":
         return Check("Worker gecikmiş iş", "WARN", evidence)

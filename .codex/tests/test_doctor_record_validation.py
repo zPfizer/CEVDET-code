@@ -133,6 +133,10 @@ class DoctorRecordValidationTests(unittest.TestCase):
                 "generation",
                 "schema_version",
                 "receipts",
+                "idempotency_key",
+                "transcript_digest",
+                "summary_digest",
+                "reason",
             ):
                 with self.subTest(field=field):
                     malformed = dict(valid)
@@ -151,6 +155,10 @@ class DoctorRecordValidationTests(unittest.TestCase):
                 ("generation", True),
                 ("schema_version", 1),
                 ("receipts", {"a" * 64: []}),
+                ("idempotency_key", "0" * 64),
+                ("transcript_digest", "bad"),
+                ("summary_digest", "bad"),
+                ("reason", "bad"),
             ):
                 with self.subTest(field=field, value=value):
                     malformed = dict(valid)
@@ -162,6 +170,36 @@ class DoctorRecordValidationTests(unittest.TestCase):
                         ).status,
                         "FAIL",
                     )
+
+            noop_state = state / "noop"
+            noop_state.mkdir()
+            flush._write_flush_state(
+                noop_state,
+                "noop-session",
+                100,
+                "ok",
+                "below-minimum-turns",
+                reason="turnend",
+                transcript_digest=transcript_digest,
+                summary_digest=summary_digest,
+                idempotency_key=flush._flush_idempotency_key(
+                    "noop-session",
+                    "turnend",
+                    transcript_digest,
+                    summary_digest,
+                ),
+            )
+            noop_path = flush._session_state_path(noop_state, "noop-session")
+            noop = json.loads(noop_path.read_text(encoding="utf-8"))
+            for field in ("idempotency_key", "transcript_digest", "summary_digest"):
+                noop.pop(field)
+            noop_path.write_text(json.dumps(noop), encoding="utf-8")
+            self.assertEqual(
+                doctor._flush_inflight_check(
+                    doctor.Context(state_dir=noop_state, now=100)
+                ).status,
+                "OK",
+            )
 
             receipt_key, receipt_item = next(iter(valid["receipts"].items()))
             for field in ("idempotency_key", "transcript_digest", "summary_digest"):
