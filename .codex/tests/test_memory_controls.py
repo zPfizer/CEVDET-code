@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -395,6 +396,135 @@ class SuppressionTests(unittest.TestCase):
             self.assertNotIn('Ankara', visible)
             self.assertIn('pazartesi', visible)
             self.assertEqual(source.read_text(encoding='utf-8'), original)
+
+    def test_read_only_followup_keeps_cache_and_views_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            notes = vault / "🧠 500-Knowledge"
+            notes.mkdir(parents=True)
+            (notes / "normal.md").write_text(
+                "# Normal kaynak\nH08 ortak kanıtı normal kaynakta.\n",
+                encoding="utf-8",
+            )
+            (notes / "hidden.md").write_text(
+                "# Gizli kaynak\nH08 ortak kanıtı gizli kaynakta.\n"
+                "H08-SIZDIRILMAMALI-AYRINTI.\n",
+                encoding="utf-8",
+            )
+            memory_ledger.suppress_derived_memory(
+                vault / ".codex/private-memory",
+                "H08-SIZDIRILMAMALI-AYRINTI.",
+                now=1,
+            )
+
+            # Warm one disposable projected view and the normal index before the
+            # read-only turns; the turns must leave both byte-for-byte unchanged.
+            vault_retrieval.retrieve_vault_context_detailed(
+                vault, "H08 ortak kanıtı", write_cache=False
+            )
+            vault_retrieval.build_vault_map(vault)
+            cache = vault / vault_retrieval.CACHE_RELATIVE_PATH
+            view_dir = vault / ".codex/private-memory/views"
+            cache_before = cache.read_bytes()
+            views_before = {
+                path.name: path.read_bytes() for path in view_dir.glob("*.md")
+            }
+
+            real_handle = hook.handle_user_prompt
+            contexts: list[str] = []
+
+            def handle(payload: dict[str, object], state_dir: Path) -> str:
+                context = real_handle(
+                    payload,
+                    state_dir,
+                    vault_root=vault,
+                    now=1234,
+                )
+                contexts.append(context)
+                return context
+
+            payloads = iter(
+                (
+                    {
+                        "session_id": "h08-read-only",
+                        "cwd": str(vault),
+                        "prompt": "Salt okunur inceleme yap.",
+                    },
+                    {
+                        "session_id": "h08-read-only",
+                        "cwd": str(vault),
+                        "prompt": "H08 ortak kanıtı",
+                    },
+                )
+            )
+            with (
+                mock.patch.object(hook, "STATE_DIR", state),
+                mock.patch.object(hook, "VAULT_ROOT", vault),
+                mock.patch.object(hook, "handle_user_prompt", side_effect=handle),
+                mock.patch.object(hook, "_validate_hook_scope"),
+                mock.patch.object(hook, "_load_payload", side_effect=lambda: next(payloads)),
+                mock.patch.object(hook.sys, "stdout", new_callable=io.StringIO),
+            ):
+                self.assertEqual(hook.main(["user-prompt"]), 0)
+                self.assertEqual(hook.main(["user-prompt"]), 0)
+
+            self.assertTrue(memory_ledger.is_read_only_turn(state, "h08-read-only"))
+            self.assertEqual(len(contexts), 2)
+            self.assertIn("Normal kaynak", contexts[1])
+            self.assertIn("source_id", contexts[1])
+            self.assertIn("memory_ledger.read_memory_source", contexts[1])
+            self.assertNotIn("H08-SIZDIRILMAMALI-AYRINTI", contexts[1])
+            self.assertNotIn(".codex/private-memory/views/", contexts[1])
+            self.assertEqual(cache.read_bytes(), cache_before)
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in view_dir.glob("*.md")},
+                views_before,
+            )
+
+    def test_read_only_cold_retrieval_keeps_long_source_readable_without_views(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            source = vault / "🧠 500-Knowledge/long.md"
+            source.parent.mkdir(parents=True)
+            hidden = "H08-SIZDIRILMAMALI-AYRINTI."
+            source.write_text(
+                "# Uzun kaynak\n"
+                "H08-LONG-SENTINEL " + ("uzun içerik. " * 600) + "tail-kanıtı.\n"
+                + hidden + "\n",
+                encoding="utf-8",
+            )
+            original = source.read_bytes()
+            memory_ledger.suppress_derived_memory(
+                vault / ".codex/private-memory", hidden, now=1
+            )
+            cache = vault / vault_retrieval.CACHE_RELATIVE_PATH
+            view_dir = vault / ".codex/private-memory/views"
+
+            result = vault_retrieval.retrieve_vault_context_detailed(
+                vault,
+                "H08-LONG-SENTINEL",
+                write_cache=False,
+                write_views=False,
+            )
+            filtered = memory_ledger.read_memory_source(vault, source)
+            source_after = source.read_bytes()
+            cache_exists = cache.exists()
+            view_dir_exists = view_dir.exists()
+
+        self.assertEqual(result.outcome, "emitted")
+        self.assertIn("source_id", result.text)
+        self.assertIn("long.md", result.text)
+        self.assertIn("memory_ledger.read_memory_source(vault_root, vault_root / source_id)", result.text)
+        self.assertIn("Metin bütçeye sığmıyor; tam kaynağı oku", result.text)
+        self.assertNotIn(hidden, result.text)
+        self.assertNotIn(".codex/private-memory/views/", result.text)
+        self.assertNotIn(hidden, filtered)
+        self.assertIn("tail-kanıtı", filtered)
+        self.assertGreater(len(filtered), 5000)
+        self.assertEqual(source_after, original)
+        self.assertFalse(cache_exists)
+        self.assertFalse(view_dir_exists)
 
 
 if __name__ == "__main__":
