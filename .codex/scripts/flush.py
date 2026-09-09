@@ -990,6 +990,7 @@ def flush_once(
                     and isinstance(batch_end, int)
                     and not isinstance(batch_end, bool)
                     and 0 <= batch_start < batch_end <= len(all_chunks)
+                    and batch_start == count
                 )
                 if not valid_range:
                     return fail_policy_migration()

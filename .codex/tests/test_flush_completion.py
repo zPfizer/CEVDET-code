@@ -321,6 +321,103 @@ class FlushCompletionTests(unittest.TestCase):
             self.assertEqual(json.loads(coverage_path.read_text(encoding='utf-8'))['count'], 60)
             self.assertFalse(batch_path.exists())
 
+    def test_policy_migration_rejects_batch_start_mismatch_without_replay(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / '.state'
+            transcript = root / 'rollout.jsonl'
+            _write_rows(transcript, [
+                ('user', f'Legacy turn {index:02}') for index in range(65)
+            ])
+            payload = {'session_id': 'mismatched-batch', 'transcript_path': str(transcript)}
+            args = argparse.Namespace(hook_input=root / 'unused', reason='turnend')
+            event = dt.datetime(2026, 9, 8, 12, tzinfo=dt.timezone.utc)
+            with mock.patch.object(flush.transcript_index, 'POLICY_VERSION', 'persistent-turns-v1'):
+                index = flush.transcript_index.open_or_update(
+                    state,
+                    payload['session_id'],
+                    transcript,
+                    hashes=frozenset(),
+                    parser=flush._message_parts_for_index,
+                    text_from_content=flush._text_from_content,
+                    max_line_bytes=flush.MAX_TRANSCRIPT_LINE_BYTES,
+                )
+                session_key = flush._session_key(payload['session_id'])
+                coverage_path = state / f'flush-coverage-{session_key}.json'
+                batch_path = state / f'flush-batch-{session_key}.json'
+                coverage_path.write_text(json.dumps({
+                    'schema_version': flush.transcript_index.COVERAGE_SCHEMA_VERSION,
+                    'count': 30,
+                    'digest': index.coverage_digest(30),
+                    'policy_version': 'persistent-turns-v1',
+                }), encoding='utf-8')
+                batch_path.write_text(json.dumps({
+                    'start': 20,
+                    'end': 50,
+                    'digest': index.coverage_digest(50),
+                    'p07_receipt': 'preserve-me',
+                    'policy_version': 'persistent-turns-v1',
+                }), encoding='utf-8')
+                selected, _ = flush.format_turns([
+                    ('user', f'Legacy turn {item:02}') for item in range(20, 50)
+                ])
+                summary_digest = hashlib.sha256(self.SUMMARY.encode()).hexdigest()
+                idempotency_key = flush._flush_idempotency_key(
+                    payload['session_id'],
+                    args.reason,
+                    hashlib.sha256(selected.encode()).hexdigest(),
+                    summary_digest,
+                    batch_start=20,
+                    batch_end=50,
+                )
+                summary_path = flush._prepared_summary_path(state, idempotency_key)
+                flush.atomic_write_text(summary_path, self.SUMMARY)
+                flush._write_flush_state(
+                    state,
+                    payload['session_id'],
+                    event.timestamp(),
+                    'prepared',
+                    'ready-to-append',
+                    reason=args.reason,
+                    transcript_digest=hashlib.sha256(selected.encode()).hexdigest(),
+                    summary_digest=summary_digest,
+                    idempotency_key=idempotency_key,
+                    event_iso=event.isoformat(),
+                    batch_start=20,
+                    batch_end=50,
+                )
+            session_path = flush._session_state_path(state, payload['session_id'])
+            old_receipt = json.loads(session_path.read_text(encoding='utf-8'))['receipts'][idempotency_key]
+            old_coverage = coverage_path.read_bytes()
+            old_batch = batch_path.read_bytes()
+            old_summary = summary_path.read_bytes()
+
+            with (
+                mock.patch.object(flush.transcript_index, 'POLICY_VERSION', 'persistent-turns-v2'),
+                mock.patch.object(flush, 'run_codex', return_value=(self.SUMMARY, None)) as model,
+                mock.patch.object(flush, 'append_daily') as append_daily,
+                mock.patch.object(flush.attachment_memory, 'capture_sources', return_value=[]) as capture_sources,
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+                mock.patch.object(worker_supervisor, 'enqueue_flush'),
+            ):
+                result = flush.flush_once(args, event, root, state, hook_input=payload)
+
+            after_session = json.loads(session_path.read_text(encoding='utf-8'))
+            health = json.loads((state / 'health.json').read_text(encoding='utf-8'))
+            new_coverage = coverage_path.read_bytes()
+            new_batch = batch_path.read_bytes()
+            new_summary = summary_path.read_bytes()
+
+        self.assertEqual(result, 1)
+        model.assert_not_called()
+        append_daily.assert_not_called()
+        capture_sources.assert_not_called()
+        self.assertEqual(after_session['receipts'][idempotency_key], old_receipt)
+        self.assertEqual(new_coverage, old_coverage)
+        self.assertEqual(new_batch, old_batch)
+        self.assertEqual(new_summary, old_summary)
+        self.assertEqual(health['error'], flush.POLICY_MIGRATION_REQUIRED)
+
     def test_policy_migration_preserves_unchanged_covered_prefix(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
