@@ -429,7 +429,7 @@ def sanitize_text(
                         break
                 quoted_field = (region is not None and region[0] <= match.start() and end <= region[1]
                                 and match.group('key_quote') == '"' and match.group('prefix').rstrip().endswith(':'))
-            if (not quoted_field and match.group('key_quote') == '"'
+            if (not quoted_field and match.group('key_quote')
                     and match.group('prefix').rstrip().endswith(':') and text[end:].strip()):
                 raise MemoryPreferenceError('memory-credential-container-unverifiable')
             if not quoted_field:

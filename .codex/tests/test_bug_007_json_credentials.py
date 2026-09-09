@@ -61,6 +61,10 @@ class Bug007JsonCredentialTests(unittest.TestCase):
             with self.subTest(ending=ending), self.assertRaisesRegex(ledger.MemoryPreferenceError, '^memory-credential-container-unverifiable$'):
                 ledger.sanitize_text('{"token":{"safe":1}' + ending + ' important decision', max_chars=None)
 
+    def test_quoted_python_container_is_rejected_without_consuming_siblings(self) -> None:
+        with self.assertRaisesRegex(ledger.MemoryPreferenceError, '^memory-credential-container-unverifiable$'):
+            ledger.sanitize_text("{'token': {'a': 1},'keep':'ordinary'} after", max_chars=None)
+
     def test_valid_json_fragments_keep_siblings_and_surrounding_prose(self) -> None:
         payload = '{"token":{"value":"OBJECT_SECRET"},"keep":"ordinary"}'
         safe = '{"token":"<REDACTED>","keep":"ordinary"}'
