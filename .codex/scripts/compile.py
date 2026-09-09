@@ -30,6 +30,7 @@ from compile_state import (
 )
 from file_lock import LockUnavailable, locked
 from memory_ledger import (
+    contains_secret,
     contains_suppressed_unit,
     filter_suppressed_text,
     load_suppressed_hashes,
@@ -152,6 +153,7 @@ def _iso_now() -> str:
 
 def write_health(state_dir: Path, error: str, warning: bool = False) -> None:
     """Record the latest compiler problem and preserve warning history."""
+    error, _ = sanitize_text(error, max_chars=None)
     try:
         write_component_health(
             state_dir,
@@ -346,6 +348,7 @@ def build_compile_prompt(
     timestamp: str,
     canonical_tags: Sequence[str],
 ) -> str:
+    _check_secret_path(daily_name)
     return COMPILE_PROMPT.format(
         schema_rules=schema_rules_text(),
         concept_fields=", ".join(CONCEPT_FIELDS),
@@ -358,7 +361,19 @@ def build_compile_prompt(
     )
 
 
+def _check_secret_path(relative: str) -> None:
+    sanitized, _ = sanitize_text(relative, max_chars=None)
+    if contains_secret(relative) or sanitized != relative:
+        raise PolicyError("source-path-contains-secret")
+
+
 def _check_source(path: Path, vault_root: Path, directory: bool) -> None:
+    relative = path.name
+    try:
+        relative = path.relative_to(vault_root).as_posix()
+    except ValueError:
+        pass
+    _check_secret_path(relative)
     source_stat = path.lstat()
     if stat.S_ISLNK(source_stat.st_mode):
         raise PolicyError(f"source-symlink:{path.relative_to(vault_root)}")
@@ -630,6 +645,8 @@ def _manifest(root: Path) -> dict[str, tuple[str, str]]:
         current_path = Path(current)
         for name in directory_names:
             path = current_path / name
+            relative = path.relative_to(root).as_posix()
+            _check_secret_path(relative)
             path_stat = path.lstat()
             if stat.S_ISLNK(path_stat.st_mode):
                 raise PolicyError(f"staging-symlink:{path.name}")
@@ -638,10 +655,11 @@ def _manifest(root: Path) -> dict[str, tuple[str, str]]:
             resolved = path.resolve(strict=True)
             if not _path_within(resolved, root_resolved):
                 raise PolicyError(f"staging-escape:{path.name}")
-            relative = path.relative_to(root).as_posix()
             manifest[relative] = ("dir", "")
         for name in file_names:
             path = current_path / name
+            relative = path.relative_to(root).as_posix()
+            _check_secret_path(relative)
             path_stat = path.lstat()
             if stat.S_ISLNK(path_stat.st_mode):
                 raise PolicyError(f"staging-symlink:{path.name}")
@@ -650,7 +668,6 @@ def _manifest(root: Path) -> dict[str, tuple[str, str]]:
             resolved = path.resolve(strict=True)
             if not _path_within(resolved, root_resolved):
                 raise PolicyError(f"staging-escape:{path.name}")
-            relative = path.relative_to(root).as_posix()
             manifest[relative] = ("file", _sha256(path))
     return manifest
 
@@ -682,6 +699,8 @@ def _validate_manifest_diff(
     before: dict[str, tuple[str, str]],
     after: dict[str, tuple[str, str]],
 ) -> list[str]:
+    for relative in set(before) | set(after):
+        _check_secret_path(relative)
     deleted = sorted(set(before) - set(after))
     if deleted:
         raise PolicyError(f"deletion:{deleted[0]}")
@@ -711,6 +730,7 @@ def _validate_live_destination(
     relative: str,
     expected_digest: str | None,
 ) -> Path:
+    _check_secret_path(relative)
     if not _is_allowed_output_file(relative):
         raise PolicyError(f"forbidden-promotion:{relative}")
     destination = vault_root / relative
@@ -787,6 +807,7 @@ def _source_snapshot_matches(
 def _publication_source_path(vault_root: Path, relative: object) -> Path:
     if not isinstance(relative, str) or "\\" in relative:
         raise PolicyError("publication-source-invalid")
+    _check_secret_path(relative)
     path = Path(relative)
     if (
         path.parts[:1] != ("daily",)
@@ -805,6 +826,7 @@ def _publication_source_path(vault_root: Path, relative: object) -> Path:
 def _validate_publication_source_relative(relative: object) -> str:
     if not isinstance(relative, str) or "\\" in relative:
         raise PolicyError("publication-source-invalid")
+    _check_secret_path(relative)
     path = Path(relative)
     if (
         path.parts[:1] != ("daily",)
@@ -1005,6 +1027,7 @@ def _promote_changes(
     manifest = _manifest(stage)
     destinations: list[tuple[str, Path, str | None, str]] = []
     for relative in changed_files:
+        _check_secret_path(relative)
         if not _is_allowed_output_file(relative):
             raise PolicyError(f"forbidden-promotion:{relative}")
         if relative not in live_baseline:
@@ -1089,6 +1112,7 @@ def _run_codex(prompt: str, stage: Path) -> str | None:
     prompt_path = stage / ".__alf4_compile_prompt.md"
     cleanup_unverified = False
     try:
+        _manifest(stage)
         prompt_path.write_text(prompt, encoding="utf-8")
         _, reason = codex_runner.run_exec(
             "Read .__alf4_compile_prompt.md. Follow its instructions."
@@ -1292,6 +1316,7 @@ def _validate_publication_stage(
         after_digest = target.get("after_sha256")
         if not isinstance(relative, str) or not isinstance(after_digest, str):
             raise PolicyError("publication-journal-invalid")
+        _check_secret_path(relative)
         if manifest.get(relative) != ("file", after_digest):
             raise PolicyError(f"publication-stage-drift:{relative}")
     return manifest
@@ -1529,6 +1554,8 @@ def _record_failure(
     *,
     persist_state: bool = True,
 ) -> None:
+    daily_name, _ = sanitize_text(daily_name, max_chars=None)
+    detail, _ = sanitize_text(detail, max_chars=None)
     timestamp = _iso_now()
     state.last_run = timestamp
     state.last_status = f"fail:{reason}"
