@@ -848,6 +848,67 @@ tags: [doğrulama]
 
         self.assertEqual(check.status, "OK")
 
+    def test_doctor_accepts_source_relative_base_file_wikilink_and_rejects_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            vault.mkdir()
+            (root / "outside.base").write_text("views: []\n", encoding="utf-8")
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            nested = project / "nested"
+            nested.mkdir(parents=True)
+            (project / "Views.base").write_text("views: []\n", encoding="utf-8")
+            note = nested / "Dashboard.md"
+            note.write_text(
+                "# Dashboard\n[[../Views.base]]\n[[foo/../../Views.base]]\n",
+                encoding="utf-8",
+            )
+
+            accepted = doctor._vault_link_check(doctor.Context(vault))
+            note.write_text("# Dashboard\n[[../../../../outside.base]]\n", encoding="utf-8")
+            rejected = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(accepted.status, "OK")
+        self.assertEqual(rejected.status, "FAIL")
+        self.assertIn("outside.base", rejected.evidence)
+
+    @unittest.skipUnless(os.name == "nt", "Windows path case contract")
+    def test_doctor_matches_base_file_wikilinks_case_insensitively_on_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            project.mkdir(parents=True)
+            (project / "Views.base").write_text("views: []\n", encoding="utf-8")
+            (project / "Dashboard.md").write_text(
+                "# Dashboard\n[[views.base]]\n", encoding="utf-8"
+            )
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "OK")
+
+    def test_doctor_fails_when_base_file_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            note = vault / "🧠 500-Knowledge" / "Dashboard.md"
+            note.parent.mkdir(parents=True)
+            base = vault / "Views.base"
+            base.write_text("views: []\n", encoding="utf-8")
+            note.write_text("# Dashboard\n[[Views.base]]\n", encoding="utf-8")
+            original_read_text = Path.read_text
+
+            def read_text(path: Path, *args: object, **kwargs: object) -> str:
+                if path == base:
+                    raise PermissionError("locked")
+                return original_read_text(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", new=read_text):
+                check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("Views.base", check.evidence)
+        self.assertIn("PermissionError", check.evidence)
+
     def test_doctor_fails_when_base_file_wikilink_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

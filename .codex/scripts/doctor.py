@@ -5,7 +5,10 @@ from dataclasses import dataclass
 from functools import cached_property
 import json
 import math
+import ntpath
+import os
 from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import shlex
 import shutil
@@ -66,6 +69,12 @@ SESSION_START_REQUIRED_SECTIONS = {
 REQUIRED_NOTE_FIELDS = ("title", "created", "updated", "tags")
 # Roots whose wikilinks are validated; daily joined in tur 2 (spec 3f).
 LINK_ROOTS = frozenset({*HUMAN_NOTE_ROOTS, KNOWLEDGE_ROOT, DAILY_ROOT})
+
+
+def _native_path_key(value: str) -> str:
+    return value.casefold() if os.name == "nt" else value
+
+
 ALLOWED_ROOT_FILES = {
     ".beyin-version",
     ".gitattributes",
@@ -1476,8 +1485,16 @@ def _vault_link_check(ctx: Context) -> Check:
         suffix=".base",
     ):
         key = base_path.relative_to(ctx.vault).as_posix()
-        base_keys.add(key)
-        base_names.setdefault(base_path.name, []).append(key)
+        try:
+            base_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            return Check(
+                "Vault bağlantıları",
+                "FAIL",
+                f"okunamadı: {base_path.name} ({exc.__class__.__name__})",
+            )
+        base_keys.add(_native_path_key(key))
+        base_names.setdefault(_native_path_key(base_path.name), []).append(key)
     for source in files:
         if source.error:
             return Check(
@@ -1491,17 +1508,25 @@ def _vault_link_check(ctx: Context) -> Check:
                 continue
             base_target = PurePosixPath(target)
             if base_target.suffix.casefold() == ".base":
-                base_key = base_target.as_posix()
-                source_base_key = (source.relative.parent / base_target).as_posix()
+                normalized_source_key = posixpath.normpath(
+                    (source.relative.parent / base_target).as_posix()
+                )
+                escaped_vault = (
+                    normalized_source_key == ".."
+                    or normalized_source_key.startswith("../")
+                )
                 if (
-                    link_key(target) is not None
-                    and ".." not in base_target.parts
+                    not ntpath.isabs(target)
+                    and not escaped_vault
                     and (
-                        base_key in base_keys
-                        or source_base_key in base_keys
+                        _native_path_key(posixpath.normpath(target)) in base_keys
+                        or _native_path_key(normalized_source_key) in base_keys
                         or (
                             len(base_target.parts) == 1
-                            and len(base_names.get(base_target.name, ())) == 1
+                            and len(
+                                base_names.get(_native_path_key(base_target.name), ())
+                            )
+                            == 1
                         )
                     )
                 ):
