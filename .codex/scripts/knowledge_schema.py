@@ -305,11 +305,11 @@ def normalize_claim_order(text: str) -> str:
     section = _heading_section(text, CLAIM_HEADING)
     lines = section.splitlines(keepends=True)
     positions = [index for index, line in enumerate(lines) if line.strip()]
-    rows = [lines[index].rstrip('\r\n') for index in positions]
-    ordered = sorted(zip(claims, rows), key=lambda item: _claim_sort_key(item[0]))
-    for index, (_, row) in zip(positions, ordered):
-        ending = lines[index][len(lines[index].rstrip('\r\n')):]
-        lines[index] = row + ending
+    ordered = sorted(claims, key=_claim_sort_key)
+    for index, claim in zip(positions, ordered):
+        line = lines[index]
+        ending = line[len(line.splitlines()[0]):]
+        lines[index] = claim.raw_line + ending
     heading = _heading_matches(text, CLAIM_HEADING)
     if not heading:
         return text

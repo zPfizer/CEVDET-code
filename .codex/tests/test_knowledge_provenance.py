@@ -225,8 +225,27 @@ Bağ.
 
         normalized = knowledge_schema.normalize_claim_order(original)
 
-        expected = rows[0] + '\r\n\r\n' + rows[1] + rows[2] + '\u2028\r\n' + rows[3] + '\n'
+        expected = rows[0] + '\r\n\r\n' + rows[1] + '\u2028' + rows[2] + '\r\n' + rows[3] + '\n'
         self.assertIn(expected, normalized)
+        original_claims, original_malformed = knowledge_schema._claims(original)
+        normalized_claims, normalized_malformed = knowledge_schema._claims(normalized)
+        self.assertFalse(original_malformed or normalized_malformed)
+        self.assertEqual(len(normalized_claims), len(original_claims))
+        self.assertCountEqual(
+            [knowledge_schema._claim_identity(claim) for claim in normalized_claims],
+            [knowledge_schema._claim_identity(claim) for claim in original_claims],
+        )
+        self.assertCountEqual(
+            [claim.raw_line for claim in normalized_claims],
+            [claim.raw_line for claim in original_claims],
+        )
+
+        eof = '---\nschema: knowledge-v2\n---\n## Kayıtlar\n' + '\n'.join(reversed(rows))
+        normalized_eof = knowledge_schema.normalize_claim_order(eof)
+        eof_claims, eof_malformed = knowledge_schema._claims(normalized_eof)
+        self.assertFalse(eof_malformed)
+        self.assertEqual(len(eof_claims), len(rows))
+        self.assertFalse(normalized_eof.endswith('\n'))
 
     def test_changed_concept_accepts_four_claim_kinds_with_freshness_and_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
