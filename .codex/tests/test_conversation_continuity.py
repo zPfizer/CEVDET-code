@@ -562,6 +562,9 @@ class ConversationContinuityTests(unittest.TestCase):
             "README.md'yi düzenle.",
             "pyproject.toml'u değiştir.",
             '"C:\\Users\\Me\\My Project" klasörünü değiştir.',
+            "src klasörü değiştir.",
+            ".gitignore dosyasını düzenle.",
+            ".env dosyasını değiştir.",
         ):
             with self.subTest(prompt=prompt):
                 self._check_explicit_write_prompt_reopens_read_only_scope(prompt)
@@ -603,6 +606,15 @@ class ConversationContinuityTests(unittest.TestCase):
             'Gelmezse dosyayı düzelt.',
             'Çalışmazsam BIB projesindeki hatayı düzelt.',
             'Çalışmazsanız dosyayı düzelt.',
+            'Yoksa dosyayı düzelt.',
+            'Varsa dosyayı düzelt.',
+            'Onay yoksa dosyayı düzelt.',
+            'Onay varsa dosyayı düzelt.',
+            'Yoksa BIB projesindeki hatayı düzelt.',
+            'Varsa Atlas modülündeki hatayı düzelt.',
+            'Yoksa klasörünü değiştir.',
+            'Onaylıysa klasörünü değiştir.',
+            'Sakın klasörünü değiştir.',
             r'Onaylanmadıkça \\server\share\app.py dosyasını düzelt.',
             r'Sakın \\server\share\app.py dosyasını düzelt.',
         ):

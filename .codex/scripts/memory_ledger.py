@@ -127,7 +127,7 @@ _WRITE_TARGET_OBJECT = (
 _WRITE_FILE_OBJECT = r"(?:dosya(?:yı|sını|ları|larını)?)"
 _WRITE_FILE_MEMBER = rf"dosya(?:daki|deki|sındaki|sindeki)\s+{_WRITE_TARGET_OBJECT}"
 _WRITE_FILE_TARGET = (
-    rf"(?:[\w.-]+\s+)?(?:{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER})"
+    rf"(?:[\w.-]+\s+)?(?:{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_OBJECT})"
 )
 _WRITE_PROJECT_TARGET = rf"[\w.-]+\s+projesindeki\s+{_WRITE_TARGET_OBJECT}"
 _WRITE_MODULE_TARGET = (
@@ -141,7 +141,7 @@ _QUOTED_DIRECTORY = (
     r'''(?:"(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w ./\\-]+?"|'''
     r'''\'(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w ./\\-]+?\')'''
 )
-_WRITE_FILENAME = r"[\w.-]+\.[A-Za-z0-9_-]+"
+_WRITE_FILENAME = r"(?:[\w.-]+\.[A-Za-z0-9_-]+|\.[A-Za-z0-9_-]+)"
 _WRITE_CASE_SUFFIX = r"['’]y?[ıiuü]"
 _WRITE_TARGET_SUFFIX = rf"(?:\s+{_WRITE_TARGET_OBJECT}|{_WRITE_CASE_SUFFIX})?"
 _WRITE_TARGET = (
@@ -176,12 +176,13 @@ NON_COMMITTAL_WRITE = re.compile(
     r"olursa|belki|san[ıi]r[ıi]m|sak[ıi]n|asla|hiç(?:bir)?)\b"
 )
 CONDITIONAL_WRITE = re.compile(
+    r"\b(?:var|yok)(?:sa|se)\b|"
     r"\b\w+(?:(?:[ıiuü]r|[ae]r|[uü]r|m[ae]z|acak|ecek|iyor|ıyor|uyor|"
     r"miş|mış|muş|müş)(?:sa|se|sam|sem|san|sen|sak|sek|salar|seler|"
     r"sınız|siniz|sunuz|sünüz|sanız|seniz)|d[iıuü]y?(?:sa|se|sam|sem|"
     r"san|sen|sak|sek|salar|seler|sınız|siniz|sunuz|sünüz|sanız|seniz)|"
     r"y(?:sa|se|sam|sem|san|sen|sak|sek|salar|seler|sınız|siniz|sunuz|"
-    r"sünüz|sanız|seniz)|(?:var|yok)(?:sa|se)|"
+    r"sünüz|sanız|seniz)|"
     r"(?:ince|ınca|unca|ünce|diğinde|dığında|duğunda|düğünde|ken)|"
     r"madan|meden|madıkça|medikçe|s[ıiuü]z(?:sa|se))\b|"
     r"\b(?:takdirde|halinde|durumunda|sonra|kadar)\b"
@@ -192,7 +193,7 @@ ACTION_QUESTION_WORD = re.compile(
 _NAMED_TARGET = re.compile(
     rf"^(?P<name>[\w.-]+)\s+(?:projesindeki\s+{_WRITE_TARGET_OBJECT}|"
     rf"modül(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}|"
-    rf"{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER})$"
+    rf"{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_OBJECT})$"
 )
 _NAMED_FILENAME = re.compile(_WRITE_FILENAME)
 
