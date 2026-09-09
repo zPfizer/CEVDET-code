@@ -27,6 +27,10 @@ ise engelleyici olmayan yardımcı özet olarak kullanılacak.
   tokenı, cache faturası veya abonelik kotası değildir.
 - Başarısız örnek tasarruf sayılmaz. Son koşudaki 18 örneğin tamamı başarılıdır.
   Ölçüm hazırlığında kaynak aralığı hatası veren iki koşu dışarıda bırakıldı.
+  Kaynakla karşılaştırmada eksik/fazla çağıran varsa betik başarısız çıkar;
+  zaman, metin ve yanlış ilişki kanıtları yine JSON'da korunur. Bir çağıran
+  cevaptan çıkarılarak bu hata yolu ayrıca sınandı: 43/44 bulundu, betik
+  beklenen hata ile durdu ve eksik çağıranın kaydı JSON'da kaldı.
 
 ## Sonuç
 
@@ -34,9 +38,9 @@ Toplam karakter, arama/graf yanıtı ile ortak kaynak doğrulamasının toplamı
 
 | Görev | rg toplam karakter | Graf toplam karakter | Graf farkı | rg süre | Graf süre |
 |---|---:|---:|---:|---:|---:|
-| `file_lock.locked`: çağıranlar ve testler | 20.614 | 71.802 | +%248,3 | 0,0314 sn | 0,1342 sn |
-| `_stable_source_snapshot`: çağrı zinciri | 17.303 | 17.668 | +%2,1 | 0,0331 sn | 0,1468 sn |
-| Son gerçek PR: değişen semboller | 31.095 | 32.076 | +%3,2 | 0,0532 sn | 0,2466 sn |
+| `file_lock.locked`: çağıranlar ve testler | 20.614 | 71.802 | +%248,3 | 0,0320 sn | 0,1343 sn |
+| `_stable_source_snapshot`: çağrı zinciri | 17.303 | 17.668 | +%2,1 | 0,0327 sn | 0,1496 sn |
+| Son gerçek PR: değişen semboller | 31.095 | 32.076 | +%3,2 | 0,0559 sn | 0,2520 sn |
 
 Ortak kaynak okuması sırasıyla 14.269, 14.895 ve 23.667 karakterdir.
 Grafın yalnız sorgu çıktısı sırasıyla 57.533, 2.773 ve 8.409 karakterdir.

@@ -171,6 +171,9 @@ def main():
                                  for k in ("seconds", "retrieval_chars", "source_chars", "total_chars")})
     assert all(s["status"] == "ok" for methods in report["cases"].values()
                for samples in methods.values() for s in samples), "Failed probes are not savings"
+    print("quality", quality)
+    assert all(not row["missing"] and not row["extra"] for row in quality.values()), \
+        "Graph accuracy differs from source; negative results remain in the JSON output"
 
 
 if __name__ == "__main__":
