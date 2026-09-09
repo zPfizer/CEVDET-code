@@ -40,15 +40,17 @@ Her bağımsız kod işi güncel `origin/main` üzerinden ayrı `codex/` branch 
 
 ## Code Review Graph
 
-Kod keşfi ve çok dosyalı davranış incelemesinde kapsamı önce grafla daralt. Basit metin veya açıkça tek noktayı etkileyen değişikliklerde doğrudan kaynakla ilerle.
+Bilinen dosya veya sembolde önce `rg` ve ilgili kaynağı kullan. Çok dosyalı ilişkiler belirsizse veya yapısal PR etki özeti gerekiyorsa grafla kapsamı daralt; her işe zorunlu graf çağrısı ekleme.
 
-1. **Kod keşfi:** `get_minimal_context_tool(task=...)` ile başla; sembol araması veya `query_graph_tool` ile ilgili alanı bul, ardından uygulamayı ve bağlı testleri oku.
-2. **Hata araştırması:** `get_minimal_context_tool(task=...)` ile hata belirtisinden ilgili sembolü bul; `callers_of` / `callees_of` ile çağrı zincirini, gerekiyorsa tek ilgili akışı incele. Kök nedeni kaynakta doğrula; düzeltmeyi ilgili testle sına.
+1. **Kod keşfi:** Graf gerektiğinde `get_minimal_context_tool(task=...)` ile başla; sembol araması veya `query_graph_tool` ile ilgili alanı bul, ardından uygulamayı ve bağlı testleri oku. Belirsiz sembol eşleşmesinde tam `qualified_name` kullan.
+2. **Hata araştırması:** Belirtiyi kaynakta daralt; çağrı zinciri belirsizse `callers_of` / `callees_of` ve gerekiyorsa tek ilgili akışı incele. Kök nedeni kaynakta doğrula; düzeltmeyi ilgili testle sına.
 3. **Değişiklik / PR incelemesi:** Yerel değişiklikte tabanı `HEAD`, PR'da `git merge-base origin/main HEAD` sonucu olarak seç. Aynı tabanı bağlam ve `detect_changes_tool` çağrılarına geçir; kritik çağıranları, etkilenen akışları ve `tests_for` sonuçlarını kaynakla kontrol et.
 
-Her çağrıda aktif worktree'nin mutlak `repo_root` yolunu ver. Yetkili kod uygulamasında başlangıçta ve değişiklik grubu sonrasında grafı güncelle; commit uyuşmazlığı sürerse tam oluştur. Salt okunur görevde grafı değiştirme; eksik veya eskiyse kaynak aramasına dön ve sınırı belirt.
+Her çağrıda aktif worktree'nin mutlak `repo_root` yolunu ver. Graf kullanılacak yetkili kod uygulamasında başlangıçta ve değişiklik grubu sonrasında grafı güncelle; commit uyuşmazlığı sürerse tam oluştur. Salt okunur görevde grafı değiştirme; eksik veya eskiyse kaynak aramasına dön ve sınırı belirt.
 
-Destekleyen araçlarda `detail_level="minimal"` ile başla; yalnız gerekli sonuçları genişlet, kesilmiş çıktıyı tam liste sayma. Kaynak ve gerçek testler otoritedir; grafın boş sonucu yokluk, silme güvenliği veya test kapsamı kanıtı değildir.
+Destekleyen araçlarda `detail_level="minimal"` ile başla. `results_omitted`, `truncated` ve toplam sayıları kontrol et; eksik gereken ilişkileri hedefli kaynak aramasıyla veya sınırlı genişletmeyle tamamla. `minimal` modunda `max_results` artırmak bütün sonuçları göstermeyebilir. Kaynak ve gerçek testler otoritedir; grafın boş sonucu yokluk, silme güvenliği veya test kapsamı kanıtı değildir. Çıkarımsal/belirsiz kenarları ve test sınıflarına verilen test-boşluğu etiketlerini doğrulanmış bulgu sayma.
+
+Faydayı aynı commit ve görevde normal `rg` + seçili kaynak okumaya karşı ölç; kaynak doğrulamasını, genişletmeleri ve graf bakım süresini hesaba kat. `chars/4` veya bütün dosyayı okumaya karşı verilen tasarruf, gerçek model tokenı ya da abonelik kazancı değildir. Ek araç filtreleri, Jedi ve embedding yalnız ölçülmüş eksikliği gideriyorsa eklenir; wiki ve ayrı hafıza döngüsü varsayılan değildir.
 
 ## Code Review Rules
 

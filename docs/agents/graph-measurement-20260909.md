@@ -1,0 +1,108 @@
+# CEVDET Code Review Graph ölçümü — 9 Eylül 2026
+
+Üç sınırlı örnekte graf, normal aramaya göre bağlam veya süre tasarrufu sağlamadı.
+Doğrudan ilişkileri doğru buldu; PR için ek yapısal öncelik bilgisi verdi.
+Bu nedenle bilinen sembolde `rg`, belirsiz ilişkilerde graf; otomatik PR raporu
+ise engelleyici olmayan yardımcı özet olarak kullanılacak.
+
+## Yöntem ve sınır
+
+- Sabit kod: `16d5e2139fb750045bb0a6717d284fd611f7bc96`; PR tabanı `37568e5`.
+- Windows, Python 3.14.7, `code-review-graph==2.3.8`, ek embedding/Jedi kurulumu yok.
+  Grafın 100 dosyasının tümü Git'te izlenen kaynaklarla eşleşti; metadata aynı HEAD'i gösterdi.
+- Önceden seçilmiş üç görev, üç tekrar, dönüşümlü yöntem sırası; tabloda medyanlar var.
+  Normal yöntem bütün depoyu okumaz: `rg -n` ve PR için `git diff --unified=3` kullanır.
+- Graf yolu `get_minimal_context` ile başlar. Gerekli tam liste için `minimal`
+  sonucu genişletmenin maliyeti de sayılır. Dosya yolları kısaltılmadan, tek JSON
+  gösteriminin karakterleri sayılır; MCP'nin metin/structuredContent kopyaları çift sayılmaz.
+- İki yönteme aynı seçili uygulama/test kaynak okumaları eklenir. Bunlar kilit
+  uygulaması ve testleri; snapshot yardımcıları/çağrı noktası/ilgili yarış testi;
+  son PR'ın değişen üretim fonksiyonu ve iki test metodudur.
+- Bu, Python API üzerinden **bağlam edinme akışının tekrarıdır**. Kör, iki ayrı
+  model oturumunun karşılaştırması değildir. Süreye API/rg çalışması ve seçili
+  kaynak okuması dahildir; model düşünmesi, MCP taşıması ve önceden yüklenmiş
+  Python modüllerinin açılışı dahil değildir. Karakter sayısı gerçek model
+  tokenı, cache faturası veya abonelik kotası değildir.
+- Başarısız örnek tasarruf sayılmaz. Son koşudaki 18 örneğin tamamı başarılıdır.
+  Ölçüm hazırlığında kaynak aralığı hatası veren iki koşu dışarıda bırakıldı.
+
+## Sonuç
+
+Toplam karakter, arama/graf yanıtı ile ortak kaynak doğrulamasının toplamıdır.
+
+| Görev | rg toplam karakter | Graf toplam karakter | Graf farkı | rg süre | Graf süre |
+|---|---:|---:|---:|---:|---:|
+| `file_lock.locked`: çağıranlar ve testler | 20.614 | 71.802 | +%248,3 | 0,0145 sn | 0,1385 sn |
+| `_stable_source_snapshot`: çağrı zinciri | 17.303 | 17.668 | +%2,1 | 0,0159 sn | 0,1506 sn |
+| Son gerçek PR: değişen semboller | 31.095 | 32.076 | +%3,2 | 0,0380 sn | 0,2546 sn |
+
+Ortak kaynak okuması sırasıyla 14.269, 14.895 ve 23.667 karakterdir.
+Grafın yalnız sorgu çıktısı sırasıyla 57.533, 2.773 ve 8.409 karakterdir.
+Tam yeniden oluşturma **18,22 sn**, değişikliksiz güncelleme **0,354 sn** sürdü;
+bu bakım maliyetleri sorgu sürelerine dahil değildir. İlk sıfırdan kurulum ve
+CI runner maliyeti ayrı ölçümlerdir.
+
+## Kaynaktan bağımsız doğruluk kontrolü
+
+Beklenen ilişkiler graf kullanılmadan `rg`, AST ve kaynak okumalarıyla çıkarıldı.
+
+| Kontrol | Kaynakta beklenen | Grafın doğru bulduğu | Eksik / fazladan |
+|---|---:|---:|---:|
+| `locked` doğrudan üretim çağıranı | 44 | 44 | 0 / 0 |
+| `locked` doğrudan test metodu | 9 | 9 | 0 / 0 |
+| `_stable_source_snapshot` üretim çağıranı | 1 | 1 | 0 / 0 |
+| Snapshot yardımcısının proje içi çağırdığı fonksiyon | 2 | 2 | 0 / 0 |
+| PR'da değişen/eklenen fonksiyon veya test metodu | 3 | 3 | 0 / 0 |
+
+Kilit testlerinin sekizi `test_file_lock.py::LockedContextTests`, biri
+`test_codex_brain.py::VaultRetrievalTests.test_cache_is_read_under_lock_contention_but_not_rewritten`.
+Snapshot yardımcısının çağıranı `build_vault_map`, çağırdıkları `_source_snapshot`
+ve `_source_signature`. Hedefi adıyla çağıran doğrudan test yoktur; yarış testleri
+entegrasyon kanıtıdır, yardımcının her retry dalını sınadıkları iddia edilmez.
+
+PR'daki üç fonksiyon: `hook.handle_user_prompt`,
+`PromptMemorySnapshotTests.test_profile_and_warning_share_the_checked_preference_snapshot`
+ve `RetrievalRaceTests.test_hook_does_not_offer_raw_search_after_incomplete_retrieval`.
+Graf ayrıca iki kapsayıcı test sınıfını değişen sembol olarak raporladı; bu bir
+fonksiyon farkı değildir. Bu iki test sınıfını “test boşluğu” diye işaretlemesi
+**yeni test gereksiniminin kanıtı değildir**. Risk skoru 0,55 ve iki etkilenen
+akış yapısal önerilerdir; bağımsız hata veya iş riski doğrulaması yapılmadı.
+
+Bu küme dinamik/alias/mock çağrıları, tam test kapsaması, silinen semboller veya
+deponun bütün olası ilişkileri için doğruluk oranı vermez. Örneğin
+`test_concurrency_queue.py` içindeki `real_lock` ve `test_second_brain_acceptance.py`
+içindeki `real_handle` alias yolları bu doğrudan çağrı kümesinin dışındadır.
+
+## Kurala dönüşen bulgular
+
+- `minimal`, `max_results=100` verilse bile kilidin 53 çağıranından 5'ini,
+  9 testinden 5'ini gösterdi. Kalanlar tamamlanmadan inceleme bitirilemez.
+  Tam JSON'ı otomatik büyütmek yerine hedefli kaynak araması tercih edilebilir.
+- Kısa `locked` adı 40 adayla belirsizdi. Ölçüm, iki yöntemde de bilinen dosya
+  ve sembolü kullandı; graf sorgusunda tam `qualified_name` verildi.
+- PR'ın `minimal` sonucu yalnız üç öncelik adı verdi; bütün değişen sembol
+  listesi için genişletildi. “%99 tahmini tasarruf” göstergesi, iki değişen
+  dosyanın tamamını okumaya kıyastı; yukarıdaki gerçek arama yöntemine kıyas değildi.
+- Bu küçük örneklem, araç kataloğunu daraltmayı, Jedi/embedding kurmayı veya
+  ayrı wiki/hafıza sistemi eklemeyi gerekçelendirmiyor.
+
+## Yeniden üretme
+
+İzole bir checkout'u yukarıdaki SHA'da tut. Paket 2.3.8 ve `rg` bulunan Python'la:
+
+```powershell
+python -X utf8 -m code_review_graph build --repo <sabit-checkout>
+python -X utf8 <rapor-checkout>/docs/agents/measure-graph-20260909.py <sabit-checkout> <yerel-sonuc.json>
+python -X utf8 -m code_review_graph update --repo <sabit-checkout>
+```
+
+Script ham sorgu payload'larını, üç tekrarın ölçülerini ve kaynak AST manifestini
+yerel JSON'a yazar. Ürün kodunu import etmez, model çağırmaz, grafı değiştirmez.
+Kaynak aralıkları/commit sabittir; başka sürümde aynı deneyi yaptığını iddia etmez.
+Ölçüm scripti teknik kanıttır, ürünün çalışma akışına eklenmez.
+
+Kaynak dayanağı: [README](https://github.com/tirth8205/code-review-graph/blob/2c6dae32643572ee528eb9b77dbcc17f58f3a8c9/README.md),
+[User Guide](https://github.com/tirth8205/code-review-graph/blob/2c6dae32643572ee528eb9b77dbcc17f58f3a8c9/docs/USAGE.md),
+[benchmark yöntemi](https://github.com/tirth8205/code-review-graph/blob/2c6dae32643572ee528eb9b77dbcc17f58f3a8c9/docs/REPRODUCING.md),
+[GitHub Action](https://github.com/tirth8205/code-review-graph/blob/2c6dae32643572ee528eb9b77dbcc17f58f3a8c9/docs/GITHUB_ACTION.md).
+Yukarıdaki CEVDET ölçüleri bu kaynakların iddiası değil, yerel deney sonucudur.
