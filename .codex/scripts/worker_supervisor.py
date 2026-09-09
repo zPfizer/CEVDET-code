@@ -799,14 +799,16 @@ def inspect_worker_queue(state_dir: Path) -> dict[str, Any]:
                         raise ValueError("worker-quarantine-payload-invalid")
             except ValueError:
                 invalid += 1
-                if state == "dead-letter":
+                if state in {"dead-letter", "quarantined"}:
                     terminal["unresolved"] += 1
                 continue
             counts[state] += 1
             value = job.get("generation", 0)
             if isinstance(value, int) and not isinstance(value, bool):
                 generation = max(generation, value)
-            if state == "dead-letter":
+            if state == "quarantined":
+                terminal["unresolved"] += 1
+            elif state == "dead-letter":
                 outcome = "recovered" if _has_verified_successor(root, job) else "unresolved"
                 terminal[outcome] += 1
     cleanup_unverified = has_unverified_process_tree(state_dir)

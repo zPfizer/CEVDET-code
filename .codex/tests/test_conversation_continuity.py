@@ -103,6 +103,47 @@ class ConversationContinuityTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn('sonucu doğrulanamadı', context)
 
+    def test_session_start_surfaces_quarantined_capture(self):
+        import worker_supervisor
+
+        def quarantine_one(state, kind):
+            broken = worker_supervisor.enqueue_job(
+                state, kind, {}, start_supervisor=False, now=0,
+            )
+            broken.write_text('{broken', encoding='utf-8')
+            replacement = worker_supervisor.enqueue_job(
+                state, kind, {}, start_supervisor=False, now=1,
+            )
+            replacement.unlink()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / '.codex/scripts/.state'
+            quarantine_one(state, 'flush')
+            quarantine_one(state / 'maintenance', 'maintenance')
+            queue = worker_supervisor.inspect_worker_queue(state)
+            maintenance = worker_supervisor.inspect_worker_queue(state / 'maintenance')
+            output = io.StringIO()
+            with (
+                mock.patch.object(hook, 'VAULT_ROOT', vault),
+                mock.patch.object(hook, 'STATE_DIR', state),
+                mock.patch.object(hook, 'build_session_context', return_value=''),
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'session_id': 'reopened'}))),
+                mock.patch.object(sys, 'stdout', output),
+            ):
+                result = hook.main(['session-start', '--strict'])
+
+            context = json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
+
+        self.assertEqual(queue['counts']['quarantined'], 1)
+        self.assertEqual(maintenance['counts']['quarantined'], 1)
+        self.assertEqual(queue['terminal']['unresolved'], 1)
+        self.assertEqual(maintenance['terminal']['unresolved'], 1)
+        self.assertEqual(result, 0)
+        self.assertIn('sonucu doğrulanamadı', context)
+        self.assertIn('içeriği kayıp veya bilgi yok sayma', context)
+
     def test_session_start_keeps_verified_recovered_terminal_flush_quiet(self):
         import worker_supervisor
         with tempfile.TemporaryDirectory() as temporary:

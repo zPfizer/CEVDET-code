@@ -926,6 +926,16 @@ def _has_current_flush_error(health: object) -> bool:
     )
 
 
+def _quarantined_count(queue: object) -> int:
+    if not isinstance(queue, dict):
+        return 0
+    counts = queue.get("counts")
+    quarantined = counts.get("quarantined", 0) if isinstance(counts, dict) else 0
+    if isinstance(quarantined, int) and not isinstance(quarantined, bool):
+        return max(0, quarantined)
+    return 0
+
+
 def _load_payload() -> dict[str, Any]:
     # Host JSON remains dynamic at the boundary; each consumer validates fields.
     # The host sends UTF-8 JSON; Windows' text pipe may use a legacy code page.
@@ -1141,6 +1151,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 emitted_context = MEMORY_PUBLICATION_WARNING
             try:
                 queue_unresolved = 0
+                maintenance_quarantined = 0
                 if read_only:
                     emitted_context += (
                         '\n[Hafıza] Salt okunur kapsam korunuyor; bu oturum için yeni otomatik '
@@ -1150,6 +1161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     import flush
                     flush.maybe_trigger_compile(VAULT_ROOT)
                     maintenance = inspect_worker_queue(STATE_DIR / 'maintenance')
+                    maintenance_quarantined = _quarantined_count(maintenance)
                     if any(maintenance['counts'].get(state, 0) for state in ('pending', 'claimed', 'running')):
                         ensure_supervisor(STATE_DIR / 'maintenance', vault_root=VAULT_ROOT)
                     health_path = STATE_DIR / 'health.json'
@@ -1168,11 +1180,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     if (
                         queue_unresolved
+                        or _quarantined_count(queue)
+                        or maintenance_quarantined
                         or _has_current_flush_error(health)
                     ):
                         emitted_context += (
                             '\n[Hafıza Devamlılığı] Önceki arka plan kayıtlarından birinin sonucu '
-                            'doğrulanamadı; içeriği kayıp veya bilgi yok sayma.'
+                            'doğrulanamadı veya kayıt bütünlüğü doğrulanamadı; içeriği kayıp veya bilgi yok sayma.'
                         )
             except (OSError, ValueError):
                 _emit_context('SessionStart', emitted_context +
