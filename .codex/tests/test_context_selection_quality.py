@@ -520,6 +520,45 @@ Python Rust performance için ortak benchmark kararı.
                         ],
                     )
 
+    def test_prospective_before_query_keeps_active_record_ahead_of_archived_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write(
+                root,
+                "🏰 300-Projects/Tansu/a-archived.md",
+                """---
+title: Hook Checklist Eski
+status: archived
+type: note
+---
+# Hook Checklist Eski
+Deployment hook checklist için ortak çalışma kaydı.
+""",
+            )
+            _write(
+                root,
+                "🏰 300-Projects/Tansu/z-active.md",
+                """---
+title: Hook Checklist Güncel
+status: active
+type: note
+---
+# Hook Checklist Güncel
+Deployment hook checklist için ortak çalışma kaydı.
+""",
+            )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            query = "before deployment show hook checklist"
+
+        self.assertFalse(retrieval._is_history_query(retrieval._retrieval_terms(query)))
+        self.assertEqual(
+            [hit.entry.path for hit in retrieval.search_vault(entries, query, top_k=2)],
+            [
+                "🏰 300-Projects/Tansu/z-active.md",
+                "🏰 300-Projects/Tansu/a-archived.md",
+            ],
+        )
+
     def test_inflected_history_terms_retrieve_completed_and_historical_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -559,7 +598,7 @@ title: Hook Protokolü
                 "geçmişinde", "geçmişini", "geçmişimiz", "geçmişimde", "geçmişimizin",
                 "tarihinde", "öncekilerin", "eskisi", "eskisini", "eskisinde", "öncekisi",
                 "eskim", "eskimiz", "eskilerim", "tarihçesi", "tarihçesinde",
-                "historic", "histories", "previously", "historically",
+                "historic", "histories", "previously", "historically", "before 2024",
             ):
                 with self.subTest(marker=marker):
                     query = f"{marker} hook sözleşmesi"

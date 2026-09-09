@@ -1168,16 +1168,21 @@ def _is_personal_query(query_terms: frozenset[str]) -> bool:
 
 
 def _is_history_query(query_terms: frozenset[str]) -> bool:
-    if query_terms & HISTORY_QUERY_TERMS or any(
+    history_terms = query_terms & HISTORY_QUERY_TERMS
+    has_inflected_history = any(
         term.startswith(root)
         and term[len(root):] in HISTORY_QUERY_INFLECTION_SUFFIXES[
             "vowel" if root[-1] in HISTORY_QUERY_INFLECTION_VOWELS else "consonant"
         ]
         for term in query_terms
         for root in HISTORY_QUERY_INFLECTION_ROOTS
-    ):
+    )
+    if has_inflected_history or history_terms - {"before"}:
         return True
     return (
+        "before" in history_terms
+        and any(re.fullmatch(r"\d{4}", term) for term in query_terms)
+    ) or (
         any(re.fullmatch(r"\d{4}", term) for term in query_terms)
         and _is_personal_query(query_terms)
     )
