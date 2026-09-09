@@ -53,6 +53,21 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 sanitized, _ = ledger.sanitize_text('token=' + value + ' important decision', max_chars=None)
                 self.assertEqual(sanitized, 'token=<REDACTED> important decision')
 
+    def test_quoted_container_does_not_trust_a_delimiter_in_invalid_json(self) -> None:
+        for ending in (',TRAILING_SECRET}', '}TRAILING_SECRET', ']TRAILING_SECRET'):
+            with self.subTest(ending=ending):
+                sanitized, _ = ledger.sanitize_text('{"token":{"safe":1}' + ending + ' important decision', max_chars=None)
+                self.assertNotIn('TRAILING_SECRET', sanitized)
+                self.assertIn('important decision', sanitized)
+
+    def test_valid_json_fragments_keep_siblings_and_surrounding_prose(self) -> None:
+        payload = '{"token":{"value":"OBJECT_SECRET"},"keep":"ordinary"}'
+        safe = '{"token":"<REDACTED>","keep":"ordinary"}'
+        for prefix, suffix in (('before ', '\nafter'), ('before {not-json}\n```json\n', '\n```\nafter')):
+            with self.subTest(prefix=prefix):
+                sanitized, _ = ledger.sanitize_text(prefix + payload + suffix, max_chars=None)
+                self.assertEqual(sanitized, prefix + safe + suffix)
+
     def test_sanitizer_redacts_plain_quoted_and_escaped_credentials(self) -> None:
         text = (
             'plain password=plain-secret; '

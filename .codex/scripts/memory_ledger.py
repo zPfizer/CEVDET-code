@@ -44,7 +44,7 @@ AUTHORIZATION = re.compile(
 CREDENTIAL = re.compile(
     r'''(?im)(?P<prefix>(?P<key_quote>["']?)\b(?P<key>api[_-]?key|password|secret|token)'''
     r'''(?P=key_quote)\s*[:=]\s*)'''
-    r'''(?P<value>"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s\r\n]+)'''
+    r'''(?P<value>[{\[]|"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s\r\n]+)'''
 )
 TOKEN_PREFIX = re.compile(r"\b(?:sk|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
 PERSONAL_CREDENTIAL = re.compile(
@@ -301,6 +301,25 @@ def memory_view_relative_path(relative: str) -> str:
     return f'.codex/private-memory/views/{_sha256_text(relative)}.md'
 
 
+def _json_regions(text: str) -> Iterator[tuple[int, int]]:
+    """Validated JSON objects/arrays ending at an ordinary text boundary."""
+    decoder = json.JSONDecoder()
+    offset = 0
+    for opening in re.finditer(r'[\[{]', text):
+        if opening.start() < offset:
+            continue
+        try:
+            _, end = decoder.raw_decode(text, opening.start())
+        except json.JSONDecodeError as exc:
+            offset = max(opening.start() + 1, exc.pos + 1)
+            continue
+        except (ValueError, RecursionError):
+            return
+        offset = end
+        if end == len(text) or text[end].isspace():
+            yield opening.start(), end
+
+
 def sanitize_text(
     text: str,
     *,
@@ -323,6 +342,8 @@ def sanitize_text(
             lambda match: (f'{match.group("prefix")}"Bearer <REDACTED>"' if match.group('key_quote')
                            else "Authorization: Bearer <REDACTED>"),
             "authorization")
+    regions = _json_regions(text)
+    region: tuple[int, int] | None = None
     pieces: list[str] = []
     cursor = 0
     while match := CREDENTIAL.search(text, cursor):
@@ -330,7 +351,12 @@ def sanitize_text(
         if text[match.start('value')] in '{[':
             try:
                 _, end = json.JSONDecoder().raw_decode(text, match.start('value'))
-                quoted_field = bool(match.group('key_quote')) and match.group('prefix').rstrip().endswith(':')
+                while region is None or region[1] <= match.start():
+                    region = next(regions, None)
+                    if region is None:
+                        break
+                quoted_field = (region is not None and region[0] <= match.start() and end <= region[1]
+                                and match.group('key_quote') == '"' and match.group('prefix').rstrip().endswith(':'))
                 if end < len(text) and not (text[end].isspace() or (quoted_field and text[end] in ',}]')):
                     while end < len(text) and not text[end].isspace():
                         end += 1
