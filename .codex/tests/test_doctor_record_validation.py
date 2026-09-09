@@ -36,7 +36,23 @@ class DoctorRecordValidationTests(unittest.TestCase):
                 json.dumps({"start": 0, "end": 1, "digest": digest}),
                 encoding="utf-8",
             )
-            flush._write_flush_state(state, "valid-session", 100, "ok")
+            transcript_digest = "d" * 64
+            summary_digest = "e" * 64
+            flush._write_flush_state(
+                state,
+                "valid-session",
+                100,
+                "ok",
+                reason="turnend",
+                transcript_digest=transcript_digest,
+                summary_digest=summary_digest,
+                idempotency_key=flush._flush_idempotency_key(
+                    "valid-session",
+                    "turnend",
+                    transcript_digest,
+                    summary_digest,
+                ),
+            )
 
             check = doctor._flush_inflight_check(doctor.Context(state_dir=state, now=100))
 
@@ -57,17 +73,56 @@ class DoctorRecordValidationTests(unittest.TestCase):
     def test_flush_valid_writer_receipt_requires_each_top_level_field(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
+            transcript_digest = "b" * 64
+            summary_digest = "c" * 64
+            idempotency_key = flush._flush_idempotency_key(
+                "valid-session",
+                "turnend",
+                transcript_digest,
+                summary_digest,
+            )
             flush._write_flush_state(
                 state,
                 "valid-session",
                 100,
                 "ok",
-                idempotency_key="a" * 64,
+                reason="turnend",
+                transcript_digest=transcript_digest,
+                summary_digest=summary_digest,
+                idempotency_key=idempotency_key,
             )
             path = flush._session_state_path(state, "valid-session")
             valid = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(
                 doctor._flush_inflight_check(doctor.Context(state_dir=state, now=100)).status,
+                "OK",
+            )
+            prepared_state = state / "prepared"
+            prepared_state.mkdir()
+            flush._write_flush_state(
+                prepared_state,
+                "prepared-session",
+                100,
+                "prepared",
+                "ready-to-append",
+                reason="turnend",
+                transcript_digest=transcript_digest,
+                summary_digest=summary_digest,
+                idempotency_key=flush._flush_idempotency_key(
+                    "prepared-session",
+                    "turnend",
+                    transcript_digest,
+                    summary_digest,
+                ),
+                daily_file="2026-09-09.md",
+                event_iso="2026-09-09T12:00:00+03:00",
+                batch_start=0,
+                batch_end=1,
+            )
+            self.assertEqual(
+                doctor._flush_inflight_check(
+                    doctor.Context(state_dir=prepared_state, now=100)
+                ).status,
                 "OK",
             )
 
@@ -100,6 +155,39 @@ class DoctorRecordValidationTests(unittest.TestCase):
                 with self.subTest(field=field, value=value):
                     malformed = dict(valid)
                     malformed[field] = value
+                    path.write_text(json.dumps(malformed), encoding="utf-8")
+                    self.assertEqual(
+                        doctor._flush_inflight_check(
+                            doctor.Context(state_dir=state, now=100)
+                        ).status,
+                        "FAIL",
+                    )
+
+            receipt_key, receipt_item = next(iter(valid["receipts"].items()))
+            for field in ("idempotency_key", "transcript_digest", "summary_digest"):
+                with self.subTest(receipt_field=field):
+                    malformed_item = dict(receipt_item)
+                    malformed_item.pop(field)
+                    malformed = dict(valid)
+                    malformed["receipts"] = {receipt_key: malformed_item}
+                    path.write_text(json.dumps(malformed), encoding="utf-8")
+                    self.assertEqual(
+                        doctor._flush_inflight_check(
+                            doctor.Context(state_dir=state, now=100)
+                        ).status,
+                        "FAIL",
+                    )
+
+            for receipts in (
+                {"0" * 64: receipt_item},
+                {receipt_key: {**receipt_item, "idempotency_key": "0" * 64}},
+                {receipt_key: {**receipt_item, "transcript_digest": "bad"}},
+                {receipt_key: {**receipt_item, "summary_digest": "bad"}},
+                {receipt_key: {**receipt_item, "status": "inflight"}},
+            ):
+                with self.subTest(receipts=receipts):
+                    malformed = dict(valid)
+                    malformed["receipts"] = receipts
                     path.write_text(json.dumps(malformed), encoding="utf-8")
                     self.assertEqual(
                         doctor._flush_inflight_check(

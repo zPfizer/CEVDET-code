@@ -1156,6 +1156,8 @@ tags: [doğrulama]
                 "stale-session",
                 int(now - 301),
                 "inflight",
+                reason="turnend",
+                transcript_digest="d" * 64,
             )
 
             check = doctor._flush_inflight_check(doctor.Context(state_dir=state, now=now))
@@ -1176,6 +1178,21 @@ tags: [doğrulama]
                     session_id,
                     int(now - age),
                     status,
+                    reason="turnend",
+                    transcript_digest="d" * 64,
+                    **(
+                        {
+                            "summary_digest": "e" * 64,
+                            "idempotency_key": flush._flush_idempotency_key(
+                                session_id,
+                                "turnend",
+                                "d" * 64,
+                                "e" * 64,
+                            ),
+                        }
+                        if status == "ok"
+                        else {}
+                    ),
                 )
 
             check = doctor._flush_inflight_check(doctor.Context(state_dir=state, now=now))

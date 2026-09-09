@@ -731,16 +731,27 @@ def _flush_inflight_check(ctx: Context) -> Check:
         ):
             invalid.append(path.name)
             continue
-        if any(
-            not isinstance(item, dict)
-            or type(item.get("ts")) is not int
-            or _finite_timestamp(item.get("ts")) is None
-            or not isinstance(item.get("status"), str)
-            or item["status"] not in valid_statuses
-            or type(item.get("generation")) is not int
-            or item["generation"] < 1
-            for item in receipts.values()
-        ):
+        entries_invalid = False
+        for key, item in receipts.items():
+            if (
+                not isinstance(key, str)
+                or _HASH64.fullmatch(key) is None
+                or not isinstance(item, dict)
+                or item.get("idempotency_key") != key
+                or item.get("status") not in {"prepared", "ok"}
+                or type(item.get("ts")) is not int
+                or _finite_timestamp(item.get("ts")) is None
+                or type(item.get("generation")) is not int
+                or item["generation"] < 1
+                or any(
+                    not isinstance(item.get(field), str)
+                    or _HASH64.fullmatch(item[field]) is None
+                    for field in ("transcript_digest", "summary_digest")
+                )
+            ):
+                entries_invalid = True
+                break
+        if entries_invalid:
             invalid.append(path.name)
             continue
         if status != "inflight":
