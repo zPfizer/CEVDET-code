@@ -408,6 +408,18 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _ensure_notes_unchanged(notes: Sequence[NoteIndex]) -> None:
+    for note in notes:
+        try:
+            current = note.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise OSError(
+                f"note-unreadable:{note.key}:{exc.__class__.__name__}"
+            ) from exc
+        if _sha256_text(current) != _sha256_text(note.text):
+            raise OSError(f"note-changed:{note.key}")
+
+
 def _migration_plans(
     root: Path,
     taxonomy: Taxonomy,
@@ -545,6 +557,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         notes = vault_notes(args.root)
         violations = audit_vault(args.root, taxonomy, notes)
         inline_violations = audit_inline_tags(args.root, notes)
+        _ensure_notes_unchanged(notes)
     except (OSError, UnicodeError, TaxonomyError) as exc:
         _safe_print(f"ERROR\t{exc}")
         return 1

@@ -308,7 +308,7 @@ class VaultTagQualityTests(unittest.TestCase):
         self.assertNotIn("MIGRATED\t", rendered)
         self.assertEqual(after, before)
 
-    def test_cli_audits_share_captured_notes_when_source_changes_between_checks(self) -> None:
+    def test_cli_revalidates_captured_notes_before_reporting(self) -> None:
         original_audit = tag_taxonomy.audit_vault
         for inline in ("", "#eskietiket"):
             with self.subTest(inline=inline), tempfile.TemporaryDirectory() as temporary:
@@ -333,9 +333,9 @@ class VaultTagQualityTests(unittest.TestCase):
                     )
 
                 self.assertEqual(scan.call_count, 1)
-                self.assertEqual(exit_code, int(bool(inline)))
-                self.assertNotIn("yenietiket", output.getvalue())
-                self.assertEqual("eskietiket" in output.getvalue(), bool(inline))
+                self.assertEqual(exit_code, 1)
+                self.assertIn("ERROR\tnote-changed:note.md", output.getvalue())
+                self.assertNotIn("CANONICAL\t", output.getvalue())
                 self.assertEqual(note.read_text(encoding="utf-8"), changed)
 
     def test_cli_fails_closed_on_unreadable_note_snapshot(self) -> None:
