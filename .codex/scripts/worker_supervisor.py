@@ -832,6 +832,20 @@ def _hook_input_delivery_payload(
     return payload
 
 
+def _hook_input_recovery_sort_key(
+    payload: dict[str, Any],
+    path: Path,
+) -> tuple[int, float, str]:
+    event_iso = payload.get("event_iso")
+    try:
+        event = dt.datetime.fromisoformat(str(event_iso))
+        if event.tzinfo is None:
+            event = event.replace(tzinfo=dt.timezone.utc)
+        return 0, event.timestamp(), path.name
+    except (TypeError, ValueError, OverflowError):
+        return 1, float("inf"), path.name
+
+
 def _recover_orphan_hook_inputs_locked(
     state_dir: Path,
     *,
@@ -842,10 +856,14 @@ def _recover_orphan_hook_inputs_locked(
     completed = _succeeded_hook_inputs_locked(state_dir)
     if completed is None:
         return 0
-    for candidate in sorted(state_dir.glob("hookin-*.json")):
+    candidates: list[tuple[tuple[int, float, str], Path, dict[str, Any]]] = []
+    for candidate in state_dir.glob("hookin-*.json"):
         payload = _hook_input_delivery_payload(state_dir, candidate)
         if payload is None:
             continue
+        candidates.append((_hook_input_recovery_sort_key(payload, candidate), candidate, payload))
+    candidates.sort(key=lambda item: item[0])
+    for _sort_key, candidate, payload in candidates:
         if candidate.resolve(strict=False) in completed:
             continue
         references = _referenced_hook_inputs_locked(state_dir)
@@ -885,10 +903,12 @@ def recover_orphan_hook_inputs(
 
 def count_orphan_hook_inputs(state_dir: Path) -> int:
     """Read-only wake-up hint for SessionStart; races are resolved by recovery."""
-    return sum(
-        _hook_input_delivery_payload(state_dir, candidate) is not None
-        for candidate in state_dir.glob("hookin-*.json")
-    )
+    count = 0
+    for candidate in state_dir.glob("hookin-*.json"):
+        payload = _hook_input_delivery_payload(state_dir, candidate)
+        if payload is not None and _find_hook_input_job_locked(state_dir, payload) is None:
+            count += 1
+    return count
 
 
 def _pinned_successor_ids_locked(state_dir: Path) -> set[str] | None:

@@ -222,6 +222,41 @@ class WorkerHandoffTests(unittest.TestCase):
 
         self.assertEqual(replay_after_success, succeeded)
 
+    def test_orphan_recovery_orders_same_scope_transports_by_event_time(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            transcript = state / "source.jsonl"
+            transcript.write_text("{}", encoding="utf-8")
+            older = state / "hookin-zzzz.json"
+            newer = state / "hookin-aaaa.json"
+            for path, event_iso in (
+                (older, "2026-09-09T12:00:00+03:00"),
+                (newer, "2026-09-09T12:05:00+03:00"),
+            ):
+                path.write_text(
+                    json.dumps(
+                        {
+                            "delivery_schema_version": 1,
+                            "session_id": "chronology",
+                            "transcript_path": str(transcript),
+                            "reason": "turnend",
+                            "event_iso": event_iso,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            self.assertEqual(workers.recover_orphan_hook_inputs(state, now=100), 2)
+            pending = list((state / "worker-jobs" / "pending").glob("*.json"))
+            job = json.loads(pending[0].read_text(encoding="utf-8"))
+            newer_exists = newer.exists()
+            older_exists = older.exists()
+
+        self.assertEqual(job["payload"]["hook_input"], str(newer))
+        self.assertEqual(job["payload"]["event_iso"], "2026-09-09T12:05:00+03:00")
+        self.assertTrue(newer_exists)
+        self.assertFalse(older_exists)
+
     def test_replay_lookup_does_not_quarantine_recoverable_success_transition(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -366,6 +401,44 @@ class WorkerHandoffTests(unittest.TestCase):
 
         self.assertEqual(processed, ["flush"])
         self.assertFalse(transport.exists())
+
+    def test_terminal_job_transport_is_not_counted_as_an_orphan(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            transport = state / "hookin-terminal.json"
+            transport.write_text(
+                json.dumps(
+                    {
+                        "delivery_schema_version": 1,
+                        "session_id": "terminal",
+                        "transcript_path": str(state / "source.jsonl"),
+                        "reason": "turnend",
+                        "event_iso": "2026-09-09T12:00:00+03:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload = {
+                "hook_input": str(transport),
+                "reason": "turnend",
+                "event_iso": "2026-09-09T12:00:00+03:00",
+            }
+            workers.enqueue_job(state, "flush", payload, start_supervisor=False, now=100)
+            running, job = workers._claim_next_job(state, now=100)
+            workers._finish_job(
+                state,
+                running,
+                job,
+                status="dead-letter",
+                error="terminal",
+                now=100,
+            )
+
+            count = workers.count_orphan_hook_inputs(state)
+            report = workers.inspect_worker_queue(state)
+
+        self.assertEqual(count, 0)
+        self.assertEqual(report["orphan_hook_inputs"], 0)
 
     def test_admission_deadline_leaves_durable_job_and_source(self):
         with tempfile.TemporaryDirectory() as temporary:
