@@ -296,6 +296,44 @@ class ConversationContinuityTests(unittest.TestCase):
             self.assertEqual(model.call_count, 0)
             self.assertFalse((vault / 'daily/2026-09-05.md').exists())
 
+    def test_polite_do_not_save_excludes_previous_exchange_from_flush_prompt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / '.state'
+            state.mkdir()
+            transcript = vault / 'source.jsonl'
+            transcript.write_text('\n'.join(json.dumps(record) for record in (
+                {'role': 'user', 'content': 'Önceki karar kalıcı olmamalı.'},
+                {'role': 'assistant', 'content': 'Önceki yanıt da dışarıda kalmalı.'},
+                {'role': 'user', 'content': 'Bunu kaydetme - lütfen.'},
+                {'role': 'user', 'content': 'Yeni kalıcı karar.'},
+            )) + '\n', encoding='utf-8')
+            payload = vault / 'input.json'
+            payload.write_text(json.dumps({
+                'session_id': 'polite-control',
+                'transcript_path': str(transcript),
+            }), encoding='utf-8')
+            summary = '\n'.join(f'## {s}\nYeni kalıcı karar.' for s in flush.EXPECTED_SECTIONS)
+            with (
+                mock.patch.object(flush, 'run_codex', return_value=(summary, None)) as model,
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+            ):
+                result = flush.flush_once(
+                    argparse.Namespace(hook_input=payload, reason='turnend'),
+                    dt.datetime.fromisoformat('2026-09-05T10:00:00+03:00'),
+                    vault,
+                    state,
+                )
+            prompt = model.call_args.args[0]
+            daily = (vault / 'daily/2026-09-05.md').read_text(encoding='utf-8')
+
+        self.assertEqual(result, 0)
+        self.assertNotIn('Önceki karar kalıcı olmamalı.', prompt)
+        self.assertNotIn('Önceki yanıt da dışarıda kalmalı.', prompt)
+        self.assertNotIn('Bunu kaydetme - lütfen.', prompt)
+        self.assertIn('Yeni kalıcı karar.', prompt)
+        self.assertIn('Yeni kalıcı karar.', daily)
+
     def test_flush_respects_control_outside_a_quoted_line(self):
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -303,7 +341,7 @@ class ConversationContinuityTests(unittest.TestCase):
             state.mkdir()
             transcript = vault / 'source.jsonl'
             transcript.write_text(json.dumps({'role': 'user', 'content':
-                '> Makaledeki örnek cümle.\nBunu kaydetme.'}), encoding='utf-8')
+                '> Makaledeki örnek cümle.\nBunu kaydetme - lütfen.'}), encoding='utf-8')
             payload = vault / 'input.json'
             payload.write_text(json.dumps({'session_id': 'quoted-boundary',
                 'transcript_path': str(transcript)}), encoding='utf-8')
@@ -406,8 +444,8 @@ class ConversationContinuityTests(unittest.TestCase):
             with (
                 mock.patch.object(hook, 'VAULT_ROOT', vault),
                 mock.patch.object(hook, 'STATE_DIR', state),
-                mock.patch.object(hook, 'enqueue_flush', side_effect=lambda p, r:
-                    real_enqueue(p, r, popen_factory=mock.Mock())),
+                 mock.patch.object(hook, 'enqueue_flush', side_effect=lambda p, r, **kwargs:
+                    real_enqueue(p, r, popen_factory=mock.Mock(), **kwargs)),
                 mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))),
                 mock.patch.object(sys, 'stdout', output),
             ):
@@ -801,7 +839,9 @@ class ConversationContinuityTests(unittest.TestCase):
                 self.assertEqual(hook.main(['user-prompt']), 0)
             self.assertFalse(memory_ledger.is_read_only_turn(state, 'audit'))
             if expect_prompt_enqueue:
-                enqueue.assert_called_once_with(payload, 'precompact')
+                enqueue.assert_called_once()
+                self.assertEqual(enqueue.call_args.args, (payload, 'precompact'))
+                self.assertIn('deadline', enqueue.call_args.kwargs)
             else:
                 enqueue.assert_not_called()
 
@@ -815,7 +855,9 @@ class ConversationContinuityTests(unittest.TestCase):
             ):
                 self.assertEqual(hook.main(['turn-end', '--strict']), 0)
 
-        enqueue_end.assert_called_once_with(payload, 'turnend')
+        enqueue_end.assert_called_once()
+        self.assertEqual(enqueue_end.call_args.args, (payload, 'turnend'))
+        self.assertIn('deadline', enqueue_end.call_args.kwargs)
 
     def _check_write_prompt_keeps_read_only_scope(self, prompt):
         with tempfile.TemporaryDirectory() as temporary:

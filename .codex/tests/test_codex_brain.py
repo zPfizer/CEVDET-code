@@ -4144,7 +4144,9 @@ class HookTests(unittest.TestCase):
             exit_code = hook.main(["user-prompt"])
 
         self.assertEqual(exit_code, 0)
-        enqueue.assert_called_once_with(payload, "precompact")
+        enqueue.assert_called_once()
+        self.assertEqual(enqueue.call_args.args, (payload, "precompact"))
+        self.assertIn("deadline", enqueue.call_args.kwargs)
 
     def test_transient_user_prompt_does_not_start_conversation_flush(self) -> None:
         payload = {

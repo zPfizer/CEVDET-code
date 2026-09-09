@@ -4,7 +4,7 @@ from contextlib import contextmanager
 import hashlib
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sys
 import tempfile
 import unittest
@@ -308,6 +308,108 @@ class VaultTagQualityTests(unittest.TestCase):
         self.assertNotIn("MIGRATED\t", rendered)
         self.assertEqual(after, before)
 
+    def test_cli_revalidates_captured_notes_before_reporting(self) -> None:
+        original_audit = tag_taxonomy.audit_vault
+        for mutation in ("added", "removed", "changed"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                note = root / "note.md"
+                note.write_text("---\ntags: [arama]\n---\n", encoding="utf-8")
+
+                def audit_then_change(*args):
+                    result = original_audit(*args)
+                    if mutation == "added":
+                        (root / "new.md").write_text(
+                            "---\ntags: [bilinmeyen]\n---\n#yenietiket\n",
+                            encoding="utf-8",
+                        )
+                    elif mutation == "removed":
+                        note.unlink()
+                    else:
+                        note.write_text(
+                            "---\ntags: [bilinmeyen]\n---\n#yenietiket\n",
+                            encoding="utf-8",
+                        )
+                    return result
+
+                output = io.StringIO()
+                with (
+                    mock.patch.object(tag_taxonomy, "vault_notes", wraps=tag_taxonomy.vault_notes) as scan,
+                    mock.patch.object(tag_taxonomy, "audit_vault", side_effect=audit_then_change),
+                    mock.patch.object(tag_taxonomy.sys, "stdout", output),
+                ):
+                    exit_code = tag_taxonomy.main(
+                        ["--root", str(root), "--taxonomy", str(TAXONOMY_PATH)]
+                    )
+
+                self.assertEqual(exit_code, 1)
+                self.assertEqual(scan.call_count, 2)
+                self.assertIn(
+                    "ERROR\tnote-set-changed" if mutation != "changed" else "ERROR\tnote-changed:note.md",
+                    output.getvalue(),
+                )
+                self.assertNotIn("CANONICAL\t", output.getvalue())
+                if mutation == "added":
+                    self.assertTrue((root / "new.md").is_file())
+                elif mutation == "removed":
+                    self.assertFalse(note.exists())
+                else:
+                    self.assertIn("bilinmeyen", note.read_text(encoding="utf-8"))
+
+    def test_cli_fails_closed_on_unreadable_note_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            unreadable = tag_taxonomy.NoteIndex(
+                root / "note.md",
+                PurePosixPath("note.md"),
+                "",
+                {},
+                "PermissionError",
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.object(tag_taxonomy, "vault_notes", return_value=(unreadable,)),
+                mock.patch.object(tag_taxonomy.sys, "stdout", output),
+            ):
+                exit_code = tag_taxonomy.main(
+                    ["--root", str(root), "--taxonomy", str(TAXONOMY_PATH)]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("ERROR\tnote-unreadable:note.md:PermissionError", output.getvalue())
+        self.assertNotIn("CANONICAL\t", output.getvalue())
+
+    def test_cli_fails_closed_when_final_note_snapshot_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            note = root / "note.md"
+            note.write_text("---\ntags: [arama]\n---\n", encoding="utf-8")
+            captured = tag_taxonomy.vault_notes(root)
+            unreadable = tag_taxonomy.NoteIndex(
+                note,
+                PurePosixPath("note.md"),
+                "",
+                {},
+                "PermissionError",
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.object(
+                    tag_taxonomy,
+                    "vault_notes",
+                    side_effect=[captured, (unreadable,)],
+                ) as scan,
+                mock.patch.object(tag_taxonomy.sys, "stdout", output),
+            ):
+                exit_code = tag_taxonomy.main(
+                    ["--root", str(root), "--taxonomy", str(TAXONOMY_PATH)]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(scan.call_count, 2)
+        self.assertIn("ERROR\tnote-unreadable:note.md:PermissionError", output.getvalue())
+        self.assertNotIn("CANONICAL\t", output.getvalue())
+
     def test_cli_conflict_is_nonzero_and_does_not_claim_migrated(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -316,7 +418,7 @@ class VaultTagQualityTests(unittest.TestCase):
                 "---\ntags: [search]\n---\nEski gövde\n",
                 encoding="utf-8",
             )
-            live_source = "---\ntags: [arama]\n---\nYeni gövde\n"
+            live_source = "---\ntags: [arama]\n---\nYeni gövde #yarisan\n"
 
             @contextmanager
             def racing_lock(_path: Path):
@@ -327,6 +429,7 @@ class VaultTagQualityTests(unittest.TestCase):
             with (
                 mock.patch.object(tag_taxonomy, "locked", racing_lock),
                 mock.patch.object(tag_taxonomy, "atomic_write_text") as writer,
+                mock.patch.object(tag_taxonomy, "vault_notes", wraps=tag_taxonomy.vault_notes) as scan,
                 mock.patch.object(tag_taxonomy.sys, "stdout", output),
             ):
                 exit_code = tag_taxonomy.main(
@@ -344,6 +447,10 @@ class VaultTagQualityTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         writer.assert_not_called()
         self.assertIn("CONFLICTS\t1", rendered)
+        self.assertEqual(scan.call_count, 3)
+        self.assertIn("VIOLATIONS\t0", rendered.splitlines())
+        self.assertIn("INLINE_VIOLATIONS\t1", rendered.splitlines())
+        self.assertIn("yarisan", rendered)
         self.assertNotIn("MIGRATED\t", rendered)
         self.assertEqual(after, live_source)
 

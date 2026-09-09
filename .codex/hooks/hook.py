@@ -8,6 +8,8 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -29,7 +31,36 @@ class HookScopeError(ValueError):
     """The hook must never write outside the checkout that launched it."""
 
 
-def _validate_hook_scope(payload: dict[str, Any]) -> None:
+HOOK_SCOPE_GIT_TIMEOUT_SECONDS = 0.75
+HOOK_EVENT_BUDGET_SECONDS = {
+    "session-start": 9.5,
+    "user-prompt": 7.5,
+    "pre-compact": 2.5,
+    "turn-end": 2.5,
+    "session-end": 2.5,
+}
+
+
+def _hook_deadline(event: str) -> float:
+    now = time.monotonic()
+    local_deadline = now + HOOK_EVENT_BUDGET_SECONDS[event]
+    raw = os.environ.get("CEVO_HOOK_DEADLINE")
+    if not isinstance(raw, str):
+        return local_deadline
+    try:
+        external_deadline = float(raw)
+    except (TypeError, ValueError):
+        return local_deadline
+    if not math.isfinite(external_deadline) or external_deadline <= now:
+        return now
+    return min(external_deadline, local_deadline)
+
+
+def _validate_hook_scope(
+    payload: dict[str, Any],
+    *,
+    deadline: float | None = None,
+) -> None:
     raw_cwd = payload.get("cwd")
     if not isinstance(raw_cwd, str) or not raw_cwd.strip():
         raise HookScopeError("mutlak payload cwd gerekli")
@@ -45,6 +76,9 @@ def _validate_hook_scope(payload: dict[str, Any]) -> None:
         raise HookScopeError("payload cwd süreç çalışma diziniyle eşleşmiyor")
 
     try:
+        timeout = HOOK_SCOPE_GIT_TIMEOUT_SECONDS
+        if deadline is not None:
+            timeout = min(timeout, max(0.0, deadline - time.monotonic()))
         git = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             cwd=process_cwd,
@@ -52,7 +86,7 @@ def _validate_hook_scope(payload: dict[str, Any]) -> None:
             encoding="utf-8",
             capture_output=True,
             check=False,
-            timeout=5,
+            timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise HookScopeError("git kökü çözümlenemedi") from exc
@@ -104,7 +138,11 @@ from vault_retrieval import (  # noqa: E402
     is_topicless_followup,
     retrieve_vault_context_detailed,
 )
-from worker_supervisor import enqueue_flush as enqueue_flush_job, ensure_supervisor, inspect_worker_queue  # noqa: E402
+from worker_supervisor import (  # noqa: E402
+    enqueue_flush as enqueue_flush_job,
+    ensure_supervisor,
+    inspect_worker_queue,
+)
 from state_store import (  # noqa: E402
     atomic_write_json,
     atomic_write_text,
@@ -741,6 +779,8 @@ def handle_user_prompt(
                 vault_root,
                 retrieval_query,
                 max_chars=min(MAX_CONTEXT_CHARS, USER_PROMPT_CONTEXT_TARGET_CHARS - len('\n\n'.join(context)) - (2 if context else 0)),
+                write_cache=not (read_only_requested or read_only_scope),
+                write_views=not (read_only_requested or read_only_scope),
             )
             record = {
                 "ts": int(time.time() if now is None else now),
@@ -848,12 +888,19 @@ def handle_user_prompt(
     return output
 
 
-def _mark_reflection_if_needed(payload: dict[str, Any]) -> None:
+def _mark_reflection_if_needed(
+    payload: dict[str, Any],
+    *,
+    deadline: float | None = None,
+) -> None:
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return
     conversation = STATE_DIR / f"conversation-{session_key(session_id)}.json"
-    with locked(conversation, timeout=0.35):
+    lock_timeout = 0.35
+    if deadline is not None:
+        lock_timeout = min(lock_timeout, max(0.0, deadline - time.monotonic()))
+    with locked(conversation, timeout=lock_timeout):
         try:
             record = json.loads(conversation.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -866,7 +913,11 @@ def _mark_reflection_if_needed(payload: dict[str, Any]) -> None:
         count = count_value if isinstance(count_value, int) else 0
         meaningful_prompt_seen = record.get("meaningful_prompt_seen", False) is True
         if meaningful_prompt_seen or count >= 5:
-            request_reflection(STATE_DIR, session_id)
+            request_reflection(
+                STATE_DIR,
+                session_id,
+                deadline=deadline,
+            )
         record.pop("meaningful_prompt_seen", None)
         record["reflection_checked"] = True
         atomic_write_json(conversation, record)
@@ -877,9 +928,15 @@ def enqueue_flush(
     reason: str,
     *,
     popen_factory: Callable[..., subprocess.Popen[Any]] = subprocess.Popen,
+    deadline: float | None = None,
 ) -> Path:
     return enqueue_flush_job(
-        STATE_DIR, payload, reason, vault_root=VAULT_ROOT, launcher=popen_factory,
+        STATE_DIR,
+        payload,
+        reason,
+        vault_root=VAULT_ROOT,
+        launcher=popen_factory,
+        deadline=deadline,
     )
 
 
@@ -1091,6 +1148,7 @@ def _run_session_end_cleanup(
     payload: dict[str, Any],
     *,
     state_dir: Path = STATE_DIR,
+    deadline: float | None = None,
 ) -> None:
     session_id = payload.get("session_id")
     if isinstance(session_id, str) and session_id and is_read_only_turn(state_dir, session_id):
@@ -1098,8 +1156,8 @@ def _run_session_end_cleanup(
         return
     failures: list[str] = []
     steps = (
-        ("reflection", lambda: _mark_reflection_if_needed(payload)),
-        ("flush", lambda: enqueue_flush(payload, "sessionend")),
+        ("reflection", lambda: _mark_reflection_if_needed(payload, deadline=deadline)),
+        ("flush", lambda: enqueue_flush(payload, "sessionend", deadline=deadline)),
     )
     for name, step in steps:
         try:
@@ -1124,10 +1182,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--strict", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    hook_deadline = _hook_deadline(args.event)
     scope_validated = False
     try:
         payload = _load_payload()
-        _validate_hook_scope(payload)
+        _validate_hook_scope(payload, deadline=hook_deadline)
         scope_validated = True
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         handler_started_ns = time.perf_counter_ns()
@@ -1172,7 +1231,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                                             + str(compile_issue) + '. Başarılı sayma; önce mevcut günlük kaynaklarını kullan.')
                     queue = inspect_worker_queue(STATE_DIR)
                     queue_unresolved = _unresolved_terminal_count(queue)
-                    if queue.get('invalid', 0) or any(queue['counts'].get(state, 0) for state in ('pending', 'claimed', 'running')):
+                    if (
+                        queue.get('invalid', 0)
+                        or queue.get('orphan_hook_inputs', 0)
+                        or any(queue['counts'].get(state, 0) for state in ('pending', 'claimed', 'running'))
+                    ):
                         ensure_supervisor(STATE_DIR, vault_root=VAULT_ROOT)
                         emitted_context += (
                             '\n[Hafıza Devamlılığı] Önceki bekleyen kayıtlar yeniden işleniyor. '
@@ -1247,12 +1310,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 and isinstance(transcript_path, str)
                 and transcript_path
             ):
-                enqueue_flush(payload, "precompact")
+                enqueue_flush(payload, "precompact", deadline=hook_deadline)
         elif args.event == "pre-compact":
             session_id = payload.get("session_id")
             if not (isinstance(session_id, str) and session_id
                     and is_read_only_turn(STATE_DIR, session_id)):
-                enqueue_flush(payload, "precompact")
+                enqueue_flush(payload, "precompact", deadline=hook_deadline)
         elif args.event == "turn-end":
             session_id = payload.get("session_id")
             transcript_path = payload.get("transcript_path")
@@ -1262,7 +1325,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not read_only and not is_session_only(STATE_DIR, session_id):
                 if not isinstance(transcript_path, str) or not transcript_path:
                     raise ValueError("transcript-path-missing")
-                enqueue_flush(payload, "turnend")
+                enqueue_flush(payload, "turnend", deadline=hook_deadline)
             with memory_read(VAULT_ROOT) as memory:
                 profile_issues = memory.profile_issues()
             if profile_issues:
@@ -1283,7 +1346,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(json.dumps(result, ensure_ascii=True))
                 return 1 if args.strict else 0
         else:
-            _run_session_end_cleanup(payload, state_dir=STATE_DIR)
+            _run_session_end_cleanup(
+                payload,
+                state_dir=STATE_DIR,
+                deadline=hook_deadline,
+            )
         if args.event == "user-prompt":
             _emit_user_prompt_result(emitted_context or "")
         record_hook_runtime(

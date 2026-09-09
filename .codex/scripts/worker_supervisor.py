@@ -37,6 +37,11 @@ JOB_STATES = (
     "dead-letter",
     "quarantined",
 )
+RECOVERABLE_TRANSITIONS = {
+    "pending": {"claimed"},
+    "claimed": {"running", "pending", "dead-letter"},
+    "running": {"pending", "succeeded", "dead-letter"},
+}
 JOB_KINDS = {"flush", "maintenance"}
 # Supervisor process'inin admission lease'i; iş süresiyle ilgisizdir.
 SUPERVISOR_LEASE_SECONDS = 90
@@ -52,6 +57,9 @@ RETRY_BASE_SECONDS = 5
 # artıkları toplar, bu yüzden eşik en uzun iş ömründen belirgin şekilde uzundur.
 HOOK_INPUT_NAME = re.compile(r"hookin-[^/]+\.json\Z")
 STALE_HOOK_INPUT_SECONDS = 3_600
+# The hook writes this transport before it contends for the queue lock.  If
+# the host deadline wins, the supervisor can still recover the transport.
+HOOK_INPUT_SCHEMA_VERSION = 1
 # A queue entry remains admitted until its terminal state is safely resolved.
 # Dead-letter and quarantine entries deliberately consume this budget as well.
 MAX_UNRESOLVED_JOBS = 256
@@ -199,11 +207,19 @@ def enqueue_flush(
     *,
     vault_root: Path,
     launcher: Callable[..., Any] = subprocess.Popen,
+    deadline: float | None = None,
 ) -> Path:
     """Own the bounded transport from creation through worker cleanup."""
     state_dir.mkdir(parents=True, exist_ok=True)
     hook_input = state_dir / f"hookin-{uuid.uuid4().hex}.json"
-    transport = {key: payload.get(key) for key in ('session_id', 'transcript_path')}
+    event_iso = dt.datetime.now().astimezone().isoformat()
+    transport = {
+        "delivery_schema_version": HOOK_INPUT_SCHEMA_VERSION,
+        "session_id": payload.get("session_id"),
+        "transcript_path": payload.get("transcript_path"),
+        "reason": reason,
+        "event_iso": event_iso,
+    }
     for field in FLUSH_CONTINUATION_FIELDS:
         if field in payload:
             transport[field] = payload[field]
@@ -211,7 +227,7 @@ def enqueue_flush(
     job_payload = {
         "hook_input": str(hook_input),
         "reason": reason,
-        "event_iso": dt.datetime.now().astimezone().isoformat(),
+        "event_iso": event_iso,
     }
     for field in FLUSH_CONTINUATION_FIELDS:
         if field in payload:
@@ -219,7 +235,7 @@ def enqueue_flush(
     return enqueue_job(
         state_dir, "flush",
         job_payload,
-        vault_root=vault_root, launcher=launcher,
+        vault_root=vault_root, launcher=launcher, deadline=deadline,
     )
 
 
@@ -293,21 +309,107 @@ def _hook_input_reference(payload: object) -> Path | None:
         return None
 
 
-def _referenced_hook_inputs_locked(state_dir: Path) -> set[Path] | None:
+def _hook_input_references(payload: object) -> set[Path] | None:
+    if not isinstance(payload, dict):
+        return set()
     references: set[Path] = set()
+    hook_input = payload.get("hook_input")
+    if hook_input is not None:
+        reference = _hook_input_reference(payload)
+        if reference is None:
+            return None
+        references.add(reference)
+    superseded = payload.get("superseded_hook_inputs", [])
+    if not isinstance(superseded, list):
+        return None
+    for value in superseded:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            references.add(Path(value).resolve(strict=False))
+        except OSError:
+            return None
+    return references
+
+
+def _find_hook_input_job_locked(
+    state_dir: Path,
+    payload: object,
+) -> tuple[Path, str] | None:
+    target = _hook_input_reference(payload)
+    if target is None:
+        return None
+    for state in JOB_STATES:
+        for path in (_job_root(state_dir) / state).glob("*.json"):
+            if state == "quarantined":
+                try:
+                    tombstone = _load_job(path)
+                    payload_path = path.with_name(str(tombstone["payload_file"]))
+                    original = json.loads(payload_path.read_text(encoding="utf-8"))
+                    job_payload = original.get("payload") if isinstance(original, dict) else None
+                except (OSError, UnicodeError, json.JSONDecodeError, ValueError, KeyError):
+                    continue
+            else:
+                try:
+                    job = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(job, dict):
+                    continue
+                recorded_state = job.get("status")
+                destination_state = (
+                    recorded_state
+                    if isinstance(recorded_state, str)
+                    and (
+                        recorded_state == state
+                        or recorded_state in RECOVERABLE_TRANSITIONS.get(state, set())
+                    )
+                    else None
+                )
+                if destination_state is None:
+                    job_references = _hook_input_references(job.get("payload"))
+                    if job_references is None or target in job_references:
+                        return path, "invalid"
+                    continue
+                destination = _job_root(state_dir) / destination_state / path.name
+                try:
+                    _validate_job(destination, job)
+                except ValueError:
+                    # A real corrupt record remains for the normal quarantine
+                    # path; lookup must never quarantine it as a side effect.
+                    job_references = _hook_input_references(job.get("payload"))
+                    if job_references is None or target in job_references:
+                        return path, "invalid"
+                    continue
+                job_payload = job.get("payload")
+            references = _hook_input_references(job_payload)
+            if references is not None and target in references:
+                return path, state
+    return None
+
+
+def _referenced_hook_inputs_locked(
+    state_dir: Path,
+    *,
+    excluded_paths: set[Path] | None = None,
+) -> set[Path] | None:
+    references: set[Path] = set()
+    excluded = excluded_paths or set()
     for state in ("pending", "claimed", "running", "dead-letter"):
         for job_path in (_job_root(state_dir) / state).glob("*.json"):
+            if job_path.resolve(strict=False) in excluded:
+                continue
             try:
                 payload = _load_job(job_path).get("payload", {})
             except ValueError:
                 return None
-            reference = _hook_input_reference(payload)
-            if reference is None:
-                if isinstance(payload, dict) and payload.get("hook_input"):
-                    return None
-                continue
-            references.add(reference)
+            job_references = _hook_input_references(payload)
+            if job_references is None:
+                return None
+            references.update(job_references)
     for tombstone in (_job_root(state_dir) / "quarantined").glob("*.json"):
+        if tombstone.resolve(strict=False) in excluded:
+            continue
         try:
             tombstone_value = _load_job(tombstone)
             payload_path = tombstone.with_name(str(tombstone_value["payload_file"]))
@@ -315,12 +417,24 @@ def _referenced_hook_inputs_locked(state_dir: Path) -> set[Path] | None:
             payload = original.get("payload") if isinstance(original, dict) else None
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError, KeyError):
             return None
-        reference = _hook_input_reference(payload)
-        if reference is None:
-            if isinstance(payload, dict) and payload.get("hook_input"):
-                return None
-            continue
-        references.add(reference)
+        job_references = _hook_input_references(payload)
+        if job_references is None:
+            return None
+        references.update(job_references)
+    return references
+
+
+def _succeeded_hook_inputs_locked(state_dir: Path) -> set[Path] | None:
+    references: set[Path] = set()
+    for job_path in (_job_root(state_dir) / "succeeded").glob("*.json"):
+        try:
+            payload = _load_job(job_path).get("payload", {})
+        except ValueError:
+            return None
+        job_references = _hook_input_references(payload)
+        if job_references is None:
+            return None
+        references.update(job_references)
     return references
 
 
@@ -336,6 +450,7 @@ def _sweep_stale_hook_inputs(state_dir: Path, now_epoch: float) -> None:
                 if (
                     _managed_hook_input(candidate, state_dir)
                     and candidate.resolve(strict=False) not in referenced
+                    and _hook_input_delivery_payload(state_dir, candidate) is None
                     and now_epoch - candidate.lstat().st_mtime >= STALE_HOOK_INPUT_SECONDS
                 ):
                     candidate.unlink()
@@ -519,23 +634,52 @@ def _flush_scope(job: dict[str, Any]) -> tuple[str, str] | None:
     return session_id, os.path.normcase(str(transcript_path))
 
 
+def _flush_event_sort_key(payload: dict[str, Any]) -> tuple[int, float, str]:
+    event_iso = payload.get("event_iso")
+    try:
+        event = dt.datetime.fromisoformat(str(event_iso))
+        if event.tzinfo is None:
+            event = event.replace(tzinfo=dt.timezone.utc)
+        return 0, event.timestamp(), str(event_iso)
+    except (TypeError, ValueError, OverflowError):
+        return 0, float("-inf"), str(event_iso)
+
+
 def _merge_flush_payload(
     current: dict[str, Any], incoming: dict[str, Any]
 ) -> dict[str, Any]:
     merged = dict(current)
+    superseded: set[str] = set()
+    for source in (current, incoming):
+        values = source.get("superseded_hook_inputs", [])
+        if isinstance(values, list):
+            superseded.update(value for value in values if isinstance(value, str) and value)
     current_reason = current.get("reason")
     incoming_reason = incoming.get("reason")
     current_priority = FLUSH_REASON_PRIORITY.get(str(current_reason), -1)
     incoming_priority = FLUSH_REASON_PRIORITY.get(str(incoming_reason), -1)
-    if incoming_priority >= current_priority:
-        for field in ("reason", "event_iso"):
+    current_event = _flush_event_sort_key(current)
+    incoming_event = _flush_event_sort_key(incoming)
+    incoming_reason_wins = (
+        incoming_priority > current_priority
+        or (incoming_priority == current_priority and incoming_event >= current_event)
+    )
+    if incoming_reason_wins:
+        if "reason" in incoming:
+            merged["reason"] = incoming["reason"]
+    incoming_metadata_wins = incoming_event >= current_event
+    if incoming_metadata_wins and "event_iso" in incoming:
+        merged["event_iso"] = incoming["event_iso"]
+    if incoming_metadata_wins and "hook_input" in incoming:
+        merged["hook_input"] = incoming["hook_input"]
+    if incoming_metadata_wins:
+        for field in FLUSH_CONTINUATION_FIELDS:
             if field in incoming:
                 merged[field] = incoming[field]
-    if "hook_input" in incoming:
-        merged["hook_input"] = incoming["hook_input"]
-    for field in FLUSH_CONTINUATION_FIELDS:
-        if field in incoming:
-            merged[field] = incoming[field]
+    if superseded:
+        merged["superseded_hook_inputs"] = sorted(superseded)
+    else:
+        merged.pop("superseded_hook_inputs", None)
     return merged
 
 
@@ -572,11 +716,14 @@ def _coalesce_pending_flush_locked(
         return None
     matches.sort(key=lambda item: _job_sort_key(item[1], item[0]))
     retained_path, retained = matches[0]
-    old_inputs = [
-        reference
-        for path, job in matches
-        if (reference := _hook_input_reference(job.get("payload"))) is not None
-    ]
+    old_inputs: list[Path] = []
+    for _path, job in matches:
+        references = _hook_input_references(job.get("payload"))
+        if references is not None:
+            old_inputs.extend(references)
+    incoming_references = _hook_input_references(payload)
+    if incoming_references is not None:
+        old_inputs.extend(incoming_references)
     merged_payload = retained.get("payload", {})
     for _path, job in matches[1:]:
         merged_payload = _merge_flush_payload(
@@ -584,27 +731,57 @@ def _coalesce_pending_flush_locked(
             job.get("payload", {}),
         )
     retained["payload"] = _merge_flush_payload(merged_payload, payload)
+    current_input = _hook_input_reference(retained["payload"])
+    initial_superseded = set(old_inputs)
+    if current_input is not None:
+        initial_superseded.discard(current_input)
+    if initial_superseded:
+        retained["payload"]["superseded_hook_inputs"] = sorted(
+            str(path) for path in initial_superseded
+        )
+    else:
+        retained["payload"].pop("superseded_hook_inputs", None)
     retained["generation"] = int(retained.get("generation", 0)) + 1
     retained["coalesced_ts"] = int(now)
     atomic_write_json(retained_path, retained)
+    excluded_paths = {retained_path.resolve(strict=False)}
     for duplicate_path, _job in matches[1:]:
         try:
             duplicate_path.unlink()
+            excluded_paths.add(duplicate_path.resolve(strict=False))
         except OSError:
             continue
-    references = _referenced_hook_inputs_locked(state_dir)
+    references = _referenced_hook_inputs_locked(
+        state_dir,
+        excluded_paths=excluded_paths,
+    )
     if references is not None:
-        current_input = _hook_input_reference(retained["payload"])
+        external_references = references
+        superseded_failures: set[Path] = set()
+        superseded_external: set[Path] = set()
         for old_input in old_inputs:
             if (
                 old_input != current_input
-                and old_input not in references
                 and _managed_hook_input(old_input, state_dir)
             ):
+                if old_input in external_references:
+                    superseded_external.add(old_input)
+                    continue
                 try:
                     old_input.unlink(missing_ok=True)
                 except OSError:
-                    continue
+                    superseded_failures.add(old_input)
+        merged_payload = dict(retained.get("payload", {}))
+        superseded_values = {
+            str(path) for path in superseded_external | superseded_failures
+        }
+        if superseded_values:
+            merged_payload["superseded_hook_inputs"] = sorted(superseded_values)
+        else:
+            merged_payload.pop("superseded_hook_inputs", None)
+        if merged_payload != retained.get("payload", {}):
+            retained["payload"] = merged_payload
+            atomic_write_json(retained_path, retained)
     return retained_path
 
 
@@ -622,6 +799,237 @@ def _unresolved_job_count_locked(state_dir: Path) -> int:
 
 class WorkerQueueBackpressure(RuntimeError):
     """The durable queue has no admission capacity for a new logical job."""
+
+
+class WorkerDeliveryTimeout(RuntimeError):
+    """The hook deadline expired before queue or supervisor admission."""
+
+
+class WorkerDeliveryTerminal(RuntimeError):
+    """A transport already has a terminal queue record and cannot be replayed."""
+
+
+def _lock_timeout(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _enqueue_job_locked(
+    state_dir: Path,
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    observed_now: float,
+) -> Path:
+    if kind == "flush":
+        existing = _find_hook_input_job_locked(state_dir, payload)
+        if existing is not None:
+            existing_path, existing_state = existing
+            if existing_state in {"dead-letter", "quarantined", "invalid"}:
+                raise WorkerDeliveryTerminal("worker-input-terminal")
+            return existing_path
+        hook_input = _hook_input_reference(payload)
+        if (
+            hook_input is not None
+            and _managed_hook_input(hook_input, state_dir)
+            and not hook_input.is_file()
+        ):
+            raise WorkerDeliveryTerminal("worker-input-missing")
+    path = (
+        _coalesce_pending_flush_locked(
+            state_dir,
+            payload,
+            now=observed_now,
+        )
+        if kind == "flush"
+        else None
+    )
+    if path is not None:
+        return path
+    if _unresolved_job_count_locked(state_dir) >= MAX_UNRESOLVED_JOBS:
+        raise WorkerQueueBackpressure("worker-queue-backpressure")
+    sequence_path = state_dir / "worker-sequence.json"
+    try:
+        sequence_state = json.loads(sequence_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        sequence_state = {}
+    previous_sequence = (
+        sequence_state.get("enqueue_sequence", 0)
+        if isinstance(sequence_state, dict)
+        else 0
+    )
+    enqueue_sequence = (
+        previous_sequence + 1
+        if isinstance(previous_sequence, int) and previous_sequence >= 0
+        else 1
+    )
+    atomic_write_json(
+        sequence_path,
+        {
+            "schema_version": JOB_SCHEMA_VERSION,
+            "enqueue_sequence": enqueue_sequence,
+        },
+    )
+    job_id = uuid.uuid4().hex
+    job = {
+        "schema_version": JOB_SCHEMA_VERSION,
+        "job_id": job_id,
+        "kind": kind,
+        "status": "pending",
+        "generation": 1,
+        "attempt": 0,
+        "enqueue_sequence": enqueue_sequence,
+        "enqueued_ts": int(observed_now),
+        "payload": payload,
+    }
+    path = _job_root(state_dir) / "pending" / f"job-{job_id}.json"
+    atomic_write_json(path, job)
+    return path
+
+
+def _hook_input_delivery_payload(
+    state_dir: Path,
+    path: Path,
+) -> dict[str, Any] | None:
+    if not _managed_hook_input(path, state_dir):
+        return None
+    try:
+        value = load_hook_input(path)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if value.get("delivery_schema_version") != HOOK_INPUT_SCHEMA_VERSION:
+        return None
+    session_id = value.get("session_id")
+    reason = value.get("reason")
+    event_iso = value.get("event_iso")
+    if (
+        not isinstance(session_id, str)
+        or not session_id
+        or not isinstance(reason, str)
+        or reason not in FLUSH_REASON_PRIORITY
+        or not isinstance(event_iso, str)
+        or not event_iso
+    ):
+        return None
+    payload: dict[str, Any] = {
+        "hook_input": str(path),
+        "reason": reason,
+        "event_iso": event_iso,
+    }
+    for field in FLUSH_CONTINUATION_FIELDS:
+        if field in value:
+            payload[field] = value[field]
+    return payload
+
+
+def _hook_input_recovery_sort_key(
+    payload: dict[str, Any],
+    path: Path,
+) -> tuple[int, float, str]:
+    event_iso = payload.get("event_iso")
+    try:
+        event = dt.datetime.fromisoformat(str(event_iso))
+        if event.tzinfo is None:
+            event = event.replace(tzinfo=dt.timezone.utc)
+        return 0, event.timestamp(), path.name
+    except (TypeError, ValueError, OverflowError):
+        return 1, float("inf"), path.name
+
+
+def _recover_orphan_hook_inputs_locked(
+    state_dir: Path,
+    *,
+    now: float,
+) -> int:
+    """Admit transports left behind by a host timeout, under queue ownership."""
+    recovered = 0
+    candidates: list[tuple[tuple[int, float, str], Path, dict[str, Any]]] = []
+    for candidate in state_dir.glob("hookin-*.json"):
+        payload = _hook_input_delivery_payload(state_dir, candidate)
+        if payload is None:
+            continue
+        candidates.append((_hook_input_recovery_sort_key(payload, candidate), candidate, payload))
+    candidates.sort(key=lambda item: item[0])
+    for _sort_key, candidate, _payload in candidates:
+        payload = _hook_input_delivery_payload(state_dir, candidate)
+        if payload is None:
+            continue
+        reference_sets = _orphan_reference_sets_locked(state_dir)
+        if reference_sets is None:
+            continue
+        references, completed = reference_sets
+        reference = candidate.resolve(strict=False)
+        if reference in completed or reference in references:
+            continue
+        try:
+            _enqueue_job_locked(state_dir, "flush", payload, observed_now=now)
+        except WorkerQueueBackpressure:
+            # Keep the source transport for a later admission attempt.
+            continue
+        recovered += 1
+    return recovered
+
+
+def _orphan_reference_sets_locked(
+    state_dir: Path,
+) -> tuple[set[Path], set[Path]] | None:
+    references = _referenced_hook_inputs_locked(state_dir)
+    completed = _succeeded_hook_inputs_locked(state_dir)
+    if references is None or completed is None:
+        return None
+    return references, completed
+
+
+def _has_recoverable_hook_inputs_locked(state_dir: Path) -> bool | None:
+    reference_sets = _orphan_reference_sets_locked(state_dir)
+    if reference_sets is None:
+        return None
+    references, completed = reference_sets
+    for candidate in sorted(state_dir.glob("hookin-*.json")):
+        if _hook_input_delivery_payload(state_dir, candidate) is None:
+            continue
+        reference = candidate.resolve(strict=False)
+        if reference in references or reference in completed:
+            continue
+        if _find_hook_input_job_locked(
+            state_dir,
+            {"hook_input": str(candidate)},
+        ) is None:
+            return True
+    return False
+
+
+def recover_orphan_hook_inputs(
+    state_dir: Path,
+    *,
+    now: float | None = None,
+) -> int:
+    observed_now = time.time() if now is None else now
+    _ensure_job_dirs(state_dir)
+    with locked(state_dir / "worker-queue"):
+        return _recover_orphan_hook_inputs_locked(state_dir, now=observed_now)
+
+
+def count_orphan_hook_inputs(state_dir: Path) -> int:
+    """Read-only wake-up hint for SessionStart; races are resolved by recovery."""
+    reference_sets = _orphan_reference_sets_locked(state_dir)
+    if reference_sets is None:
+        return 0
+    references, completed = reference_sets
+    count = 0
+    for candidate in state_dir.glob("hookin-*.json"):
+        payload = _hook_input_delivery_payload(state_dir, candidate)
+        if payload is None:
+            continue
+        reference = candidate.resolve(strict=False)
+        if (
+            reference not in references
+            and reference not in completed
+            and _find_hook_input_job_locked(state_dir, payload) is None
+        ):
+            count += 1
+    return count
 
 
 def _pinned_successor_ids_locked(state_dir: Path) -> set[str] | None:
@@ -665,8 +1073,11 @@ def _prune_succeeded_jobs_locked(state_dir: Path, now: float) -> None:
     ordinary_index = 0
     for finished_ts, path in receipts:
         try:
-            job_id = _load_job(path)["job_id"]
+            job = _load_job(path)
+            job_id = job["job_id"]
         except ValueError:
+            continue
+        if job.get("hook_input_cleanup_pending") is True:
             continue
         if job_id in pinned:
             continue
@@ -681,10 +1092,76 @@ def _prune_succeeded_jobs_locked(state_dir: Path, now: float) -> None:
         ordinary_index += 1
 
 
+def _cleanup_succeeded_hook_inputs_locked(state_dir: Path) -> int:
+    cleaned = 0
+    for path in (_job_root(state_dir) / "succeeded").glob("*.json"):
+        try:
+            job = _load_job(path)
+        except ValueError:
+            continue
+        payload = job.get("payload")
+        references = _hook_input_references(payload)
+        if not references:
+            continue
+        current = _hook_input_reference(payload)
+        external_references = _referenced_hook_inputs_locked(
+            state_dir,
+            excluded_paths={path.resolve(strict=False)},
+        )
+        if external_references is None:
+            external_references = set()
+            external_lookup_failed = True
+        else:
+            external_lookup_failed = False
+        failures: set[Path] = set()
+        for reference in references:
+            if not _managed_hook_input(reference, state_dir):
+                continue
+            if external_lookup_failed or reference in external_references:
+                failures.add(reference)
+                continue
+            try:
+                reference.unlink(missing_ok=True)
+            except OSError:
+                failures.add(reference)
+        was_pending = job.get("hook_input_cleanup_pending") is True
+        was_consumed = job.get("hook_input_consumed") is True
+        current_managed = current is not None and _managed_hook_input(current, state_dir)
+        new_pending = bool(failures or external_lookup_failed)
+        if failures or external_lookup_failed:
+            job["hook_input_cleanup_pending"] = True
+            if current_managed and current not in failures:
+                job["hook_input_consumed"] = True
+        else:
+            job.pop("hook_input_cleanup_pending", None)
+            if current_managed:
+                job["hook_input_consumed"] = True
+        remaining_superseded = failures - ({current} if current is not None else set())
+        updated_payload = dict(payload) if isinstance(payload, dict) else {}
+        if remaining_superseded:
+            updated_payload["superseded_hook_inputs"] = sorted(
+                str(reference) for reference in remaining_superseded
+            )
+        else:
+            updated_payload.pop("superseded_hook_inputs", None)
+        changed = (
+            updated_payload != payload
+            or was_pending != new_pending
+            or (not new_pending and current_managed and not was_consumed)
+        )
+        job["payload"] = updated_payload
+        if changed:
+            atomic_write_json(path, job)
+        if not failures:
+            cleaned += 1
+    return cleaned
+
+
 def prune_succeeded_jobs(state_dir: Path, *, now: float | None = None) -> None:
     observed_now = time.time() if now is None else now
     _ensure_job_dirs(state_dir)
     with locked(state_dir / "worker-queue"):
+        _cleanup_succeeded_hook_inputs_locked(state_dir)
         _prune_succeeded_jobs_locked(state_dir, observed_now)
 
 
@@ -785,6 +1262,7 @@ def inspect_worker_queue(state_dir: Path) -> dict[str, Any]:
     invalid = 0
     generation = 0
     terminal = {"recovered": 0, "unresolved": 0}
+    orphan_hook_inputs = count_orphan_hook_inputs(state_dir)
     for state in JOB_STATES:
         for path in sorted((root / state).glob("*.json")):
             try:
@@ -816,13 +1294,16 @@ def inspect_worker_queue(state_dir: Path) -> dict[str, Any]:
         "error"
         if invalid or counts["quarantined"] or cleanup_unverified
         else "warning"
-        if any(counts[state] for state in ("pending", "claimed", "running", "dead-letter"))
+        if orphan_hook_inputs
+        or any(counts[state] for state in ("pending", "claimed", "running", "dead-letter"))
         else "ok"
     )
     digest = hashlib.sha256(
         json.dumps(
             {"counts": counts, "generation": generation, "invalid": invalid,
-             "cleanup_unverified": cleanup_unverified, "terminal": terminal},
+             "cleanup_unverified": cleanup_unverified,
+             "terminal": terminal,
+             "orphan_hook_inputs": orphan_hook_inputs},
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,
@@ -837,6 +1318,7 @@ def inspect_worker_queue(state_dir: Path) -> dict[str, Any]:
         "invalid": invalid,
         "cleanup_unverified": cleanup_unverified,
         "terminal": terminal,
+        "orphan_hook_inputs": orphan_hook_inputs,
     }
 
 
@@ -860,6 +1342,7 @@ def enqueue_job(
     vault_root: Path | None = None,
     launcher: Callable[..., Any] = subprocess.Popen,
     now: float | None = None,
+    deadline: float | None = None,
 ) -> Path:
     if not isinstance(kind, str) or kind not in JOB_KINDS:
         raise ValueError("worker-job-kind-invalid")
@@ -867,62 +1350,31 @@ def enqueue_job(
         raise ValueError("worker-job-payload-invalid")
     observed_now = time.time() if now is None else now
     _ensure_job_dirs(state_dir)
-    job_id = uuid.uuid4().hex
-    with locked(state_dir / "worker-queue"):
-        path = (
-            _coalesce_pending_flush_locked(
+    try:
+        with locked(state_dir / "worker-queue", timeout=_lock_timeout(deadline)):
+            path = _enqueue_job_locked(
                 state_dir,
+                kind,
                 payload,
-                now=observed_now,
+                observed_now=observed_now,
             )
-            if kind == "flush"
-            else None
-        )
-        if path is None:
-            if _unresolved_job_count_locked(state_dir) >= MAX_UNRESOLVED_JOBS:
-                raise WorkerQueueBackpressure("worker-queue-backpressure")
-            sequence_path = state_dir / "worker-sequence.json"
-            try:
-                sequence_state = json.loads(sequence_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                sequence_state = {}
-            previous_sequence = (
-                sequence_state.get("enqueue_sequence", 0)
-                if isinstance(sequence_state, dict)
-                else 0
-            )
-            enqueue_sequence = (
-                previous_sequence + 1
-                if isinstance(previous_sequence, int) and previous_sequence >= 0
-                else 1
-            )
-            atomic_write_json(
-                sequence_path,
-                {
-                    "schema_version": JOB_SCHEMA_VERSION,
-                    "enqueue_sequence": enqueue_sequence,
-                },
-            )
-            job = {
-                "schema_version": JOB_SCHEMA_VERSION,
-                "job_id": job_id,
-                "kind": kind,
-                "status": "pending",
-                "generation": 1,
-                "attempt": 0,
-                "enqueue_sequence": enqueue_sequence,
-                "enqueued_ts": int(observed_now),
-                "payload": payload,
-            }
-            path = _job_root(state_dir) / "pending" / f"job-{job_id}.json"
-            atomic_write_json(path, job)
+    except LockUnavailable as exc:
+        if deadline is None:
+            raise
+        raise WorkerDeliveryTimeout("worker-queue-deadline") from exc
     if start_supervisor:
-        ensure_supervisor(
-            state_dir,
-            vault_root=vault_root or _default_vault_root(state_dir),
-            launcher=launcher,
-            now=observed_now,
-        )
+        try:
+            ensure_supervisor(
+                state_dir,
+                vault_root=vault_root or _default_vault_root(state_dir),
+                launcher=launcher,
+                now=observed_now,
+                deadline=deadline,
+            )
+        except LockUnavailable as exc:
+            if deadline is None:
+                raise
+            raise WorkerDeliveryTimeout("worker-admission-deadline") from exc
     return path
 
 
@@ -932,12 +1384,13 @@ def ensure_supervisor(
     vault_root: Path,
     launcher: Callable[..., Any] = subprocess.Popen,
     now: float | None = None,
+    deadline: float | None = None,
 ) -> bool:
     observed_now = time.time() if now is None else now
     state_dir.mkdir(parents=True, exist_ok=True)
     admission_lock = state_dir / "worker-admission"
     token = ""
-    with locked(admission_lock):
+    with locked(admission_lock, timeout=_lock_timeout(deadline)):
         if has_unverified_process_tree(state_dir):
             raise ValueError('worker-tree-cleanup-unverified')
         receipt_path = _supervisor_receipt_path(state_dir)
@@ -993,7 +1446,7 @@ def ensure_supervisor(
             close_fds=True,
         )
     except OSError:
-        with locked(admission_lock):
+        with locked(admission_lock, timeout=_lock_timeout(deadline)):
             current = json.loads(
                 _supervisor_receipt_path(state_dir).read_text(encoding="utf-8")
             )
@@ -1019,9 +1472,7 @@ def recover_stale_jobs(state_dir: Path, *, now: float | None = None) -> int:
             return 0
         # A crash can occur between the atomic JSON update and directory move.
         # Complete only a valid recorded transition; never overwrite another job.
-        transitions = {'pending': {'claimed'}, 'claimed': {'running', 'pending', 'dead-letter'},
-                       'running': {'pending', 'succeeded', 'dead-letter'}}
-        for source_state, targets in transitions.items():
+        for source_state, targets in RECOVERABLE_TRANSITIONS.items():
             for path in sorted((_job_root(state_dir) / source_state).glob('*.json')):
                 try:
                     value = json.loads(path.read_text(encoding='utf-8'))
@@ -1197,6 +1648,10 @@ def _finish_job(
         else:
             current["finished_ts"] = int(observed_now)
             current.pop("next_attempt_ts", None)
+            if terminal == "succeeded":
+                hook_input = _hook_input_reference(current.get("payload"))
+                if hook_input is not None and _managed_hook_input(hook_input, state_dir):
+                    current["hook_input_cleanup_pending"] = True
         if terminal != "pending":
             current.pop("claim_token", None)
         current["status"] = terminal
@@ -1204,6 +1659,8 @@ def _finish_job(
         atomic_write_json(running, current)
         destination = _job_root(state_dir) / terminal / running.name
         os.replace(running, destination)
+        if terminal == "succeeded":
+            _cleanup_succeeded_hook_inputs_locked(state_dir)
         _prune_succeeded_jobs_locked(state_dir, observed_now)
         _report_terminal_maintenance(state_dir, current)
 
@@ -1358,13 +1815,6 @@ def execute_job_file(
         status="succeeded",
         now=now(),
     )
-    # Keep the input recoverable until the durable success transition is complete.
-    hook_input = job.get("payload", {}).get("hook_input")
-    if isinstance(hook_input, str) and _managed_hook_input(Path(hook_input), state_dir):
-        try:
-            Path(hook_input).unlink(missing_ok=True)
-        except OSError:
-            pass  # The existing unreferenced-input sweep can finish cleanup.
     return 0
 
 
@@ -1443,7 +1893,24 @@ def _settle_supervisor(
                 if release_supervisor is not None:
                     release_supervisor()
                 return True
-            if _has_pending_locked(state_dir):
+            _recover_orphan_hook_inputs_locked(state_dir, now=now)
+            has_pending = _has_pending_locked(state_dir)
+            has_orphan = _has_recoverable_hook_inputs_locked(state_dir)
+            if has_orphan is None:
+                receipt.update(
+                    {
+                        "status": "failed",
+                        "lease_until": 0,
+                        "updated_ts": int(now),
+                        "last_error": "worker-hook-input-reference-unverified",
+                    }
+                )
+                atomic_write_json(receipt_path, receipt)
+                if release_supervisor is not None:
+                    release_supervisor()
+                return True
+            queue_full = _unresolved_job_count_locked(state_dir) >= MAX_UNRESOLVED_JOBS
+            if has_pending or (has_orphan and not queue_full):
                 receipt.update(
                     {
                         "status": "running",
@@ -1533,6 +2000,9 @@ def run_supervisor(
 
         migrate_legacy_failed_jobs(state_dir, now=now())
         recover_stale_jobs(state_dir, now=now())
+        with locked(state_dir / "worker-queue"):
+            _cleanup_succeeded_hook_inputs_locked(state_dir)
+        recover_orphan_hook_inputs(state_dir, now=now())
         prune_succeeded_jobs(state_dir, now=now())
         _sweep_stale_hook_inputs(state_dir, now())
         while True:

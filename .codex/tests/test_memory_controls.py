@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 import subprocess
 import sys
@@ -36,6 +37,8 @@ class MemoryDirectiveTests(unittest.TestCase):
         ordinary = [
             'Makalede “bu konuşmada kalsın” yazıyor. Bunu değerlendir.',
             'Yazar "bunu kaydetme" diyor; bu görüşü araştır.',
+            'Yazar "bunu kaydetme, lütfen" diyor; bu görüşü araştır.',
+            'Yazar "bunu kaydetme! Lütfen." diyor; bu görüşü araştır.',
             'Alıntı: `Şunu unut: Ankara`',
             '> Bunu unut.\nBu cümleyi açıkla.',
             '```text\nBu konuşmada kalsın.\n```\nMetni özetle.',
@@ -50,8 +53,22 @@ class MemoryDirectiveTests(unittest.TestCase):
                 self.assertEqual(memory_ledger.persistent_turns([('user', text)]), [('user', text)])
         target = 'Şunu unut: "Levent Ankara’da yaşıyor"'
         self.assertEqual(memory_ledger.memory_directive(target).kind, 'forget')
-        self.assertEqual(memory_ledger.memory_directive('"Geçici bilgi". Bunu kaydetme.').kind,
-                         'do-not-save')
+        for quoted_target in (
+            '"Geçici bilgi". Bunu kaydetme.',
+            "'Geçici bilgi'. Bunu kaydetme.",
+            '```text\nGeçici bilgi\n```\nBunu kaydetme.',
+        ):
+            with self.subTest(quoted_target=quoted_target):
+                self.assertEqual(memory_ledger.memory_directive(quoted_target).kind, 'do-not-save')
+                self.assertEqual(memory_ledger.memory_directive(quoted_target).target, quoted_target)
+                self.assertEqual(
+                    memory_ledger.persistent_turns([
+                        ('user', 'Eski karar.'),
+                        ('assistant', 'Eski yanıt.'),
+                        ('user', quoted_target),
+                    ]),
+                    [('user', 'Eski karar.'), ('assistant', 'Eski yanıt.')],
+                )
 
     def test_natural_memory_controls_are_deterministic(self) -> None:
         cases = {
@@ -62,6 +79,21 @@ class MemoryDirectiveTests(unittest.TestCase):
                 "Levent Ankara'da yaşıyor",
             ),
             "Bunu kaydetme.": ("do-not-save", ""),
+            "Bunu kaydetme, lütfen.": ("do-not-save", ""),
+            "Lütfen, bunu kaydetme!": ("do-not-save", ""),
+            "Bunu kaydetme! Lütfen.": ("do-not-save", ""),
+            "Bunu kaydetme? Lütfen…": ("do-not-save", ""),
+            "Bunu kaydetme - lütfen.": ("do-not-save", ""),
+            "Bunu kaydetme—lütfen.": ("do-not-save", ""),
+            "—Bunu kaydetme.": ("do-not-save", ""),
+            "Bunu kaydetme, lütfen bunu ayrıca açıkla.": (
+                "do-not-save",
+                "Bunu kaydetme, lütfen bunu ayrıca açıkla.",
+            ),
+            "Bunu kaydetme! Lütfen bunu ayrıca açıkla.": (
+                "do-not-save",
+                "Bunu kaydetme! Lütfen bunu ayrıca açıkla.",
+            ),
             "Bu konuşmada kalsın.": ("session-only", ""),
             "Bu sohbet aramızda kalsın.": ("session-only", ""),
             "Bu oturumda kalsın.": ("session-only", ""),
@@ -361,7 +393,7 @@ class TranscriptPrivacyTests(unittest.TestCase):
             ("assistant", "Not ettim."),
             ("user", "Geçici ayrıntı."),
             ("assistant", "Anladım."),
-            ("user", "Bunu kaydetme."),
+            ("user", "Bunu kaydetme! Lütfen."),
             ("assistant", "Kaydetmeyeceğim."),
             ("user", "Kalıcı karar devam ediyor."),
         ]
@@ -525,6 +557,163 @@ class SuppressionTests(unittest.TestCase):
             self.assertNotIn('Ankara', visible)
             self.assertIn('pazartesi', visible)
             self.assertEqual(source.read_text(encoding='utf-8'), original)
+
+    def test_read_only_followup_keeps_cache_and_views_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            notes = vault / "🧠 500-Knowledge"
+            notes.mkdir(parents=True)
+            (notes / "normal.md").write_text(
+                "# Normal kaynak\nH08 ortak kanıtı normal kaynakta.\n",
+                encoding="utf-8",
+            )
+            (notes / "hidden.md").write_text(
+                "# Gizli kaynak\nH08 ortak kanıtı gizli kaynakta.\n"
+                "H08-SIZDIRILMAMALI-AYRINTI.\n",
+                encoding="utf-8",
+            )
+            memory_ledger.suppress_derived_memory(
+                vault / ".codex/private-memory",
+                "H08-SIZDIRILMAMALI-AYRINTI.",
+                now=1,
+            )
+
+            # Warm one disposable projected view and the normal index before the
+            # read-only turns; the turns must leave both byte-for-byte unchanged.
+            vault_retrieval.retrieve_vault_context_detailed(
+                vault, "H08 ortak kanıtı", write_cache=False
+            )
+            vault_retrieval.build_vault_map(vault)
+            cache = vault / vault_retrieval.CACHE_RELATIVE_PATH
+            view_dir = vault / ".codex/private-memory/views"
+            cache_before = cache.read_bytes()
+            views_before = {
+                path.name: path.read_bytes() for path in view_dir.glob("*.md")
+            }
+
+            real_handle = hook.handle_user_prompt
+            contexts: list[str] = []
+
+            def handle(payload: dict[str, object], state_dir: Path) -> str:
+                context = real_handle(
+                    payload,
+                    state_dir,
+                    vault_root=vault,
+                    now=1234,
+                )
+                contexts.append(context)
+                return context
+
+            payloads = iter(
+                (
+                    {
+                        "session_id": "h08-read-only",
+                        "cwd": str(vault),
+                        "prompt": "Salt okunur inceleme yap.",
+                    },
+                    {
+                        "session_id": "h08-read-only",
+                        "cwd": str(vault),
+                        "prompt": "H08 ortak kanıtı",
+                    },
+                )
+            )
+            with (
+                mock.patch.object(hook, "STATE_DIR", state),
+                mock.patch.object(hook, "VAULT_ROOT", vault),
+                mock.patch.object(hook, "handle_user_prompt", side_effect=handle),
+                mock.patch.object(hook, "_validate_hook_scope"),
+                mock.patch.object(hook, "_load_payload", side_effect=lambda: next(payloads)),
+                mock.patch.object(hook.sys, "stdout", new_callable=io.StringIO),
+            ):
+                self.assertEqual(hook.main(["user-prompt"]), 0)
+                self.assertEqual(hook.main(["user-prompt"]), 0)
+
+            self.assertTrue(memory_ledger.is_read_only_turn(state, "h08-read-only"))
+            self.assertEqual(len(contexts), 2)
+            self.assertIn("Normal kaynak", contexts[1])
+            self.assertIn("source_id", contexts[1])
+            self.assertIn("memory_ledger.read_memory_source", contexts[1])
+            self.assertNotIn("🧠 500-Knowledge/normal.md", contexts[1])
+            self.assertNotIn("🧠 500-Knowledge/hidden.md", contexts[1])
+            self.assertNotIn("H08-SIZDIRILMAMALI-AYRINTI", contexts[1])
+            self.assertEqual(cache.read_bytes(), cache_before)
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in view_dir.glob("*.md")},
+                views_before,
+            )
+
+    def test_read_only_cold_retrieval_keeps_long_source_readable_without_views(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            source = vault / "🧠 500-Knowledge/long.md"
+            source.parent.mkdir(parents=True)
+            linked = source.parent / "linked-note.md"
+            linked.write_text("# Linked kaynak\nH08 linked kanıtı.\n", encoding="utf-8")
+            hidden = "H08-SIZDIRILMAMALI-AYRINTI."
+            source.write_text(
+                "# Uzun kaynak\n"
+                "H08-LONG-SENTINEL " + ("uzun içerik. " * 600) + "tail-kanıtı.\n"
+                "[[linked-note|Ham hedef etiketi]]\n"
+                + hidden + "\n",
+                encoding="utf-8",
+            )
+            original = source.read_bytes()
+            memory_ledger.suppress_derived_memory(
+                vault / ".codex/private-memory", hidden, now=1
+            )
+            cache = vault / vault_retrieval.CACHE_RELATIVE_PATH
+            view_dir = vault / ".codex/private-memory/views"
+
+            result = vault_retrieval.retrieve_vault_context_detailed(
+                vault,
+                "H08-LONG-SENTINEL",
+                write_cache=False,
+                write_views=False,
+            )
+            filtered = memory_ledger.read_memory_source(vault, source)
+            opaque_source = vault / memory_ledger.memory_view_relative_path(
+                source.relative_to(vault).as_posix()
+            )
+            filtered_from_opaque_id = memory_ledger.read_memory_source(
+                vault, opaque_source
+            )
+            linked_relative = linked.relative_to(vault).as_posix()
+            linked_opaque = vault / memory_ledger.memory_view_relative_path(linked_relative)
+            linked_filtered = memory_ledger.read_memory_source(vault, linked_opaque)
+            with self.assertRaisesRegex(
+                memory_ledger.MemorySourceError, "memory-view-source-unavailable"
+            ):
+                memory_ledger.read_memory_source(
+                    vault, vault / memory_ledger.memory_view_relative_path("missing.md")
+                )
+            source_after = source.read_bytes()
+            cache_exists = cache.exists()
+            view_dir_exists = view_dir.exists()
+
+        self.assertEqual(result.outcome, "emitted")
+        self.assertIn("source_id", result.text)
+        self.assertNotIn("🧠 500-Knowledge/long.md", result.text)
+        self.assertIn("memory_ledger.read_memory_source(vault_root, vault_root / source_id)", result.text)
+        self.assertIn("Metin bütçeye sığmıyor; tam kaynağı oku", result.text)
+        self.assertNotIn(hidden, result.text)
+        self.assertNotIn(hidden, filtered)
+        self.assertIn("tail-kanıtı", filtered)
+        self.assertGreater(len(filtered), 5000)
+        self.assertIn("Ham hedef etiketi", filtered_from_opaque_id)
+        self.assertIn(
+            memory_ledger.memory_view_relative_path(
+                linked.relative_to(vault).as_posix()
+            ),
+            filtered_from_opaque_id,
+        )
+        self.assertNotIn(hidden, filtered_from_opaque_id)
+        self.assertIn("tail-kanıtı", filtered_from_opaque_id)
+        self.assertIn("H08 linked kanıtı.", linked_filtered)
+        self.assertEqual(source_after, original)
+        self.assertFalse(cache_exists)
+        self.assertFalse(view_dir_exists)
 
 
 if __name__ == "__main__":

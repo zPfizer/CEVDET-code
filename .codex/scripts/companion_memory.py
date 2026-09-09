@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import time
 import uuid
 from typing import Any
 
@@ -124,14 +125,27 @@ def capture_reflection(state: Path, session_id: str) -> ReflectionToken:
     return ReflectionToken(request_id, legacy_digest)
 
 
-def request_reflection(state: Path, session_id: str) -> None:
+def request_reflection(
+    state: Path,
+    session_id: str,
+    *,
+    timeout: float | None = None,
+    deadline: float | None = None,
+) -> None:
     # ponytail: one short reflection lock; split only if this becomes contention.
-    with memory_write_guard(state, session_id), locked(state / 'reflection'):
-        atomic_write_json(_reflection_path(state, session_id), {
-            'schema': 1,
-            'session_key': session_scope(session_id),
-            'request_id': uuid.uuid4().hex,
-        })
+    first_timeout = timeout
+    if deadline is not None:
+        first_timeout = max(0.0, deadline - time.monotonic())
+    with memory_write_guard(state, session_id, timeout=first_timeout):
+        second_timeout = timeout
+        if deadline is not None:
+            second_timeout = max(0.0, deadline - time.monotonic())
+        with locked(state / 'reflection', timeout=second_timeout):
+            atomic_write_json(_reflection_path(state, session_id), {
+                'schema': 1,
+                'session_key': session_scope(session_id),
+                'request_id': uuid.uuid4().hex,
+            })
 
 
 def has_pending_reflection(state: Path) -> bool:
