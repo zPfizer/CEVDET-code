@@ -80,6 +80,8 @@ bilgisi hem kuyruk sonucunda hem digest'te korunur; hook terminal uyarısı ve
 kurtarma tetiklemesi birlikte kalır. #25'in koşullu enqueue testleri #27'nin
 `deadline` argümanıyla birlikte doğrulanır. #23, #25 ve #26'nın ortak
 `memory_ledger.py` değişiklikleri birbirini düşürmemelidir.
+Örneğin #22 önce merge edilirse #27 güncel main üzerine yeniden tabanlanır;
+ortak kuyruk, digest ve hook testleri bu birleşik sürümde tekrar çalıştırılır.
 
 Yalnız bu sekiz PR'ı birleştiren test, önceki #6–19 paketlerinin birlikte
 çalıştığını veya hedef Vault'un güncellendiğini kanıtlamaz.
