@@ -362,6 +362,7 @@ def memory_directive(text: str) -> MemoryDirective:
     raw = text.strip()
     unquoted = _unquoted_request(text)
     folded = unicodedata.normalize("NFKC", unquoted).casefold().replace("i\u0307", "i")
+    raw_folded = unicodedata.normalize("NFKC", raw).casefold().replace("i\u0307", "i")
     if re.search(r'\b(?:bu (?:konuşmada|sohbette|oturumda|sohbet aramızda)|aramızda) kalsın\b', folded):
         return MemoryDirective("session-only")
     if contains_secret(raw):
@@ -369,10 +370,8 @@ def memory_directive(text: str) -> MemoryDirective:
     if re.search(r"\bbenim\s+hakkımda\s+ne\s+biliyorsun\b", folded):
         return MemoryDirective("what-known")
     if re.search(r'\b' + DO_NOT_SAVE + r'\b', folded):
-        standalone_text = CONTROL_SEPARATOR.sub(" ", folded).strip()
-        standalone = None
-        if QUOTED_CONTENT.search(text) is None:
-            standalone = re.fullmatch(STANDALONE_DO_NOT_SAVE, standalone_text)
+        standalone_text = CONTROL_SEPARATOR.sub(" ", raw_folded).strip()
+        standalone = re.fullmatch(STANDALONE_DO_NOT_SAVE, standalone_text)
         return MemoryDirective("do-not-save", "" if standalone else raw)
     if re.search(r"\b(?:unut(?:ur\s+musun)?|hafızandan\s+(?:çıkar|sil)|hatırlamanı\s+istemiyorum)\b", folded):
         match = FORGET_WITH_TARGET.match(raw) or FORGET_SUFFIX.match(raw)
