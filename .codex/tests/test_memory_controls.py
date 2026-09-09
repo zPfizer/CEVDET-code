@@ -474,8 +474,9 @@ class SuppressionTests(unittest.TestCase):
             self.assertIn("Normal kaynak", contexts[1])
             self.assertIn("source_id", contexts[1])
             self.assertIn("memory_ledger.read_memory_source", contexts[1])
+            self.assertNotIn("🧠 500-Knowledge/normal.md", contexts[1])
+            self.assertNotIn("🧠 500-Knowledge/hidden.md", contexts[1])
             self.assertNotIn("H08-SIZDIRILMAMALI-AYRINTI", contexts[1])
-            self.assertNotIn(".codex/private-memory/views/", contexts[1])
             self.assertEqual(cache.read_bytes(), cache_before)
             self.assertEqual(
                 {path.name: path.read_bytes() for path in view_dir.glob("*.md")},
@@ -491,6 +492,7 @@ class SuppressionTests(unittest.TestCase):
             source.write_text(
                 "# Uzun kaynak\n"
                 "H08-LONG-SENTINEL " + ("uzun içerik. " * 600) + "tail-kanıtı.\n"
+                "[[linked-note|Ham hedef etiketi]]\n"
                 + hidden + "\n",
                 encoding="utf-8",
             )
@@ -508,20 +510,35 @@ class SuppressionTests(unittest.TestCase):
                 write_views=False,
             )
             filtered = memory_ledger.read_memory_source(vault, source)
+            opaque_source = vault / memory_ledger.memory_view_relative_path(
+                source.relative_to(vault).as_posix()
+            )
+            filtered_from_opaque_id = memory_ledger.read_memory_source(
+                vault, opaque_source
+            )
+            with self.assertRaisesRegex(
+                memory_ledger.MemorySourceError, "memory-view-source-unavailable"
+            ):
+                memory_ledger.read_memory_source(
+                    vault, vault / memory_ledger.memory_view_relative_path("missing.md")
+                )
             source_after = source.read_bytes()
             cache_exists = cache.exists()
             view_dir_exists = view_dir.exists()
 
         self.assertEqual(result.outcome, "emitted")
         self.assertIn("source_id", result.text)
-        self.assertIn("long.md", result.text)
+        self.assertNotIn("🧠 500-Knowledge/long.md", result.text)
         self.assertIn("memory_ledger.read_memory_source(vault_root, vault_root / source_id)", result.text)
         self.assertIn("Metin bütçeye sığmıyor; tam kaynağı oku", result.text)
         self.assertNotIn(hidden, result.text)
-        self.assertNotIn(".codex/private-memory/views/", result.text)
         self.assertNotIn(hidden, filtered)
         self.assertIn("tail-kanıtı", filtered)
         self.assertGreater(len(filtered), 5000)
+        self.assertIn("Ham hedef etiketi", filtered_from_opaque_id)
+        self.assertNotIn("linked-note", filtered_from_opaque_id)
+        self.assertNotIn(hidden, filtered_from_opaque_id)
+        self.assertIn("tail-kanıtı", filtered_from_opaque_id)
         self.assertEqual(source_after, original)
         self.assertFalse(cache_exists)
         self.assertFalse(view_dir_exists)

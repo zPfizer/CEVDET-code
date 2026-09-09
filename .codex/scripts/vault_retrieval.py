@@ -1597,7 +1597,7 @@ def retrieve_vault_context_detailed(
             candidate = _context_item(
                 hit,
                 None if render_only else view_path,
-                source_id=hit.entry.path if render_only else None,
+                source_id=memory_view_relative_path(hit.entry.path) if render_only else None,
             )
             if len("\n".join([*parts, candidate])) > max_chars:
                 break
@@ -1649,7 +1649,7 @@ def retrieve_vault_context_detailed(
                 _context_item(
                     hit,
                     None if render_only else expected_path,
-                    source_id=hit.entry.path if render_only else None,
+                    source_id=memory_view_relative_path(hit.entry.path) if render_only else None,
                 )
             )
             emitted_paths.append(hit.entry.path)
