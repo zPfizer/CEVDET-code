@@ -531,8 +531,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _safe_print(f"CONFLICTS\t{len(result.conflicts)}")
             else:
                 _safe_print(f"PATCH_READY\t{len(result.patches)}")
-        violations = audit_vault(args.root, taxonomy)
-        inline_violations = audit_inline_tags(args.root)
+        notes = vault_notes(args.root)
+        violations = audit_vault(args.root, taxonomy, notes)
+        inline_violations = audit_inline_tags(args.root, notes)
     except (OSError, UnicodeError, TaxonomyError) as exc:
         _safe_print(f"ERROR\t{exc}")
         return 1

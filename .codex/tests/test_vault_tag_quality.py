@@ -232,6 +232,36 @@ class VaultTagQualityTests(unittest.TestCase):
         self.assertNotIn("MIGRATED\t", rendered)
         self.assertEqual(after, before)
 
+    def test_cli_audits_share_captured_notes_when_source_changes_between_checks(self) -> None:
+        original_audit = tag_taxonomy.audit_vault
+        for inline in ("", "#eskietiket"):
+            with self.subTest(inline=inline), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                note = root / "note.md"
+                note.write_text(f"---\ntags: [arama]\n---\n{inline}\n", encoding="utf-8")
+                changed = "---\ntags: [bilinmeyen]\n---\n#yenietiket\n"
+
+                def audit_then_change(*args):
+                    result = original_audit(*args)
+                    note.write_text(changed, encoding="utf-8")
+                    return result
+
+                output = io.StringIO()
+                with (
+                    mock.patch.object(tag_taxonomy, "vault_notes", wraps=tag_taxonomy.vault_notes) as scan,
+                    mock.patch.object(tag_taxonomy, "audit_vault", side_effect=audit_then_change),
+                    mock.patch.object(tag_taxonomy.sys, "stdout", output),
+                ):
+                    exit_code = tag_taxonomy.main(
+                        ["--root", str(root), "--taxonomy", str(TAXONOMY_PATH)]
+                    )
+
+                self.assertEqual(scan.call_count, 1)
+                self.assertEqual(exit_code, int(bool(inline)))
+                self.assertNotIn("yenietiket", output.getvalue())
+                self.assertEqual("eskietiket" in output.getvalue(), bool(inline))
+                self.assertEqual(note.read_text(encoding="utf-8"), changed)
+
     def test_cli_conflict_is_nonzero_and_does_not_claim_migrated(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -240,7 +270,7 @@ class VaultTagQualityTests(unittest.TestCase):
                 "---\ntags: [search]\n---\nEski gövde\n",
                 encoding="utf-8",
             )
-            live_source = "---\ntags: [arama]\n---\nYeni gövde\n"
+            live_source = "---\ntags: [arama]\n---\nYeni gövde #yarisan\n"
 
             @contextmanager
             def racing_lock(_path: Path):
@@ -251,6 +281,7 @@ class VaultTagQualityTests(unittest.TestCase):
             with (
                 mock.patch.object(tag_taxonomy, "locked", racing_lock),
                 mock.patch.object(tag_taxonomy, "atomic_write_text") as writer,
+                mock.patch.object(tag_taxonomy, "vault_notes", wraps=tag_taxonomy.vault_notes) as scan,
                 mock.patch.object(tag_taxonomy.sys, "stdout", output),
             ):
                 exit_code = tag_taxonomy.main(
@@ -268,6 +299,10 @@ class VaultTagQualityTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         writer.assert_not_called()
         self.assertIn("CONFLICTS\t1", rendered)
+        self.assertEqual(scan.call_count, 2)
+        self.assertIn("VIOLATIONS\t0", rendered.splitlines())
+        self.assertIn("INLINE_VIOLATIONS\t1", rendered.splitlines())
+        self.assertIn("yarisan", rendered)
         self.assertNotIn("MIGRATED\t", rendered)
         self.assertEqual(after, live_source)
 
