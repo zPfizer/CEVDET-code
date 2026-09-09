@@ -39,7 +39,8 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                     self.assertEqual(ledger.sanitize_text(sanitized, max_chars=None)[0], sanitized)
 
     def test_unreadable_credential_container_does_not_leak_the_remaining_value(self) -> None:
-        for value in ('{\n"value": "BROKEN_SECRET"', '[' * 1100 + '"DEEP_SECRET"' + ']' * 1100):
+        for value in ('{\n"value": "BROKEN_SECRET"', '[' * 1100 + '"DEEP_SECRET"' + ']' * 1100,
+                      '{"safe":1}TRAILING_SECRET', '{"safe": 1}TRAILING_SECRET', '[1]TRAILING_SECRET'):
             with self.subTest(value=value[:30]):
                 sanitized, redactions = ledger.sanitize_text('keep before; token=' + value, max_chars=None)
                 self.assertEqual(sanitized, 'keep before; token=<REDACTED>')
