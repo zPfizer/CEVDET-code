@@ -101,6 +101,32 @@ class StartupMemoryReadTests(unittest.TestCase):
         self.assertNotIn("Kısa yanıt tercih ediliyor.", context)
         self.assertNotIn("Kısa yanıt tercih ediliyor.", visible)
 
+    def test_session_start_does_not_emit_pending_reflection_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            state.mkdir(parents=True)
+            marker = state / "needs-reflection"
+            marker.write_text("password: BUG001-REFLECTION\n", encoding="utf-8")
+            original = marker.read_bytes()
+
+            context = hook.build_session_context(vault, state, now=NOW)
+            self.assertEqual(marker.read_bytes(), original)
+
+        self.assertIn("[Hafıza Uyarısı]", context)
+        self.assertNotIn("BUG001-REFLECTION", context)
+
+    def test_session_start_ignores_invalid_utf8_pending_reflection_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            state.mkdir(parents=True)
+            (state / "needs-reflection").write_bytes(b"\xff\xfe\n")
+
+            context = hook.build_session_context(vault, state, now=NOW)
+
+        self.assertIn("[Hafıza Uyarısı]", context)
+
 
 if __name__ == "__main__":
     unittest.main()
