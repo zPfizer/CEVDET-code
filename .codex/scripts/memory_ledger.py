@@ -467,12 +467,17 @@ class MemoryReadOnlyError(ValueError):
 
 
 @contextmanager
-def memory_write_guard(state_dir: Path, session_id: str | None) -> Iterator[None]:
+def memory_write_guard(
+    state_dir: Path,
+    session_id: str | None,
+    *,
+    timeout: float | None = None,
+) -> Iterator[None]:
     """Serialize publication with scope changes, only for this session."""
     if not session_id:
         yield
         return
-    with locked(_read_only_path(state_dir, session_id)):
+    with locked(_read_only_path(state_dir, session_id), timeout=timeout):
         if is_read_only_turn(state_dir, session_id):
             raise MemoryReadOnlyError('memory-read-only')
         yield

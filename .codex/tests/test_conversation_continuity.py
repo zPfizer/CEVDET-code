@@ -444,8 +444,8 @@ class ConversationContinuityTests(unittest.TestCase):
             with (
                 mock.patch.object(hook, 'VAULT_ROOT', vault),
                 mock.patch.object(hook, 'STATE_DIR', state),
-                mock.patch.object(hook, 'enqueue_flush', side_effect=lambda p, r:
-                    real_enqueue(p, r, popen_factory=mock.Mock())),
+                 mock.patch.object(hook, 'enqueue_flush', side_effect=lambda p, r, **kwargs:
+                    real_enqueue(p, r, popen_factory=mock.Mock(), **kwargs)),
                 mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))),
                 mock.patch.object(sys, 'stdout', output),
             ):
@@ -707,7 +707,9 @@ class ConversationContinuityTests(unittest.TestCase):
                 self.assertEqual(hook.main(['turn-end', '--strict']), 0)
 
         enqueue.assert_not_called()
-        enqueue_end.assert_called_once_with(payload, 'turnend')
+        enqueue_end.assert_called_once()
+        self.assertEqual(enqueue_end.call_args.args, (payload, 'turnend'))
+        self.assertIn('deadline', enqueue_end.call_args.kwargs)
 
     def test_read_only_scope_blocks_mixed_forget_write_but_keeps_direct_forget_explicit(self):
         with tempfile.TemporaryDirectory() as temporary:

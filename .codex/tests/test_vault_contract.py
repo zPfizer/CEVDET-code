@@ -9,7 +9,9 @@ from pathlib import Path
 import re
 import subprocess
 import shutil
+import sys
 import tempfile
+import time
 import unittest
 
 from _fixtures import CODEX_DIR  # sys.path seam
@@ -210,6 +212,105 @@ class VaultContractTests(unittest.TestCase):
                                     shell=True, cwd=outside, timeout=10)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "", "No fallback may run a different Vault's hook")
+
+    @unittest.skipUnless(os.name == "nt", "Windows command contract")
+    def test_precompact_command_returns_before_host_deadline_with_slow_git_and_queue_lock(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cevo hook deadline ") as temporary:
+            vault = Path(temporary) / "checkout ü space"
+            vault.mkdir()
+            codex = vault / ".codex"
+            (codex / "hooks").mkdir(parents=True)
+            (codex / "scripts").mkdir()
+            for source in (CODEX_DIR / "scripts").glob("*.py"):
+                shutil.copy2(source, codex / "scripts" / source.name)
+            shutil.copy2(CODEX_DIR / "hooks" / "hook.py", codex / "hooks" / "hook.py")
+            shutil.copy2(CODEX_DIR / "hooks.json", codex / "hooks.json")
+            subprocess.run(
+                ["git", "init", "-b", "main"],
+                cwd=vault,
+                check=True,
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            for key, value in (("user.name", "Cevo Test"), ("user.email", "cevo@example.invalid")):
+                subprocess.run(
+                    ["git", "config", key, value],
+                    cwd=vault,
+                    check=True,
+                    capture_output=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            state = codex / "scripts" / ".state"
+            state.mkdir(parents=True)
+            transcript = vault / "transcript.jsonl"
+            transcript.write_text("{}", encoding="utf-8")
+            ready = state / "queue-holder-ready"
+            holder_script = (
+                "import sys,time;"
+                "from pathlib import Path;"
+                "sys.path.insert(0,sys.argv[1]);"
+                "from file_lock import locked;"
+                "resource=Path(sys.argv[2]);ready=Path(sys.argv[3]);"
+                "guard=locked(resource);guard.__enter__();ready.write_text('ready');"
+                "time.sleep(float(sys.argv[4]));guard.__exit__(None,None,None)"
+            )
+            holder = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    holder_script,
+                    str(CODEX_DIR / "scripts"),
+                    str(state / "worker-queue"),
+                    str(ready),
+                    "4",
+                ],
+                cwd=vault,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            try:
+                holder_ready_deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < holder_ready_deadline:
+                    time.sleep(0.01)
+                self.assertTrue(ready.exists(), "queue lock holder did not start")
+                command = json.loads((codex / "hooks.json").read_text(encoding="utf-8"))["hooks"]["PreCompact"][0]["hooks"][0]["commandWindows"]
+                (vault / "slow_git.py").write_text(
+                    "import subprocess,time\noriginal_run=subprocess.run\n"
+                    "def slow_run(*args, **kwargs):\n"
+                    "    if args and args[0][0] == 'git': time.sleep(0.6)\n"
+                    "    return original_run(*args, **kwargs)\n"
+                    "subprocess.run=slow_run\n", encoding="utf-8",
+                )
+                command = command.replace(
+                    "python -c ", "python -c __import__('runpy').run_path('slow_git.py');", 1,
+                )
+                payload = {
+                    "session_id": "host-deadline",
+                    "cwd": str(vault),
+                    "transcript_path": str(transcript),
+                    "hook_event_name": "PreCompact",
+                }
+                started = time.monotonic()
+                result = subprocess.run(
+                    [os.environ.get("COMSPEC", "cmd.exe"), "/C", command],
+                    input=json.dumps(payload).encode("utf-8"),
+                    cwd=vault,
+                    capture_output=True,
+                    check=False,
+                    timeout=3,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                elapsed = time.monotonic() - started
+            finally:
+                holder.wait(timeout=8)
+
+            self.assertLess(elapsed, 3)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(list(state.glob("hookin-*.json"))), 1)
+            health = json.loads((state / "hook-health.json").read_text(encoding="utf-8"))
+            self.assertEqual(health["status"], "error")
 
     def test_written_files_have_no_template_placeholders(self) -> None:
         vault = CODEX_DIR.parent

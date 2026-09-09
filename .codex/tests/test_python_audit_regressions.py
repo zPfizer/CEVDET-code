@@ -159,7 +159,11 @@ class AuditRegressionTests(unittest.TestCase):
                 hook.enqueue_flush({'session_id': 's', 'transcript_path': 'source.jsonl',
                                     'prompt': 'Private user text'}, 'turnend')
             payload = json.loads(next(state.glob('hookin-*.json')).read_text(encoding='utf-8'))
-            self.assertEqual(payload, {'session_id': 's', 'transcript_path': 'source.jsonl'})
+            self.assertEqual(payload['session_id'], 's')
+            self.assertEqual(payload['transcript_path'], 'source.jsonl')
+            self.assertEqual(payload['delivery_schema_version'], 1)
+            self.assertEqual(payload['reason'], 'turnend')
+            self.assertNotIn('prompt', payload)
 
     def test_doctor_distinguishes_bounded_transport_from_retained_prompt(self):
         with tempfile.TemporaryDirectory() as temporary:
