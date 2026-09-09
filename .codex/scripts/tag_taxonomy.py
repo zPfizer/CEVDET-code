@@ -306,7 +306,16 @@ def tagged_notes(
 ) -> list[NoteIndex]:
     """Notes the taxonomy governs: everything except the daily log."""
     corpus = vault_notes(root) if notes is None else notes
+    _ensure_notes_readable(corpus)
     return [note for note in corpus if note.root != DAILY_ROOT]
+
+
+def _ensure_notes_readable(notes: Sequence[NoteIndex]) -> None:
+    unreadable = next((note for note in notes if note.error), None)
+    if unreadable is not None:
+        raise OSError(
+            f"note-unreadable:{unreadable.key}:{unreadable.error}"
+        )
 
 
 def _violations(note: NoteIndex, taxonomy: Taxonomy) -> list[TagViolation]:
@@ -381,8 +390,10 @@ def audit_inline_tags(
                 )
         except (OSError, json.JSONDecodeError):
             ignored = ()
+    corpus = vault_notes(root) if notes is None else notes
+    _ensure_notes_readable(corpus)
     violations: list[InlineTagViolation] = []
-    for note in vault_notes(root) if notes is None else notes:
+    for note in corpus:
         relative = note.key
         if any(
             relative == prefix or relative.startswith(f"{prefix}/")
@@ -395,6 +406,20 @@ def audit_inline_tags(
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _ensure_notes_current(root: Path, notes: Sequence[NoteIndex]) -> None:
+    _ensure_notes_readable(notes)
+    current_notes = vault_notes(root)
+    _ensure_notes_readable(current_notes)
+    captured = {note.key: note for note in notes}
+    current = {note.key: note for note in current_notes}
+    if captured.keys() != current.keys():
+        raise OSError("note-set-changed")
+    for key, note in captured.items():
+        current_note = current[key]
+        if _sha256_text(current_note.text) != _sha256_text(note.text):
+            raise OSError(f"note-changed:{key}")
 
 
 def _migration_plans(
@@ -531,8 +556,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _safe_print(f"CONFLICTS\t{len(result.conflicts)}")
             else:
                 _safe_print(f"PATCH_READY\t{len(result.patches)}")
-        violations = audit_vault(args.root, taxonomy)
-        inline_violations = audit_inline_tags(args.root)
+        notes = vault_notes(args.root)
+        violations = audit_vault(args.root, taxonomy, notes)
+        inline_violations = audit_inline_tags(args.root, notes)
+        _ensure_notes_current(args.root, notes)
     except (OSError, UnicodeError, TaxonomyError) as exc:
         _safe_print(f"ERROR\t{exc}")
         return 1
