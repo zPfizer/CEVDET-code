@@ -944,9 +944,6 @@ def _recover_orphan_hook_inputs_locked(
 ) -> int:
     """Admit transports left behind by a host timeout, under queue ownership."""
     recovered = 0
-    completed = _succeeded_hook_inputs_locked(state_dir)
-    if completed is None:
-        return 0
     candidates: list[tuple[tuple[int, float, str], Path, dict[str, Any]]] = []
     for candidate in state_dir.glob("hookin-*.json"):
         payload = _hook_input_delivery_payload(state_dir, candidate)
@@ -958,10 +955,12 @@ def _recover_orphan_hook_inputs_locked(
         payload = _hook_input_delivery_payload(state_dir, candidate)
         if payload is None:
             continue
-        if candidate.resolve(strict=False) in completed:
+        reference_sets = _orphan_reference_sets_locked(state_dir)
+        if reference_sets is None:
             continue
-        references = _referenced_hook_inputs_locked(state_dir)
-        if references is None or candidate.resolve(strict=False) in references:
+        references, completed = reference_sets
+        reference = candidate.resolve(strict=False)
+        if reference in completed or reference in references:
             continue
         try:
             _enqueue_job_locked(state_dir, "flush", payload, observed_now=now)
@@ -972,9 +971,26 @@ def _recover_orphan_hook_inputs_locked(
     return recovered
 
 
-def _has_recoverable_hook_inputs_locked(state_dir: Path) -> bool:
+def _orphan_reference_sets_locked(
+    state_dir: Path,
+) -> tuple[set[Path], set[Path]] | None:
+    references = _referenced_hook_inputs_locked(state_dir)
+    completed = _succeeded_hook_inputs_locked(state_dir)
+    if references is None or completed is None:
+        return None
+    return references, completed
+
+
+def _has_recoverable_hook_inputs_locked(state_dir: Path) -> bool | None:
+    reference_sets = _orphan_reference_sets_locked(state_dir)
+    if reference_sets is None:
+        return None
+    references, completed = reference_sets
     for candidate in sorted(state_dir.glob("hookin-*.json")):
         if _hook_input_delivery_payload(state_dir, candidate) is None:
+            continue
+        reference = candidate.resolve(strict=False)
+        if reference in references or reference in completed:
             continue
         if _find_hook_input_job_locked(
             state_dir,
@@ -997,10 +1013,21 @@ def recover_orphan_hook_inputs(
 
 def count_orphan_hook_inputs(state_dir: Path) -> int:
     """Read-only wake-up hint for SessionStart; races are resolved by recovery."""
+    reference_sets = _orphan_reference_sets_locked(state_dir)
+    if reference_sets is None:
+        return 0
+    references, completed = reference_sets
     count = 0
     for candidate in state_dir.glob("hookin-*.json"):
         payload = _hook_input_delivery_payload(state_dir, candidate)
-        if payload is not None and _find_hook_input_job_locked(state_dir, payload) is None:
+        if payload is None:
+            continue
+        reference = candidate.resolve(strict=False)
+        if (
+            reference not in references
+            and reference not in completed
+            and _find_hook_input_job_locked(state_dir, payload) is None
+        ):
             count += 1
     return count
 
@@ -1835,6 +1862,19 @@ def _settle_supervisor(
             _recover_orphan_hook_inputs_locked(state_dir, now=now)
             has_pending = _has_pending_locked(state_dir)
             has_orphan = _has_recoverable_hook_inputs_locked(state_dir)
+            if has_orphan is None:
+                receipt.update(
+                    {
+                        "status": "failed",
+                        "lease_until": 0,
+                        "updated_ts": int(now),
+                        "last_error": "worker-hook-input-reference-unverified",
+                    }
+                )
+                atomic_write_json(receipt_path, receipt)
+                if release_supervisor is not None:
+                    release_supervisor()
+                return True
             queue_full = _unresolved_job_count_locked(state_dir) >= MAX_UNRESOLVED_JOBS
             if has_pending or (has_orphan and not queue_full):
                 receipt.update(

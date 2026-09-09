@@ -1,4 +1,5 @@
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -624,6 +625,67 @@ class WorkerHandoffTests(unittest.TestCase):
 
         self.assertEqual(count, 0)
         self.assertEqual(report["orphan_hook_inputs"], 0)
+
+    def test_unverifiable_terminal_reference_fails_closed_without_retry_loop(self):
+        for corruption in ("quarantine", "succeeded"):
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                transport = state / "hookin-unverifiable.json"
+                transport.write_text(
+                    json.dumps(
+                        {
+                            "delivery_schema_version": 1,
+                            "session_id": "unverifiable",
+                            "transcript_path": str(state / "source.jsonl"),
+                            "reason": "turnend",
+                            "event_iso": "2026-09-09T12:00:00+03:00",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                if corruption == "quarantine":
+                    quarantine = state / "worker-jobs" / "quarantined"
+                    quarantine.mkdir(parents=True)
+                    payload_path = quarantine / ("job-" + "a" * 32 + ".payload")
+                    payload_path.write_bytes(b"{broken")
+                    (quarantine / ("job-" + "a" * 32 + ".json")).write_text(
+                        json.dumps(
+                            {
+                                "schema_version": workers.JOB_SCHEMA_VERSION,
+                                "job_id": "a" * 32,
+                                "status": "quarantined",
+                                "reason_code": "worker-job-json-invalid",
+                                "payload_sha256": hashlib.sha256(
+                                    payload_path.read_bytes()
+                                ).hexdigest(),
+                                "payload_file": payload_path.name,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                else:
+                    succeeded = state / "worker-jobs" / "succeeded"
+                    succeeded.mkdir(parents=True)
+                    (succeeded / ("job-" + "a" * 32 + ".json")).write_text(
+                        "{broken",
+                        encoding="utf-8",
+                    )
+                started = time.monotonic()
+                self.assertEqual(workers.run_supervisor(state, state, now=lambda: 100), 0)
+                elapsed = time.monotonic() - started
+                with workers.locked(state / "worker-queue"):
+                    has_orphan = workers._has_recoverable_hook_inputs_locked(state)
+
+                receipt = json.loads((state / "worker-supervisor.json").read_text(encoding="utf-8"))
+                self.assertLess(elapsed, 1.5)
+                self.assertIsNone(has_orphan)
+                self.assertEqual(workers.count_orphan_hook_inputs(state), 0)
+                self.assertEqual(receipt["status"], "failed")
+                self.assertEqual(
+                    receipt["last_error"],
+                    "worker-hook-input-reference-unverified",
+                )
+                self.assertTrue(transport.exists())
 
     def test_admission_deadline_leaves_durable_job_and_source(self):
         with tempfile.TemporaryDirectory() as temporary:
