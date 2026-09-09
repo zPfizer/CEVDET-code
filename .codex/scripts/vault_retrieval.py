@@ -114,9 +114,9 @@ CURRENT_CLAIM = re.compile(r"(?i)^\s*-\s*`gecerli`\s+")
 HTML_COMMENT = re.compile(r"<!--.*?(?:-->|$)", re.DOTALL)
 HISTORY_QUERY_TERMS = frozenset({
     "gecmis", "tarih", "tarihce", "tarihsel", "eski", "onceki",
-    "history", "historical", "historically", "before", "past", "previous", "previously",
+    "history", "historic", "historical", "historically", "histories", "before", "past", "previous", "previously",
 })
-HISTORY_QUERY_INFLECTION_ROOTS = frozenset({"gecmis", "tarih", "eski", "onceki"})
+HISTORY_QUERY_INFLECTION_ROOTS = frozenset({"gecmis", "tarih", "tarihce", "tarihsel", "eski", "onceki"})
 # ponytail: finite Turkish suffix grammar; use a morphology library only when this bounded set stops covering real queries.
 HISTORY_QUERY_INFLECTION_CASE_SUFFIXES = frozenset({
     "e", "i", "in", "te", "ten", "de", "den", "ye", "yi",
