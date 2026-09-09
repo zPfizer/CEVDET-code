@@ -7,8 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -c \"import os,sys,time,pathlib,runpy,subprocess;os.environ['CEVO_HOOK_DEADLINE']=str(time.monotonic()+10);sys.argv=['hook.py','session-start'];root=subprocess.run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1).stdout.strip();runpy.run_path(str(pathlib.Path(root)/'.codex/hooks/hook.py'),run_name='__main__')\"",
-            "commandWindows": "python -c __import__('os').environ['CEVO_HOOK_DEADLINE']=str(__import__('time').monotonic()+10);__import__('sys').argv=['hook.py','session-start'];_r=__import__('subprocess').run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1);__import__('runpy').run_path(str(__import__('pathlib').Path(_r.stdout.strip())/'.codex/hooks/hook.py'),run_name='__main__')",
+            "command": "python3 -c \"import os,sys,time,pathlib,runpy,subprocess;os.environ['CEVO_HOOK_DEADLINE']=str(time.monotonic()+9.5);sys.argv=['hook.py','session-start'];root=subprocess.run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1).stdout.strip();runpy.run_path(str(pathlib.Path(root)/'.codex/hooks/hook.py'),run_name='__main__')\"",
+            "commandWindows": "python -c __import__('os').environ['CEVO_HOOK_DEADLINE']=str(__import__('time').monotonic()+9.5);__import__('sys').argv=['hook.py','session-start'];_r=__import__('subprocess').run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1);__import__('runpy').run_path(str(__import__('pathlib').Path(_r.stdout.strip())/'.codex/hooks/hook.py'),run_name='__main__')",
             "timeout": 10,
             "statusMessage": "Cevo hafızayı yüklüyor",
             "additionalContextLimit": 8000
@@ -21,8 +21,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -c \"import os,sys,time,pathlib,runpy,subprocess;os.environ['CEVO_HOOK_DEADLINE']=str(time.monotonic()+8);sys.argv=['hook.py','user-prompt'];root=subprocess.run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1).stdout.strip();runpy.run_path(str(pathlib.Path(root)/'.codex/hooks/hook.py'),run_name='__main__')\"",
-            "commandWindows": "python -c __import__('os').environ['CEVO_HOOK_DEADLINE']=str(__import__('time').monotonic()+8);__import__('sys').argv=['hook.py','user-prompt'];_r=__import__('subprocess').run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1);__import__('runpy').run_path(str(__import__('pathlib').Path(_r.stdout.strip())/'.codex/hooks/hook.py'),run_name='__main__')",
+            "command": "python3 -c \"import os,sys,time,pathlib,runpy,subprocess;os.environ['CEVO_HOOK_DEADLINE']=str(time.monotonic()+7.5);sys.argv=['hook.py','user-prompt'];root=subprocess.run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1).stdout.strip();runpy.run_path(str(pathlib.Path(root)/'.codex/hooks/hook.py'),run_name='__main__')\"",
+            "commandWindows": "python -c __import__('os').environ['CEVO_HOOK_DEADLINE']=str(__import__('time').monotonic()+7.5);__import__('sys').argv=['hook.py','user-prompt'];_r=__import__('subprocess').run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1);__import__('runpy').run_path(str(__import__('pathlib').Path(_r.stdout.strip())/'.codex/hooks/hook.py'),run_name='__main__')",
             "timeout": 8,
             "statusMessage": "Cevo ilgili anıları arıyor",
             "additionalContextLimit": 4000
@@ -36,8 +36,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -c \"import os,sys,time,pathlib,runpy,subprocess;os.environ['CEVO_HOOK_DEADLINE']=str(time.monotonic()+3);sys.argv=['hook.py','pre-compact'];root=subprocess.run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1).stdout.strip();runpy.run_path(str(pathlib.Path(root)/'.codex/hooks/hook.py'),run_name='__main__')\"",
-            "commandWindows": "python -c __import__('os').environ['CEVO_HOOK_DEADLINE']=str(__import__('time').monotonic()+3);__import__('sys').argv=['hook.py','pre-compact'];_r=__import__('subprocess').run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1);__import__('runpy').run_path(str(__import__('pathlib').Path(_r.stdout.strip())/'.codex/hooks/hook.py'),run_name='__main__')",
+            "command": "python3 -c \"import os,sys,time,pathlib,runpy,subprocess;os.environ['CEVO_HOOK_DEADLINE']=str(time.monotonic()+2.5);sys.argv=['hook.py','pre-compact'];root=subprocess.run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1).stdout.strip();runpy.run_path(str(pathlib.Path(root)/'.codex/hooks/hook.py'),run_name='__main__')\"",
+            "commandWindows": "python -c __import__('os').environ['CEVO_HOOK_DEADLINE']=str(__import__('time').monotonic()+2.5);__import__('sys').argv=['hook.py','pre-compact'];_r=__import__('subprocess').run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1);__import__('runpy').run_path(str(__import__('pathlib').Path(_r.stdout.strip())/'.codex/hooks/hook.py'),run_name='__main__')",
             "timeout": 3,
             "statusMessage": "Cevo sıkıştırma öncesi hafızayı koruyor"
           }
@@ -49,8 +49,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -c \"import os,sys,time,pathlib,runpy,subprocess;os.environ['CEVO_HOOK_DEADLINE']=str(time.monotonic()+3);sys.argv=['hook.py','turn-end'];root=subprocess.run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1).stdout.strip();runpy.run_path(str(pathlib.Path(root)/'.codex/hooks/hook.py'),run_name='__main__')\"",
-            "commandWindows": "python -c __import__('os').environ['CEVO_HOOK_DEADLINE']=str(__import__('time').monotonic()+3);__import__('sys').argv=['hook.py','turn-end'];_r=__import__('subprocess').run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1);__import__('runpy').run_path(str(__import__('pathlib').Path(_r.stdout.strip())/'.codex/hooks/hook.py'),run_name='__main__')",
+            "command": "python3 -c \"import os,sys,time,pathlib,runpy,subprocess;os.environ['CEVO_HOOK_DEADLINE']=str(time.monotonic()+2.5);sys.argv=['hook.py','turn-end'];root=subprocess.run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1).stdout.strip();runpy.run_path(str(pathlib.Path(root)/'.codex/hooks/hook.py'),run_name='__main__')\"",
+            "commandWindows": "python -c __import__('os').environ['CEVO_HOOK_DEADLINE']=str(__import__('time').monotonic()+2.5);__import__('sys').argv=['hook.py','turn-end'];_r=__import__('subprocess').run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1);__import__('runpy').run_path(str(__import__('pathlib').Path(_r.stdout.strip())/'.codex/hooks/hook.py'),run_name='__main__')",
             "timeout": 3
           }
         ]
@@ -62,8 +62,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -c \"import os,sys,time,pathlib,runpy,subprocess;os.environ['CEVO_HOOK_DEADLINE']=str(time.monotonic()+3);sys.argv=['hook.py','session-end'];root=subprocess.run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1).stdout.strip();runpy.run_path(str(pathlib.Path(root)/'.codex/hooks/hook.py'),run_name='__main__')\"",
-            "commandWindows": "python -c __import__('os').environ['CEVO_HOOK_DEADLINE']=str(__import__('time').monotonic()+3);__import__('sys').argv=['hook.py','session-end'];_r=__import__('subprocess').run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1);__import__('runpy').run_path(str(__import__('pathlib').Path(_r.stdout.strip())/'.codex/hooks/hook.py'),run_name='__main__')",
+            "command": "python3 -c \"import os,sys,time,pathlib,runpy,subprocess;os.environ['CEVO_HOOK_DEADLINE']=str(time.monotonic()+2.5);sys.argv=['hook.py','session-end'];root=subprocess.run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1).stdout.strip();runpy.run_path(str(pathlib.Path(root)/'.codex/hooks/hook.py'),run_name='__main__')\"",
+            "commandWindows": "python -c __import__('os').environ['CEVO_HOOK_DEADLINE']=str(__import__('time').monotonic()+2.5);__import__('sys').argv=['hook.py','session-end'];_r=__import__('subprocess').run(['git','rev-parse','--show-toplevel'],text=True,encoding='utf-8',capture_output=True,check=True,timeout=1);__import__('runpy').run_path(str(__import__('pathlib').Path(_r.stdout.strip())/'.codex/hooks/hook.py'),run_name='__main__')",
             "timeout": 3,
             "statusMessage": "Cevo günlük özeti başlatıyor"
           }

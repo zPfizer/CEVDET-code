@@ -214,7 +214,7 @@ class VaultContractTests(unittest.TestCase):
             self.assertEqual(result.stdout, "", "No fallback may run a different Vault's hook")
 
     @unittest.skipUnless(os.name == "nt", "Windows command contract")
-    def test_precompact_command_returns_before_host_deadline_with_queue_lock(self) -> None:
+    def test_precompact_command_returns_before_host_deadline_with_slow_git_and_queue_lock(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cevo hook deadline ") as temporary:
             vault = Path(temporary) / "checkout ü space"
             vault.mkdir()
@@ -276,6 +276,16 @@ class VaultContractTests(unittest.TestCase):
                     time.sleep(0.01)
                 self.assertTrue(ready.exists(), "queue lock holder did not start")
                 command = json.loads((codex / "hooks.json").read_text(encoding="utf-8"))["hooks"]["PreCompact"][0]["hooks"][0]["commandWindows"]
+                (vault / "slow_git.py").write_text(
+                    "import subprocess,time\noriginal_run=subprocess.run\n"
+                    "def slow_run(*args, **kwargs):\n"
+                    "    if args and args[0][0] == 'git': time.sleep(0.6)\n"
+                    "    return original_run(*args, **kwargs)\n"
+                    "subprocess.run=slow_run\n", encoding="utf-8",
+                )
+                command = command.replace(
+                    "python -c ", "python -c __import__('runpy').run_path('slow_git.py');", 1,
+                )
                 payload = {
                     "session_id": "host-deadline",
                     "cwd": str(vault),
