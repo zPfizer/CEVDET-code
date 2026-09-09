@@ -50,6 +50,11 @@ PR_NODES = {
 }
 
 
+def require(condition, reason):
+    if not condition:
+        raise RuntimeError(reason)
+
+
 def command(*args):
     return subprocess.run(args, cwd=ROOT, capture_output=True, text=True,
                           encoding="utf-8", check=True).stdout
@@ -95,18 +100,18 @@ def query(pattern, target, payloads):
     result = query_graph(pattern, ROOT.as_posix() + "/" + target,
                          repo_root=str(ROOT), detail_level="minimal", max_results=100)
     payloads.append(result)
-    assert result["status"] == "ok", result
+    require(result["status"] == "ok", result)
     if result.get("results_omitted", 0):
         result = query_graph(pattern, ROOT.as_posix() + "/" + target,
                              repo_root=str(ROOT), detail_level="standard", max_results=100)
         payloads.append(result)
-        assert result["status"] == "ok" and not result.get("results_omitted", 0), result
+        require(result["status"] == "ok" and not result.get("results_omitted", 0), result)
     return result
 
 
 def graph(case):
     payloads = [get_minimal_context(task=TASKS[case], repo_root=str(ROOT), base="HEAD~1")]
-    assert payloads[0]["status"] == "ok", payloads[0]
+    require(payloads[0]["status"] == "ok", payloads[0])
     if case == "discovery":
         target = ".codex/scripts/file_lock.py::locked"
         query("callers_of", target, payloads)
@@ -121,14 +126,14 @@ def graph(case):
             result = detect_changes_func(base="HEAD~1", repo_root=str(ROOT),
                                          detail_level=detail, max_results=100, max_flows=5)
             payloads.append(result)
-            assert result["status"] == "ok" and not result.get("truncated", False), result
+            require(result["status"] == "ok" and not result.get("truncated", False), result)
     return payloads
 
 
 def baseline(case):
     # Explicit tracked files avoid multi-root ignore traversal differences.
     paths = command("git", "ls-files", "--", *FILES).splitlines()
-    assert paths, "No tracked source files"
+    require(paths, "No tracked source files")
     if case == "discovery":
         return [command("rg", "--no-ignore", "-n", r"\blocked\s*\(", *paths)]
     if case == "debug":
@@ -174,9 +179,9 @@ def compare_graph_samples(cases, source_truth):
 
 
 def main():
-    assert command("git", "rev-parse", "HEAD").strip() == BASELINE
-    assert not command("git", "diff", "HEAD", "--", ".codex/hooks", ".codex/scripts", ".codex/tests")
-    assert version("code-review-graph") == "2.3.8"
+    require(command("git", "rev-parse", "HEAD").strip() == BASELINE, "Checkout must match the fixed baseline commit")
+    require(not command("git", "diff", "HEAD", "--", ".codex/hooks", ".codex/scripts", ".codex/tests"), "Baseline source files must be clean")
+    require(version("code-review-graph") == "2.3.8", "Replay requires code-review-graph 2.3.8")
     shared = {
         "discovery": [(".codex/scripts/file_lock.py", 1, 80),
                       (".codex/tests/test_file_lock.py", 1, 122)],
@@ -192,8 +197,8 @@ def main():
               "measurement": "retrieval replay; not end-to-end agent time or billed tokens",
               "root": str(ROOT), "cases": {},
               "source_truth": {s: truth_callers(s) for s in ("locked", "_stable_source_snapshot")}}
-    assert len(report["source_truth"]["locked"]) == 44
-    assert len(report["source_truth"]["_stable_source_snapshot"]) == 1
+    require(len(report["source_truth"]["locked"]) == 44, "Source oracle must find 44 locked callers")
+    require(len(report["source_truth"]["_stable_source_snapshot"]) == 1, "Source oracle must find one snapshot caller")
     for case, spans in shared.items():
         samples = {"rg": [], "graph": []}
         for repeat in range(3):
@@ -224,11 +229,11 @@ def main():
                 continue
             print(case, method, {k: round(statistics.median(s[k] for s in samples), 4)
                                  for k in ("seconds", "retrieval_chars", "source_chars", "total_chars")})
-    assert all(s["status"] == "ok" for methods in report["cases"].values()
-               for samples in methods.values() for s in samples), "Failed probes are not savings"
+    require(all(s["status"] == "ok" for methods in report["cases"].values()
+                for samples in methods.values() for s in samples), "Failed probes are not savings")
     print("quality", quality)
-    assert len(quality) == 18 and all(not row["missing"] and not row["extra"] for row in quality), \
-        "Graph accuracy differs from source; negative results remain in the JSON output"
+    require(len(quality) == 18 and all(not row["missing"] and not row["extra"] for row in quality),
+            "Graph accuracy differs from source; negative results remain in the JSON output")
 
 
 if __name__ == "__main__":

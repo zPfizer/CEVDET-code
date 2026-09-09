@@ -41,6 +41,8 @@ dosyalı incelemelerde graf kullanma kararı bu dar sonuçla elenemez.
   negatif kontrol de beklenen hatayla durdu; yanlış sonuçların JSON kanıtı korundu.
   Kasıtlı kısaltılmış ara yanıt yerine her sorgunun son, tamamlanmış yanıtı
   doğrulanır. Risk ve akış önceliklerinin anlamsal doğruluğu bu sayıya dahil değildir.
+  Bu kontroller açık hata kontrolleridir; Python `-O` / `PYTHONOPTIMIZE` ile
+  devre dışı kalmazlar.
 
 ## Sonuç
 
@@ -48,9 +50,9 @@ Toplam karakter, arama/graf yanıtı ile ortak kaynak doğrulamasının toplamı
 
 | Görev | rg toplam karakter | Graf toplam karakter | Graf farkı | rg süre | Graf süre |
 |---|---:|---:|---:|---:|---:|
-| `file_lock.locked`: çağıranlar ve testler | 20.614 | 71.802 | +%248,3 | 0,0315 sn | 0,1381 sn |
-| `_stable_source_snapshot`: çağrı zinciri | 17.303 | 17.668 | +%2,1 | 0,0322 sn | 0,1515 sn |
-| Son gerçek PR: değişen semboller | 31.095 | 32.076 | +%3,2 | 0,0575 sn | 0,2486 sn |
+| `file_lock.locked`: çağıranlar ve testler | 20.614 | 71.802 | +%248,3 | 0,0340 sn | 0,1352 sn |
+| `_stable_source_snapshot`: çağrı zinciri | 17.303 | 17.668 | +%2,1 | 0,0324 sn | 0,1498 sn |
+| Son gerçek PR: değişen semboller | 31.095 | 32.076 | +%3,2 | 0,0537 sn | 0,2484 sn |
 
 Ortak kaynak okuması sırasıyla 14.269, 14.895 ve 23.667 karakterdir.
 Grafın yalnız sorgu çıktısı sırasıyla 57.533, 2.773 ve 8.409 karakterdir.
@@ -111,7 +113,7 @@ yeniden üretim kanıtı olarak kalır; ürün veya haftalık CI akışına ekle
   sonuç bildirdi. Windows/ripgrep 15.2.0 kontrolünde iki sorgu 30'ar tekrarda
   aynı 6.345 / 2.408 karakteri verdi. Yeniden üretim için arama yine de açık
   Git dosya listesine sabitlendi; metin miktarları değişmedi, tablodaki süreler
-  dosya listesini çıkaran son koşuya aittir.
+  dosya listesini de çıkaran üç tekrarlı ölçüme aittir.
 - Kısa `locked` adı 40 adayla belirsizdi. Ölçüm, iki yöntemde de bilinen dosya
   ve sembolü kullandı; graf sorgusunda tam `qualified_name` verildi.
 - PR'ın `minimal` sonucu yalnız üç öncelik adı verdi; bütün değişen sembol
