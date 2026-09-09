@@ -7,7 +7,7 @@ Yerel Vault ve eski Vault Git geçmişi bu depodan ayrıdır.
 
 1. Kod deposunda `git fetch origin` çalıştır. Güncel `origin/main` üzerinden ayrı `codex/<konu>` branch'i ve komşu bir worktree oluştur. Aynı worktree'de eşzamanlı görev çalıştırma.
 2. Bir görev birkaç bağımsız değişiklik içeriyorsa her birini ayrı branch/PR'a ayır. Birbirine zorunlu bağımlı değişiklikler aynı PR'da olabilir.
-3. Yalnız görev dosyalarını commit et; `git add .` ile ortak çalışmaları toplama. Yeni dosyayı mevcut `.gitignore` izin listesine açıkça ekle.
+3. Yalnız görev dosyalarını commit et; `git add .` ile ortak çalışmaları toplama. Yeni dosyayı mevcut `.gitignore` izin listesine açıkça ekle. Kod incelemesinde [Code Review Graph akışını](../../AGENTS.md#code-review-graph) uygula; PR karşılaştırmasında merge-base kullan. Graf, kaynak incelemesi ve testlerin yerine geçmez.
 4. Odaklı testleri çalıştır. Davranış değişikliği varsa mevcut tam sentetik test paketini de çalıştır. CI Windows/Python 3.14 üzerinde aynı paketi çalıştırır.
 5. Branch'i push et ve PR aç. Bitmemiş iş için draft kullan; incelemeye hazır olduğunda ready durumuna geçir. Hedef branch `main` olsun.
 6. Codex otomatik incelemesini ve CI sonucunu takip et. Yeni commit sonrasında önceki incelemeyi güncel kabul etme; son commit için yeniden inceleme al. Gerekirse PR yorumunda `@codex review` iste; yorum gönderme yetkisi görev kapsamında yoksa kullanıcıdan al.
@@ -23,6 +23,11 @@ Kod aktarımı PR #1, PR altyapısı ise onun üzerine kurulan PR #2 içindedir.
 PR merge edilmesi canlı Vault'u değiştirmez. Açık hedef ve uygulama yetkisiyle, onaylanan runtime diff'i yerel Vault'ta ayrı branch/worktree üzerinden denetlenir. Hedef dosyalardaki mevcut değişiklikler karşılaştırılır; kör klasör kopyası yapılmaz. Vault notları, günlükler, knowledge, özel ayarlar, config ve AGENTS otomatik aktarılmaz. İlgili test/doctor kontrollerinden sonra canlı uygulama ayrıca doğrulanır.
 
 ## İnceleme kurulumu
+
+Code Review Graph kullanım seçimi ve sınırları için `AGENTS.md` içindeki üç akışı
+izle. [9 Eylül ölçümü](graph-measurement-20260909.md), başlangıcı bilinen dar
+sorguları kapsar; çok dosyalı etki incelemesinin genel fayda ölçümü değildir.
+Grafın risk/test-boşluğu etiketleri inceleme adayıdır.
 
 Codex ayarlarında bu depo için `Review my PRs` ve `On every push` etkinleştirilmiştir. Review kuralları kök `AGENTS.md` içindedir. Bunlar CI veya kullanıcı merge onayının yerine geçmez. GitHub hesap planı branch protection desteklemiyorsa sunucu tarafı zorunluluk varmış gibi raporlama.
 
