@@ -1354,7 +1354,13 @@ def _rank(
                 weight = max(weight, 3)
             score += inverse_frequency ** 2 * weight
         score *= 1 + min(len(matched) / max(len(query_terms), 1), 0.5)
-        if entry.status in {"archived", "historical", "template"} or entry.status.startswith("superseded"):
+        if entry.status == "template" or (
+            not include_history
+            and (
+                entry.status in {"archived", "historical"}
+                or entry.status.startswith("superseded")
+            )
+        ):
             score *= 0.35
         record_type = entry.record_type.casefold()
         priority = int(

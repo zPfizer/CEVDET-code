@@ -321,6 +321,49 @@ Legacy çalışma tercihi değişim kaydını tekrar eder.
         self.assertIn("Eski çalışma tercihi", history[0].excerpt)
         self.assertIn("gecmis", history[0].excerpt)
 
+    def test_explicit_history_query_does_not_penalize_related_archived_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write(
+                root,
+                "🏰 300-Projects/Tansu/Python-eski.md",
+                """---
+title: Eski Python Denetim Kaydı
+status: archived
+type: research-analysis
+---
+# Eski Python Denetim Kaydı
+6 Eylül 7 Eylül eski etiket denetimi; tarihsel araştırma bulguları.
+""",
+            )
+            _write(
+                root,
+                "🏰 300-Projects/Tansu/Python-guncel.md",
+                """---
+title: Güncel Python Protokolleri
+status: active
+type: note
+---
+# Güncel Python Protokolleri
+Eylül etiket denetimi için güncel protokol. Eylül etiket denetimi.
+Eylül etiket denetimi.
+""",
+            )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            history = retrieval.search_vault(
+                entries,
+                "6 Eylül 7 Eylül eski etiket denetimi",
+                top_k=2,
+            )
+            current = retrieval.search_vault(
+                entries,
+                "Eylül etiket denetimi",
+                top_k=2,
+            )
+
+        self.assertEqual(history[0].entry.path, "🏰 300-Projects/Tansu/Python-eski.md")
+        self.assertEqual(current[0].entry.path, "🏰 300-Projects/Tansu/Python-guncel.md")
+
     def test_identical_copies_do_not_fill_top_three_when_an_independent_source_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
