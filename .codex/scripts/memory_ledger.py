@@ -348,7 +348,7 @@ def _json_regions(text: str) -> Iterator[tuple[int, int]]:
             return
         offset = end
         boundary = end
-        while boundary < len(text) and text[boundary] in ';,.!?':
+        while boundary < len(text) and text[boundary] in ';,.!?`)':
             boundary += 1
         if boundary == len(text) or text[boundary].isspace():
             yield opening.start(), end

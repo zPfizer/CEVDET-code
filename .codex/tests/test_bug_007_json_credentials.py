@@ -64,7 +64,8 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         payload = '{"token":{"value":"OBJECT_SECRET"},"keep":"ordinary"}'
         safe = '{"token":"<REDACTED>","keep":"ordinary"}'
         for prefix, suffix in (('before ', '\nafter'), ('before {not-json}\n```json\n', '\n```\nafter'),
-                               ('before ', '; after'), ('before ', '. after')):
+                               ('before ', '; after'), ('before ', '. after'),
+                               ('inline `', '` after'), ('before (', ') after')):
             with self.subTest(prefix=prefix):
                 sanitized, _ = ledger.sanitize_text(prefix + payload + suffix, max_chars=None)
                 self.assertEqual(sanitized, prefix + safe + suffix)
