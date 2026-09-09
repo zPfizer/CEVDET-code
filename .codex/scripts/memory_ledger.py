@@ -138,12 +138,12 @@ _WRITE_TARGET = (
     rf"(?:bu|şu|o)\s+{_WRITE_TARGET_OBJECT}|"
     rf"{_WRITE_PROJECT_TARGET}|{_WRITE_MODULE_TARGET}|{_WRITE_FILE_TARGET}|"
     rf"{_WRITE_TARGET_OBJECT}|"
-    rf"(?:[a-z]:[\\/]|\.{{1,2}}[\\/]|[\w.-]+[\\/])[\w./\\-]+"
+    rf"(?:[a-z]:[\\/]|\.{{1,2}}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w./\\-]+"
     rf"{_WRITE_TARGET_SUFFIX}|"
     rf"{_WRITE_FILENAME}{_WRITE_TARGET_SUFFIX}|"
     rf"{_QUOTED_PATH}{_WRITE_TARGET_SUFFIX})"
 )
-_TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen)\s+)*"
+_TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen|ok|okay|tamam)\s*[,;:]?\s+)*"
 TARGETED_WRITE_COMMAND = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+{_WRITE_MUTATION}"
     rf"(?:\s*,?\s+lütfen)?\s*[.!]*\s*$"
@@ -169,7 +169,8 @@ CONDITIONAL_WRITE = re.compile(
     r"san|sen|sak|sek|salar|seler|sınız|siniz|sunuz|sünüz|sanız|seniz)|"
     r"y(?:sa|se|sam|sem|san|sen|sak|sek|salar|seler|sınız|siniz|sunuz|"
     r"sünüz|sanız|seniz)|(?:var|yok)(?:sa|se)|"
-    r"(?:ince|ınca|unca|ünce|diğinde|dığında|duğunda|düğünde|ken)|madan|meden)\b|"
+    r"(?:ince|ınca|unca|ünce|diğinde|dığında|duğunda|düğünde|ken)|"
+    r"madan|meden|madıkça|medikçe|s[ıiuü]z(?:sa|se))\b|"
     r"\b(?:takdirde|halinde|durumunda|sonra|kadar)\b"
 )
 ACTION_QUESTION_WORD = re.compile(

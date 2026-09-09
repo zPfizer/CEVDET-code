@@ -504,6 +504,11 @@ class ConversationContinuityTests(unittest.TestCase):
             'app.v1.py dosyasını düzelt.',
             'src/app.py dosyasını düzelt, lütfen.',
             "src/app.py'yi düzelt.",
+            r'\\server\share\app.py dosyasını düzelt.',
+            r'\\server-name\share.name\nested\app.py dosyasını düzelt.',
+            'Tamam, src/app.py dosyasını düzelt.',
+            'Okay, src/app.py dosyasını düzelt.',
+            'Lütfen, src/app.py dosyasını düzelt.',
             '"C:\\Users\\Me\\My Project\\app.py"\'yi düzelt.',
             '"C:\\Users\\Me\\My Project\\app.py" dosyasını düzelt.',
             '"app.py" dosyasını düzelt.',
@@ -549,6 +554,14 @@ class ConversationContinuityTests(unittest.TestCase):
             'Hiçbir dosyayı düzelt.',
             'Lütfen hiçbir dosyayı düzelt.',
             'Hiç dosyayı düzelt.',
+            'Onaylanmadıkça dosyayı düzelt.',
+            'Gerekmedikçe dosyayı düzelt.',
+            'Onaysızsa dosyayı düzelt.',
+            'Onaylanmadıkça BIB projesindeki hatayı düzelt.',
+            'Gerekmedikçe Atlas modülündeki hatayı düzelt.',
+            'Onaysızsa src/app.py dosyasını düzelt.',
+            r'Onaylanmadıkça \\server\share\app.py dosyasını düzelt.',
+            r'Sakın \\server\share\app.py dosyasını düzelt.',
         ):
             with self.subTest(prompt=prompt):
                 self._check_write_prompt_keeps_read_only_scope(prompt)
