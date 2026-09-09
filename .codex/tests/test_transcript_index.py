@@ -12,6 +12,7 @@ from unittest import mock
 from _fixtures import CODEX_DIR
 import transcript_index
 import doctor
+import memory_ledger
 
 
 def parse_record(record):
@@ -139,13 +140,53 @@ class TranscriptIndexTests(unittest.TestCase):
             )
             self._index(state, "session", source)
             with source.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps({"role": "user", "content": "Bunu kaydetme."}) + "\n")
+                handle.write(json.dumps({"role": "user", "content": "Bunu kaydetme, lütfen."}) + "\n")
                 handle.write(json.dumps({"role": "user", "content": "new"}) + "\n")
             index = self._index(state, "session", source)
 
         self.assertEqual([row["retained"] for row in index.rows], [False, False, False, True])
         self.assertEqual(index.rows[2]["privacy_classification"], "do-not-save")
         self.assertEqual(index.counters["json_decodes_last"], 2)
+
+    def test_policy_bump_rebuilds_legacy_do_not_save_index(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / ".state"
+            source = root / "rollout.jsonl"
+            courtesy = "Bunu kaydetme, lütfen."
+            source.write_text(
+                "\n".join(
+                    json.dumps({"role": role, "content": text})
+                    for role, text in (
+                        ("user", "old"),
+                        ("assistant", "old reply"),
+                        ("user", courtesy),
+                        ("user", "new"),
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            actual_directive = memory_ledger.memory_directive
+
+            def legacy_directive(text):
+                if text == courtesy:
+                    return memory_ledger.MemoryDirective("do-not-save", text)
+                return actual_directive(text)
+
+            with (
+                mock.patch.object(transcript_index, "POLICY_VERSION", "persistent-turns-v1"),
+                mock.patch.object(memory_ledger, "memory_directive", side_effect=legacy_directive),
+            ):
+                legacy = self._index(state, "session", source)
+            self.assertEqual(legacy.state["policy_version"], "persistent-turns-v1")
+            self.assertEqual([row["retained"] for row in legacy.rows], [True, True, False, True])
+
+            rebuilt = self._index(state, "session", source)
+
+        self.assertEqual(rebuilt.state["policy_version"], transcript_index.POLICY_VERSION)
+        self.assertEqual([row["retained"] for row in rebuilt.rows], [False, False, False, True])
+        self.assertEqual(rebuilt.counters["json_decodes_last"], 4)
 
     def test_partial_last_line_is_replayed_when_the_writer_finishes_it(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -17,6 +17,7 @@ class MemoryDirectiveTests(unittest.TestCase):
         ordinary = [
             'Makalede “bu konuşmada kalsın” yazıyor. Bunu değerlendir.',
             'Yazar "bunu kaydetme" diyor; bu görüşü araştır.',
+            'Yazar "bunu kaydetme, lütfen" diyor; bu görüşü araştır.',
             'Alıntı: `Şunu unut: Ankara`',
             '> Bunu unut.\nBu cümleyi açıkla.',
             '```text\nBu konuşmada kalsın.\n```\nMetni özetle.',
@@ -43,6 +44,12 @@ class MemoryDirectiveTests(unittest.TestCase):
                 "Levent Ankara'da yaşıyor",
             ),
             "Bunu kaydetme.": ("do-not-save", ""),
+            "Bunu kaydetme, lütfen.": ("do-not-save", ""),
+            "Lütfen, bunu kaydetme!": ("do-not-save", ""),
+            "Bunu kaydetme, lütfen bunu ayrıca açıkla.": (
+                "do-not-save",
+                "Bunu kaydetme, lütfen bunu ayrıca açıkla.",
+            ),
             "Bu konuşmada kalsın.": ("session-only", ""),
             "Bu sohbet aramızda kalsın.": ("session-only", ""),
             "Bu oturumda kalsın.": ("session-only", ""),
@@ -231,7 +238,7 @@ class TranscriptPrivacyTests(unittest.TestCase):
             ("assistant", "Not ettim."),
             ("user", "Geçici ayrıntı."),
             ("assistant", "Anladım."),
-            ("user", "Bunu kaydetme."),
+            ("user", "Bunu kaydetme, lütfen."),
             ("assistant", "Kaydetmeyeceğim."),
             ("user", "Kalıcı karar devam ediyor."),
         ]

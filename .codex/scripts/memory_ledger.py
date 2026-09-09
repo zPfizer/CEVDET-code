@@ -19,7 +19,7 @@ from user_evidence import filter_evidence, USER_LINK, proof_for_link
 
 MAX_EVENT_CHARS = 65_536
 SUPPRESSION_SCHEMA = 1
-PERSISTENT_TURNS_VERSION = "persistent-turns-v1"
+PERSISTENT_TURNS_VERSION = "persistent-turns-v2"
 _COMPANION_SOURCE_ALIASES = {
     '🔮 850-Companion/Sources/Last-Session.md': '🔮 850-Companion/Last-Session.md',
     '🔮 850-Companion/Sources/Journal.md': '🔮 850-Companion/Journal.md',
@@ -79,6 +79,10 @@ QUOTED_CONTENT = re.compile(
     r'`[^`\n]*`|"[^"\n]*"|“[^”]*”|‘[^’]*’|«[^»]*»'
 )
 DO_NOT_SAVE = r'(?:(?:bunu|bu bilgiyi|bu ayrıntıyı)\s+)?(?:kaydetme|saklama|hafızana alma|hafızanda tutma|kaydetmeni istemiyorum)'
+STANDALONE_DO_NOT_SAVE = (
+    r'(?:lütfen\s*[,;:]?\s*)?' + DO_NOT_SAVE
+    + r'(?:\s*[,;:]?\s*lütfen)?'
+)
 READ_ONLY_REQUEST = re.compile(
     r"\b(?:salt[ -]?okunur|read[ -]?only|sadece\s+incele|"
     r"hiçbir\s+dosyayı\s+değiştirme|dosyaları\s+değiştirme|"
@@ -365,7 +369,7 @@ def memory_directive(text: str) -> MemoryDirective:
         return MemoryDirective("what-known")
     if re.search(r'\b' + DO_NOT_SAVE + r'\b', folded):
         standalone = re.fullmatch(
-            r'(?:lütfen\s+)?' + DO_NOT_SAVE,
+            STANDALONE_DO_NOT_SAVE,
             CONTROL_TRAILING.sub("", folded),
         )
         return MemoryDirective("do-not-save", "" if standalone else raw)
