@@ -20,6 +20,12 @@ SHA_MERGE = "c" * 40
 
 
 class PullRequestGraphReportTests(unittest.TestCase):
+    def test_failure_comment_bounds_large_parse_errors(self) -> None:
+        rendered = report._render_failure("error\n" * 20000, base_sha=SHA_BASE, head_sha=SHA_HEAD)
+        self.assertLess(len(rendered), 5000)
+        self.assertIn("hata çıktısı kesildi", rendered)
+        self.assertIn("başarısız", rendered)
+
     def test_renderer_labels_static_candidates_without_upstream_savings(self) -> None:
         payload = {
             "status": "ok",

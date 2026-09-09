@@ -162,13 +162,16 @@ def _build_payload(
 
 
 def _render_failure(error: str, *, base_sha: str, head_sha: str) -> str:
+    error = _inline(error)
+    if len(error) > 4000:
+        error = error[:4000] + " … hata çıktısı kesildi; tam hata JSON artifact içinde."
     return "\n".join(
         (
             REPORT_MARKER,
             "## Code Review Graph PR raporu",
             "",
             "- Durum: **başarısız**",
-            f"- Hata: `{_inline(error)}`",
+            f"- Hata: `{error}`",
             f"- Event base.sha: `{_inline(base_sha)}`",
             f"- Event head.sha: `{_inline(head_sha)}`",
             "",
