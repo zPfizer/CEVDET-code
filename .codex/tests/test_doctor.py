@@ -23,6 +23,8 @@ from _fixtures import CODEX_DIR  # sys.path seam
 import doctor  # noqa: E402
 import codex_runner  # noqa: E402
 import compile as memory_compile  # noqa: E402
+import flush  # noqa: E402
+import hook  # noqa: E402
 import worker_supervisor as workers  # noqa: E402
 import memory_ledger  # noqa: E402
 
@@ -42,13 +44,25 @@ class DoctorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             now = doctor.HOOK_RUNTIME_MAX_AGE_SECONDS * 2
-            (state / 'hook-health-old.json').write_text(json.dumps(
-                {'generation': 1, 'status': 'error', 'error': 'ValueError', 'ts': 0}), encoding='utf-8')
+            old_session = "old-session"
+            hook.write_hook_health(
+                state,
+                {"session_id": old_session},
+                status="error",
+                error="ValueError",
+            )
+            old_path = state / f"hook-health-{hook.session_key(old_session)}.json"
+            old_receipt = json.loads(old_path.read_text(encoding="utf-8"))
+            old_receipt["ts"] = 0
+            old_path.write_text(json.dumps(old_receipt), encoding="utf-8")
             for current_error in (False, True):
                 with self.subTest(current_error=current_error):
-                    (state / 'hook-health-current.json').write_text(json.dumps(
-                        {'generation': 1, 'status': 'error' if current_error else 'ok',
-                         'error': 'RuntimeError', 'ts': now}), encoding='utf-8')
+                    hook.write_hook_health(
+                        state,
+                        {"session_id": "current-session"},
+                        status="error" if current_error else "ok",
+                        error="RuntimeError" if current_error else "",
+                    )
                     checks = {c.name: c for c in doctor.run_checks(
                         state, state_dir=state, now=now, only='Hook sağlığı')}
                     self.assertEqual(checks['Hook sağlığı'].status, 'FAIL' if current_error else 'OK')
@@ -227,9 +241,13 @@ class DoctorTests(unittest.TestCase):
             (state / "worker-supervisor.json").write_text(
                 json.dumps(
                     {
+                        "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
                         "status": "idle",
+                        "generation": 1,
+                        "launch_token": "",
                         "owner_pid": 999_999_999,
                         "lease_until": 0,
+                        "updated_ts": 100,
                     }
                 ),
                 encoding="utf-8",
@@ -240,6 +258,72 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(check.status, "WARN")
         self.assertIn("ready-pending=1", check.evidence)
         self.assertIn("supervisor=idle", check.evidence)
+
+    def test_doctor_rejects_ready_pending_job_without_live_running_supervisor(self) -> None:
+        for owner_pid, lease_until in (
+            (0, 200),
+            (999_999_999, 200),
+        ):
+            with self.subTest(owner_pid=owner_pid, lease_until=lease_until), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                pending = state / "worker-jobs" / "pending"
+                pending.mkdir(parents=True)
+                (pending / "job-ready.json").write_text(
+                    json.dumps({"status": "pending", "next_attempt_ts": 90}),
+                    encoding="utf-8",
+                )
+                (state / "worker-supervisor.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
+                            "status": "running",
+                            "generation": 1,
+                            "launch_token": "",
+                            "owner_pid": owner_pid,
+                            "lease_until": lease_until,
+                            "updated_ts": 100,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                check = doctor._worker_delayed_job_check(
+                    doctor.Context(state_dir=state, now=100)
+                )
+
+                self.assertEqual(check.status, "FAIL")
+                self.assertIn("ownership", check.evidence)
+
+    def test_doctor_accepts_ready_pending_job_with_live_owner_after_lease_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            pending = state / "worker-jobs" / "pending"
+            pending.mkdir(parents=True)
+            (pending / "job-ready.json").write_text(
+                json.dumps({"status": "pending", "next_attempt_ts": 90}),
+                encoding="utf-8",
+            )
+            (state / "worker-supervisor.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
+                        "status": "running",
+                        "generation": 1,
+                        "launch_token": "",
+                        "owner_pid": os.getpid(),
+                        "lease_until": 99,
+                        "updated_ts": 100,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            check = doctor._worker_delayed_job_check(
+                doctor.Context(state_dir=state, now=100)
+            )
+
+        self.assertEqual(check.status, "OK")
+        self.assertIn("supervisor=running", check.evidence)
 
     def test_doctor_warns_for_terminal_unrecoverable_input_dead_letter(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -827,6 +911,152 @@ tags: [doğrulama]
         self.assertEqual(check.status, "FAIL")
         self.assertIn("../outside", check.evidence)
 
+    def test_doctor_accepts_existing_base_file_wikilink_with_view_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            note = project / "Dashboard.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(
+                "# Dashboard\n"
+                "[[./Tansu Kaynakları.base#Sinyal ve Strateji]]\n"
+                "[[Tansu Kaynakları.base#Sinyal ve Strateji]]\n"
+                "[[🏰 300-Projects/Tansu X Veri Havuzu/Tansu Kaynakları.base#Veri ve Kanıt]]\n",
+                encoding="utf-8",
+            )
+            (project / "Tansu Kaynakları.base").write_text(
+                "views:\n  - name: Sinyal ve Strateji\n",
+                encoding="utf-8",
+            )
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "OK")
+
+    def test_doctor_accepts_source_relative_base_file_wikilink_and_rejects_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            vault.mkdir()
+            (root / "outside.base").write_text("views: []\n", encoding="utf-8")
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            nested = project / "nested"
+            nested.mkdir(parents=True)
+            (project / "Views.base").write_text("views: []\n", encoding="utf-8")
+            note = nested / "Dashboard.md"
+            note.write_text("# Dashboard\n[[../Views.base]]\n", encoding="utf-8")
+
+            accepted = doctor._vault_link_check(doctor.Context(vault))
+            note.write_text("# Dashboard\n[[foo/../../Views.base]]\n", encoding="utf-8")
+            malformed = doctor._vault_link_check(doctor.Context(vault))
+            note.write_text("# Dashboard\n[[../../../../outside.base]]\n", encoding="utf-8")
+            rejected = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(accepted.status, "OK")
+        self.assertEqual(malformed.status, "FAIL")
+        self.assertEqual(rejected.status, "FAIL")
+        self.assertIn("outside.base", rejected.evidence)
+
+    def test_doctor_rejects_explicit_relative_base_link_to_global_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            note = project / "Dashboard.md"
+            note.parent.mkdir(parents=True)
+            (vault / "Views.base").write_text("views: []\n", encoding="utf-8")
+            note.write_text("# Dashboard\n[[./Views.base]]\n", encoding="utf-8")
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("./Views.base", check.evidence)
+
+    def test_doctor_rejects_nonexplicit_base_path_with_literal_dot_segment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            folder = project / "folder"
+            note = project / "Dashboard.md"
+            folder.mkdir(parents=True)
+            (folder / "Views.base").write_text("views: []\n", encoding="utf-8")
+            note.write_text("# Dashboard\n[[folder/./Views.base]]\n", encoding="utf-8")
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("folder/./Views.base", check.evidence)
+
+    @unittest.skipUnless(os.name == "nt", "Windows path case contract")
+    def test_doctor_matches_base_file_wikilinks_case_insensitively_on_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            project.mkdir(parents=True)
+            (project / "Views.base").write_text("views: []\n", encoding="utf-8")
+            (project / "Dashboard.md").write_text(
+                "# Dashboard\n[[views.base]]\n", encoding="utf-8"
+            )
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "OK")
+
+    def test_doctor_fails_when_base_file_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            note = vault / "🧠 500-Knowledge" / "Dashboard.md"
+            note.parent.mkdir(parents=True)
+            base = vault / "Views.base"
+            base.write_text("views: []\n", encoding="utf-8")
+            note.write_text("# Dashboard\n[[Views.base]]\n", encoding="utf-8")
+            original_read_text = Path.read_text
+
+            def read_text(path: Path, *args: object, **kwargs: object) -> str:
+                if path == base:
+                    raise PermissionError("locked")
+                return original_read_text(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", new=read_text):
+                check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("Views.base", check.evidence)
+        self.assertIn("PermissionError", check.evidence)
+
+    def test_doctor_base_index_accepts_relative_vault_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            project.mkdir(parents=True)
+            (project / "Views.base").write_text("views: []\n", encoding="utf-8")
+            (project / "Dashboard.md").write_text(
+                "# Dashboard\n[[Views.base]]\n", encoding="utf-8"
+            )
+            relative_vault = Path(os.path.relpath(vault))
+
+            check = doctor._vault_link_check(doctor.Context(relative_vault))
+
+        self.assertEqual(check.status, "OK")
+
+    def test_doctor_fails_when_base_file_wikilink_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            note = vault / "🧠 500-Knowledge" / "Dashboard.md"
+            note.parent.mkdir(parents=True)
+            (vault / "other").mkdir()
+            (vault / "other" / "Views.base").write_text("views: []\n", encoding="utf-8")
+            (note.parent / "Missing.md").write_text("# Missing\n", encoding="utf-8")
+            note.write_text(
+                "# Dashboard\n[[missing/Views.base]]\n[[Missing.base]]\n",
+                encoding="utf-8",
+            )
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("2 kırık", check.evidence)
+        self.assertIn("missing/Views.base", check.evidence)
+
     def test_doctor_fails_when_human_note_metadata_is_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -855,6 +1085,35 @@ tags: [doğrulama]
 
         self.assertEqual(check.status, "FAIL")
         self.assertIn("modified", check.evidence)
+
+    def test_doctor_ignores_template_placeholder_titles_but_rejects_normal_duplicates(self) -> None:
+        template = (
+            "---\n"
+            'title: "{{title}}"\n'
+            "created: 2026-08-27\n"
+            "updated: 2026-08-27\n"
+            "tags: [template]\n"
+            "---\n"
+            "# {{title}}\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            templates = vault / "📋 Templates"
+            templates.mkdir(parents=True)
+            (templates / "One.md").write_text(template, encoding="utf-8")
+            (templates / "Two.md").write_text(template, encoding="utf-8")
+
+            self.assertEqual(doctor._metadata_schema_check(doctor.Context(vault)).status, "OK")
+
+            knowledge = vault / "🧠 500-Knowledge"
+            knowledge.mkdir()
+            normal = template.replace("{{title}}", "Aynı Başlık")
+            (knowledge / "One.md").write_text(normal, encoding="utf-8")
+            (knowledge / "Two.md").write_text(normal, encoding="utf-8")
+            check = doctor._metadata_schema_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("duplicate title", check.evidence)
 
     def test_doctor_bounds_oversized_session_sources_before_budget_check(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1103,7 +1362,7 @@ tags: [doğrulama]
 
         health = next(check for check in checks if check.name == "Hook sağlığı")
         self.assertEqual(health.status, "FAIL")
-        self.assertIn("UnicodeEncodeError", health.evidence)
+        self.assertEqual(health.evidence, "runtime-error-recorded")
 
     def test_doctor_fails_when_brain_health_contains_an_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1133,15 +1392,13 @@ tags: [doğrulama]
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             now = time.time()
-            (state / "flush-stale.json").write_text(
-                json.dumps(
-                    {
-                        "session_id": "stale-session",
-                        "ts": int(now - 301),
-                        "status": "inflight",
-                    }
-                ),
-                encoding="utf-8",
+            flush._write_flush_state(
+                state,
+                "stale-session",
+                int(now - 301),
+                "inflight",
+                reason="turnend",
+                transcript_digest="d" * 64,
             )
 
             check = doctor._flush_inflight_check(doctor.Context(state_dir=state, now=now))
@@ -1153,19 +1410,30 @@ tags: [doğrulama]
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             now = time.time()
-            for name, status, age in (
-                ("flush-fresh.json", "inflight", 10),
-                ("flush-complete.json", "ok", 600),
+            for session_id, status, age in (
+                ("fresh-session", "inflight", 10),
+                ("complete-session", "ok", 600),
             ):
-                (state / name).write_text(
-                    json.dumps(
+                flush._write_flush_state(
+                    state,
+                    session_id,
+                    int(now - age),
+                    status,
+                    reason="turnend",
+                    transcript_digest="d" * 64,
+                    **(
                         {
-                            "session_id": name,
-                            "ts": int(now - age),
-                            "status": status,
+                            "summary_digest": "e" * 64,
+                            "idempotency_key": flush._flush_idempotency_key(
+                                session_id,
+                                "turnend",
+                                "d" * 64,
+                                "e" * 64,
+                            ),
                         }
+                        if status == "ok"
+                        else {}
                     ),
-                    encoding="utf-8",
                 )
 
             check = doctor._flush_inflight_check(doctor.Context(state_dir=state, now=now))
@@ -1254,7 +1522,7 @@ tags: [doğrulama]
 
         retrieval = next(check for check in checks if check.name == "Vault retrieval")
         self.assertEqual(retrieval.status, "FAIL")
-        self.assertIn("UnicodeError", retrieval.evidence)
+        self.assertEqual(retrieval.evidence, "runtime-error-recorded")
 
     def test_doctor_warns_when_vault_retrieval_receipt_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1344,6 +1612,24 @@ class DoctorRegistryTests(unittest.TestCase):
         self.assertEqual(stale, [], "T05_REGISTRY_STALE_ENTRY")
         names = [name for name, _function in doctor.CHECKS]
         self.assertEqual(len(names), len(set(names)), "T05_REGISTRY_DUPLICATE_NAME")
+
+    def test_doctor_is_independent_of_retired_tansu_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            semantic_map = (
+                vault
+                / "🏰 300-Projects"
+                / "Tansu X Veri Havuzu"
+                / "tansu-semantik-kullanim-haritasi.md"
+            )
+            semantic_map.parent.mkdir(parents=True)
+            semantic_map.write_text("# harita\n", encoding="utf-8")
+
+            checks = doctor.run_checks(vault, project_root=vault)
+
+        names = {check.name for check in checks}
+        self.assertNotIn("Tansu semantik metadata", names)
+        self.assertFalse(any("tansu" in name.casefold() for name in names))
 
     def test_only_runs_a_single_named_check(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

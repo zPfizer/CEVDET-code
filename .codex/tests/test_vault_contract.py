@@ -217,7 +217,9 @@ class VaultContractTests(unittest.TestCase):
         for current, directories, files in os.walk(vault):
             directories[:] = [
                 name for name in directories
-                if name not in {".git", ".state", "__pycache__", ".scratch"}
+                if name.casefold() not in {
+                    ".git", ".state", "__pycache__", ".scratch", ".code-review-graph"
+                }
                 and not (Path(current) == vault and name.casefold() == "tmp")
             ]
             for name in files:

@@ -13,11 +13,3 @@ SCRIPTS_DIR = CODEX_DIR / "scripts"
 for _directory in (SCRIPTS_DIR, HOOKS_DIR):
     if str(_directory) not in sys.path:
         sys.path.insert(0, str(_directory))
-
-
-def tansu_csv_skip_reason(csv_path: Path) -> str | None:
-    return (
-        None
-        if csv_path.is_file()
-        else f"canlı TANSU semantik CSV'si yok: {csv_path}"
-    )
