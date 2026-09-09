@@ -462,14 +462,10 @@ def build_session_context(
     write_views: bool = True,
 ) -> str:
     sections: list[str] = []
-    reflection = state_dir / "needs-reflection"
     if has_pending_reflection(state_dir):
-        detail = _read_limited(reflection, 1)
         sections.append(
-            "[Hafıza Uyarısı]\nÖnceki oturumun hafıza güncellemesi henüz doğrulanmadı. "
-            + detail
+            "[Hafıza Uyarısı]\nÖnceki oturumun hafıza güncellemesi henüz doğrulanmadı."
         )
-        # Reading the warning is not evidence that the missing update completed.
 
     with memory_read(vault_root) as memory:
         import companion_memory
