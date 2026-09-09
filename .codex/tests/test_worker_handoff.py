@@ -257,6 +257,52 @@ class WorkerHandoffTests(unittest.TestCase):
         self.assertTrue(newer_exists)
         self.assertFalse(older_exists)
 
+    def test_older_orphan_cannot_replace_newer_pending_transport(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            transcript = state / "source.jsonl"
+            transcript.write_text("{}", encoding="utf-8")
+            older = state / "hookin-older.json"
+            newer = state / "hookin-newer.json"
+            for path, event_iso in (
+                (older, "2026-09-09T12:00:00+03:00"),
+                (newer, "2026-09-09T12:05:00+03:00"),
+            ):
+                path.write_text(
+                    json.dumps(
+                        {
+                            "delivery_schema_version": 1,
+                            "session_id": "pending-newer",
+                            "transcript_path": str(transcript),
+                            "reason": "turnend",
+                            "event_iso": event_iso,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            workers.enqueue_job(
+                state,
+                "flush",
+                {
+                    "hook_input": str(newer),
+                    "reason": "turnend",
+                    "event_iso": "2026-09-09T12:05:00+03:00",
+                },
+                start_supervisor=False,
+                now=100,
+            )
+
+            self.assertEqual(workers.recover_orphan_hook_inputs(state, now=101), 1)
+            pending = list((state / "worker-jobs" / "pending").glob("*.json"))
+            job = json.loads(pending[0].read_text(encoding="utf-8"))
+            newer_exists = newer.exists()
+            older_exists = older.exists()
+
+        self.assertEqual(job["payload"]["hook_input"], str(newer))
+        self.assertEqual(job["payload"]["event_iso"], "2026-09-09T12:05:00+03:00")
+        self.assertTrue(newer_exists)
+        self.assertFalse(older_exists)
+
     def test_replay_lookup_does_not_quarantine_recoverable_success_transition(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)

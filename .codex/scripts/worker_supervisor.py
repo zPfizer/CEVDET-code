@@ -605,6 +605,17 @@ def _flush_scope(job: dict[str, Any]) -> tuple[str, str] | None:
     return session_id, os.path.normcase(str(transcript_path))
 
 
+def _flush_event_sort_key(payload: dict[str, Any]) -> tuple[int, float, str]:
+    event_iso = payload.get("event_iso")
+    try:
+        event = dt.datetime.fromisoformat(str(event_iso))
+        if event.tzinfo is None:
+            event = event.replace(tzinfo=dt.timezone.utc)
+        return 0, event.timestamp(), str(event_iso)
+    except (TypeError, ValueError, OverflowError):
+        return 0, float("-inf"), str(event_iso)
+
+
 def _merge_flush_payload(
     current: dict[str, Any], incoming: dict[str, Any]
 ) -> dict[str, Any]:
@@ -613,15 +624,26 @@ def _merge_flush_payload(
     incoming_reason = incoming.get("reason")
     current_priority = FLUSH_REASON_PRIORITY.get(str(current_reason), -1)
     incoming_priority = FLUSH_REASON_PRIORITY.get(str(incoming_reason), -1)
-    if incoming_priority >= current_priority:
+    current_event = _flush_event_sort_key(current)
+    incoming_event = _flush_event_sort_key(incoming)
+    incoming_reason_wins = (
+        incoming_priority > current_priority
+        or (incoming_priority == current_priority and incoming_event >= current_event)
+    )
+    if incoming_reason_wins:
         for field in ("reason", "event_iso"):
             if field in incoming:
                 merged[field] = incoming[field]
-    if "hook_input" in incoming:
+    incoming_metadata_wins = (
+        incoming_priority > current_priority
+        or incoming_event >= current_event
+    )
+    if incoming_metadata_wins and "hook_input" in incoming:
         merged["hook_input"] = incoming["hook_input"]
-    for field in FLUSH_CONTINUATION_FIELDS:
-        if field in incoming:
-            merged[field] = incoming[field]
+    if incoming_metadata_wins:
+        for field in FLUSH_CONTINUATION_FIELDS:
+            if field in incoming:
+                merged[field] = incoming[field]
     return merged
 
 
@@ -663,6 +685,9 @@ def _coalesce_pending_flush_locked(
         for path, job in matches
         if (reference := _hook_input_reference(job.get("payload"))) is not None
     ]
+    incoming_input = _hook_input_reference(payload)
+    if incoming_input is not None:
+        old_inputs.append(incoming_input)
     merged_payload = retained.get("payload", {})
     for _path, job in matches[1:]:
         merged_payload = _merge_flush_payload(
