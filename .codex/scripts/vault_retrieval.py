@@ -117,11 +117,18 @@ HISTORY_QUERY_TERMS = frozenset({
     "history", "historical", "historically", "before", "past", "previous", "previously",
 })
 HISTORY_QUERY_INFLECTION_ROOTS = frozenset({"gecmis", "tarih", "eski", "onceki"})
-HISTORY_QUERY_INFLECTION_SUFFIXES = frozenset({
+# ponytail: finite Turkish suffix grammar; use a morphology library only when this bounded set stops covering real queries.
+HISTORY_QUERY_INFLECTION_CASE_SUFFIXES = frozenset({
     "e", "i", "in", "te", "ten", "de", "den", "ye", "yi",
     "ne", "ni", "nin", "nde", "nden",
-    "ler", "leri", "lere", "lerde", "lerden", "lerin",
 })
+HISTORY_QUERY_INFLECTION_SUFFIXES = frozenset(
+    number + possessive + case
+    for number in ("", "ler")
+    for possessive in ("", "im", "in", "i", "imiz", "iniz", "leri")
+    for case in ("", *HISTORY_QUERY_INFLECTION_CASE_SUFFIXES)
+    if number or possessive or case
+)
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",

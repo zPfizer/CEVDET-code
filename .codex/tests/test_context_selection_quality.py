@@ -556,7 +556,8 @@ title: Hook Protokolü
             for marker in (
                 "geçmişte", "geçmişten", "geçmişe", "geçmişi", "geçmişin",
                 "eskiden", "eskiye", "eskiyi", "öncekiler", "tarihi", "tarihte", "tarihten",
-                "previously", "historically",
+                "geçmişinde", "geçmişini", "geçmişimiz", "geçmişimde", "geçmişimizin",
+                "tarihinde", "öncekilerin", "previously", "historically",
             ):
                 with self.subTest(marker=marker):
                     query = f"{marker} hook sözleşmesi"
