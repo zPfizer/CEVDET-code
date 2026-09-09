@@ -1,4 +1,6 @@
 import hashlib
+from contextlib import redirect_stdout
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,6 +13,45 @@ from test_second_brain_acceptance import _deterministic_compiler, _seed_vault
 
 
 class CompilerSecretRedactionTests(unittest.TestCase):
+    def test_dry_run_rejects_secret_source_before_printing_name(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _seed_vault(vault)
+            source = vault / "daily/2026-09-03.md"
+            unsafe = vault / "daily/password=synthetic.md"
+            unsafe.write_bytes(source.read_bytes())
+            source.unlink()
+            (vault / "daily/2026-09-04.md").unlink()
+            state_dir = vault / ".codex/scripts/.state"
+            output = io.StringIO()
+
+            with redirect_stdout(output), \
+                    patch.object(memory_compile, "VAULT_ROOT", vault), \
+                    patch.object(memory_compile, "STATE_DIR", state_dir):
+                result = memory_compile.main(["--strict", "--dry-run", "--max-calls", "1"])
+
+        self.assertEqual(result, 1)
+        self.assertEqual(output.getvalue(), "")
+
+    def test_rebuild_path_errors_do_not_expose_source_names(self):
+        for name, expected in (
+            ("password=synthetic.md", "source-path-contains-secret"),
+            ("not-a-date.md", "rebuild-daily-name-invalid"),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                vault = root / "vault"
+                _seed_vault(vault)
+                for path in (vault / "daily").glob("*.md"):
+                    path.unlink()
+                (vault / "daily" / name).write_text("# synthetic\n", encoding="utf-8")
+
+                with self.assertRaises(memory_compile.PolicyError) as raised:
+                    memory_compile.rebuild_knowledge(vault, root / "rebuilt")
+
+            self.assertEqual(str(raised.exception), expected)
+            self.assertNotIn(name, str(raised.exception))
+
     def test_cli_and_worker_reject_secret_source_path_without_model_or_raw_log(self):
         for entrypoint in ("cli", "worker"):
             with self.subTest(entrypoint=entrypoint), tempfile.TemporaryDirectory() as temporary:

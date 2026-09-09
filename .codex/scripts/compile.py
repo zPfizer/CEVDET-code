@@ -1497,10 +1497,11 @@ def rebuild_knowledge(
         )
         inputs: list[tuple[Path, str, str]] = []
         for source, digest in changed_dailies(vault, CompileState()):
+            _check_secret_path(source.name)
             try:
                 day_date = dt.date.fromisoformat(source.stem)
             except ValueError as exc:
-                raise PolicyError(f"rebuild-daily-name-invalid:{source.name}") from exc
+                raise PolicyError("rebuild-daily-name-invalid") from exc
             destination = build / "daily" / source.name
             _copy_source_file(source, destination, vault)
             inputs.append((destination, digest, day_date.isoformat()))
@@ -1676,6 +1677,7 @@ def _run_locked(
     selected = changed[:max_calls]
     if dry_run:
         for daily_path, _digest in selected:
+            _check_secret_path(daily_path.name)
             print(daily_path.name)
         return False
 
