@@ -503,6 +503,8 @@ class ConversationContinuityTests(unittest.TestCase):
             'ne.py dosyasını düzelt.',
             'app.v1.py dosyasını düzelt.',
             'src/app.py dosyasını düzelt, lütfen.',
+            "src/app.py'yi düzelt.",
+            '"C:\\Users\\Me\\My Project\\app.py"\'yi düzelt.',
             '"C:\\Users\\Me\\My Project\\app.py" dosyasını düzelt.',
             '"app.py" dosyasını düzelt.',
             '"My File.py" dosyasını düzelt.',
@@ -511,6 +513,14 @@ class ConversationContinuityTests(unittest.TestCase):
                 self._check_explicit_write_prompt_reopens_read_only_scope(
                     prompt, expect_prompt_enqueue=True
                 )
+
+    def test_targeted_case_suffix_write_prompt_reopens_read_only_scope(self):
+        for prompt in (
+            "README.md'yi düzenle.",
+            "pyproject.toml'u değiştir.",
+        ):
+            with self.subTest(prompt=prompt):
+                self._check_explicit_write_prompt_reopens_read_only_scope(prompt)
 
     def test_conditional_targeted_commands_keep_read_only_scope(self):
         for prompt in (
@@ -536,6 +546,9 @@ class ConversationContinuityTests(unittest.TestCase):
             'Onaylıysa... dosyayı düzelt.',
             'Gerekirse... dosyayı düzelt.',
             'Sakın... dosyayı düzelt.',
+            'Hiçbir dosyayı düzelt.',
+            'Lütfen hiçbir dosyayı düzelt.',
+            'Hiç dosyayı düzelt.',
         ):
             with self.subTest(prompt=prompt):
                 self._check_write_prompt_keeps_read_only_scope(prompt)

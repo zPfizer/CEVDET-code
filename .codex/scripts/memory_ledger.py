@@ -131,15 +131,17 @@ _QUOTED_PATH = (
     r'''\'[^\'\r\n]*\.[A-Za-z0-9_-]+\')'''
 )
 _WRITE_FILENAME = r"[\w.-]+\.[A-Za-z0-9_-]+"
+_WRITE_CASE_SUFFIX = r"['’]y?[ıiuü]"
+_WRITE_TARGET_SUFFIX = rf"(?:\s+{_WRITE_TARGET_OBJECT}|{_WRITE_CASE_SUFFIX})?"
 _WRITE_TARGET = (
     rf"(?:bunu|bunları|şunu|şunları|onu|onları|"
     rf"(?:bu|şu|o)\s+{_WRITE_TARGET_OBJECT}|"
     rf"{_WRITE_PROJECT_TARGET}|{_WRITE_MODULE_TARGET}|{_WRITE_FILE_TARGET}|"
     rf"{_WRITE_TARGET_OBJECT}|"
     rf"(?:[a-z]:[\\/]|\.{{1,2}}[\\/]|[\w.-]+[\\/])[\w./\\-]+"
-    rf"(?:\s+{_WRITE_TARGET_OBJECT})?|"
-    rf"{_WRITE_FILENAME}(?:\s+{_WRITE_TARGET_OBJECT})?|"
-    rf"{_QUOTED_PATH}(?:\s+{_WRITE_TARGET_OBJECT})?)"
+    rf"{_WRITE_TARGET_SUFFIX}|"
+    rf"{_WRITE_FILENAME}{_WRITE_TARGET_SUFFIX}|"
+    rf"{_QUOTED_PATH}{_WRITE_TARGET_SUFFIX})"
 )
 _TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen)\s+)*"
 TARGETED_WRITE_COMMAND = re.compile(
@@ -158,7 +160,7 @@ BARE_WRITE_QUESTION = re.compile(
 
 NON_COMMITTAL_WRITE = re.compile(
     r"\b(?:eğer|şayet|uygunsa|mümkünse|istersen(?:iz)?|gerekirse|"
-    r"olursa|belki|san[ıi]r[ıi]m|sak[ıi]n|asla)\b"
+    r"olursa|belki|san[ıi]r[ıi]m|sak[ıi]n|asla|hiç(?:bir)?)\b"
 )
 CONDITIONAL_WRITE = re.compile(
     r"\b\w+(?:(?:[ıiuü]r|[ae]r|[uü]r|acak|ecek|iyor|ıyor|uyor|üyor|"
