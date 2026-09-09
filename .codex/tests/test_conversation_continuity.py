@@ -145,8 +145,9 @@ class ConversationContinuityTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertNotIn('sonucu doğrulanamadı', context)
 
-    def test_session_start_does_not_duplicate_maintenance_terminal_health_warning(self):
+    def test_session_start_uses_current_maintenance_health_without_stale_warning(self):
         import worker_supervisor
+        from state_store import clear_health
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
             state = vault / '.codex/scripts/.state'
@@ -171,9 +172,41 @@ class ConversationContinuityTests(unittest.TestCase):
 
             context = json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
 
-        self.assertEqual(result, 0)
-        self.assertEqual(context.count('Bilgi düzenleme henüz tamamlanamadı'), 1)
-        self.assertNotIn('Önceki arka plan kayıtlarından birinin sonucu doğrulanamadı', context)
+            self.assertEqual(result, 0)
+            self.assertEqual(context.count('Bilgi düzenleme henüz tamamlanamadı'), 1)
+            self.assertNotIn('Önceki arka plan kayıtlarından birinin sonucu doğrulanamadı', context)
+
+            worker_supervisor.enqueue_maintenance(
+                state, vault_root=vault, start_supervisor=False,
+            )
+            later_running, later_job = worker_supervisor._claim_next_job(maintenance, now=2)
+            worker_supervisor._finish_job(
+                maintenance, later_running, later_job, status='succeeded', now=3,
+            )
+            clear_health(state, component='compile')
+            self.assertEqual(
+                worker_supervisor.inspect_worker_queue(maintenance)['counts']['dead-letter'], 1,
+            )
+
+            later_output = io.StringIO()
+            with (
+                mock.patch.object(hook, 'VAULT_ROOT', vault),
+                mock.patch.object(hook, 'STATE_DIR', state),
+                mock.patch.object(hook, 'build_session_context', return_value=''),
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'session_id': 'reopened-again'}))),
+                mock.patch.object(sys, 'stdout', later_output),
+            ):
+                later_result = hook.main(['session-start', '--strict'])
+
+            later_context = (
+                json.loads(later_output.getvalue())['hookSpecificOutput']['additionalContext']
+                if later_output.getvalue() else ''
+            )
+
+        self.assertEqual(later_result, 0)
+        self.assertNotIn('Bilgi düzenleme henüz tamamlanamadı', later_context)
+        self.assertNotIn('Önceki arka plan kayıtlarından birinin sonucu doğrulanamadı', later_context)
 
     def test_session_start_preserves_read_only_scope_without_waking_memory_workers(self):
         with tempfile.TemporaryDirectory() as temporary:

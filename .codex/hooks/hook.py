@@ -1140,7 +1140,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise
                 emitted_context = MEMORY_PUBLICATION_WARNING
             try:
-                maintenance_unresolved = 0
                 queue_unresolved = 0
                 if read_only:
                     emitted_context += (
@@ -1151,7 +1150,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     import flush
                     flush.maybe_trigger_compile(VAULT_ROOT)
                     maintenance = inspect_worker_queue(STATE_DIR / 'maintenance')
-                    maintenance_unresolved = _unresolved_terminal_count(maintenance)
                     if any(maintenance['counts'].get(state, 0) for state in ('pending', 'claimed', 'running')):
                         ensure_supervisor(STATE_DIR / 'maintenance', vault_root=VAULT_ROOT)
                     health_path = STATE_DIR / 'health.json'
@@ -1170,7 +1168,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     if (
                         queue_unresolved
-                        or (maintenance_unresolved and not compile_issue)
                         or _has_current_flush_error(health)
                     ):
                         emitted_context += (
