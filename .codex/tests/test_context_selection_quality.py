@@ -555,7 +555,8 @@ title: Hook Protokolü
             entries = retrieval.build_vault_map(root, write_cache=False)
             for marker in (
                 "geçmişte", "geçmişten", "geçmişe", "geçmişi", "geçmişin",
-                "eskiden", "eskiye", "eskiyi", "öncekiler", "previously", "historically",
+                "eskiden", "eskiye", "eskiyi", "öncekiler", "tarihi", "tarihte", "tarihten",
+                "previously", "historically",
             ):
                 with self.subTest(marker=marker):
                     query = f"{marker} hook sözleşmesi"
