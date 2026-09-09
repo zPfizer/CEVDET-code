@@ -141,20 +141,28 @@ HISTORY_QUERY_INFLECTION_SUFFIXES = {
     )
     for stem_type in ("vowel", "consonant")
 }
+HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES = {
+    stem_type: frozenset(
+        suffix for suffix in suffixes if suffix.endswith(("te", "de", "nde"))
+    )
+    for stem_type, suffixes in HISTORY_QUERY_INFLECTION_SUFFIXES.items()
+}
 HISTORY_QUERY_INFLECTION_RELATIVE_SUFFIXES = {
     stem_type: frozenset(
         suffix + relative
-        for suffix in suffixes
-        if suffix.endswith(("te", "de", "nde"))
+        for suffix in locative_suffixes
         for relative in ("ki", "kiler")
     )
-    for stem_type, suffixes in HISTORY_QUERY_INFLECTION_SUFFIXES.items()
+    for stem_type, locative_suffixes in HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES.items()
 }
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
     "work", "prefer", "response", "reply", "style", "profile",
 })
+HISTORY_CHANGE_QUERY = re.compile(
+    r"(?i)\b(?:what|ne|neler|nasil)(?:\W+\w+){0,2}\W+(?:changed|degisti)\b"
+)
 
 
 @dataclass(frozen=True)
@@ -1176,7 +1184,7 @@ def _is_personal_query(query_terms: frozenset[str]) -> bool:
     )
 
 
-def _is_history_query(query_terms: frozenset[str]) -> bool:
+def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
     history_terms = query_terms & HISTORY_QUERY_TERMS
     has_inflected_history = any(
         term.startswith(root) and (
@@ -1187,7 +1195,8 @@ def _is_history_query(query_terms: frozenset[str]) -> bool:
         for root in HISTORY_QUERY_INFLECTION_ROOTS
         for stem_type in ("vowel" if root[-1] in HISTORY_QUERY_INFLECTION_VOWELS else "consonant",)
     )
-    if has_inflected_history or history_terms - {"before"}:
+    has_retrospective_change = bool(query and HISTORY_CHANGE_QUERY.search(_normalize(query)))
+    if has_inflected_history or has_retrospective_change or history_terms - {"before"}:
         return True
     return (
         "before" in history_terms
@@ -1322,7 +1331,7 @@ def _rank(
     if not query_terms or not entries or top_k <= 0:
         return []
 
-    include_history = _is_history_query(query_terms)
+    include_history = _is_history_query(query_terms, query)
     personal_query = _is_personal_query(query_terms)
     # ponytail: explicit Vault-system wording only; this is not semantic topic detection.
     vault_system_query = 'vault' in query_terms and bool(query_terms & {

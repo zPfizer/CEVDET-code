@@ -532,7 +532,7 @@ status: archived
 type: note
 ---
 # Hook Checklist Eski
-Deployment hook checklist için ortak çalışma kaydı.
+Changed files için deployment hook checklist ortak çalışma kaydı.
 """,
             )
             _write(
@@ -544,20 +544,27 @@ status: active
 type: note
 ---
 # Hook Checklist Güncel
-Deployment hook checklist için ortak çalışma kaydı.
+Changed files için deployment hook checklist ortak çalışma kaydı.
 """,
             )
             entries = retrieval.build_vault_map(root, write_cache=False)
-            query = "before deployment show hook checklist"
-
-        self.assertFalse(retrieval._is_history_query(retrieval._retrieval_terms(query)))
-        self.assertEqual(
-            [hit.entry.path for hit in retrieval.search_vault(entries, query, top_k=2)],
-            [
-                "🏰 300-Projects/Tansu/z-active.md",
-                "🏰 300-Projects/Tansu/a-archived.md",
-            ],
-        )
+            for query in (
+                "before deployment show hook checklist",
+                "how to lint changed files",
+                "show changed files",
+                "changed",
+            ):
+                with self.subTest(query=query):
+                    self.assertFalse(
+                        retrieval._is_history_query(retrieval._retrieval_terms(query), query)
+                    )
+                    self.assertEqual(
+                        [hit.entry.path for hit in retrieval.search_vault(entries, query, top_k=2)],
+                        [
+                            "🏰 300-Projects/Tansu/z-active.md",
+                            "🏰 300-Projects/Tansu/a-archived.md",
+                        ],
+                    )
 
     def test_inflected_history_terms_retrieve_completed_and_historical_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -573,7 +580,7 @@ type: work-packet
 status: completed
 ---
 # Hook Contract Conformance
-Hook sözleşmesi tamamlanmış uygulama kaydı.
+Hook sözleşmesi tamamlanmış uygulama kaydı; sözleşmesinde değişen kurallar burada tutulur.
 """,
             )
             _write(
@@ -586,7 +593,7 @@ title: Hook Protokolü
 # Hook Protokolü
 
 ## Kayıtlar
-- `gecmis` `kullanici-dusuncesi` `eski` 2026-09-01 [[daily/2026-09-01|Kaynak]] — Eski hook sözleşmesi geçmişte uygulanan kayıttır.
+- `gecmis` `kullanici-dusuncesi` `eski` 2026-09-01 [[daily/2026-09-01|Kaynak]] — Eski hook sözleşmesi (hook contract) geçmişte uygulanan kayıttır; sözleşmesinde eski kural vardı.
 - `gecmis` `kullanici-dusuncesi` `eski` 2026-09-02 [[daily/2026-09-02|Kaynak]] — Eski hook sözleşmesi geçmişten devralınan kayıttır.
 - `gecmis` `kullanici-dusuncesi` `eski` 2026-09-03 [[daily/2026-09-03|Kaynak]] — Eski hook sözleşmesi eskiden uygulanan kayıttır.
 """,
@@ -606,6 +613,20 @@ title: Hook Protokolü
                     self.assertTrue(
                         retrieval._is_history_query(retrieval._retrieval_terms(query))
                     )
+                    hits = retrieval.search_vault(entries, query, top_k=3)
+                    paths = [hit.entry.path for hit in hits]
+                    self.assertIn(packet, paths)
+                    historical = next(hit for hit in hits if hit.entry.path == concept)
+                    self.assertIn("Eski hook sözleşmesi", historical.excerpt)
+            for query in (
+                "what changed in the hook contract?",
+                "hook sözleşmesinde ne değişti?",
+                "hook sözleşmesinde neler değişti?",
+                "hook sözleşmesi nasıl değişti?",
+            ):
+                with self.subTest(query=query):
+                    terms = retrieval._retrieval_terms(query)
+                    self.assertTrue(retrieval._is_history_query(terms, query))
                     hits = retrieval.search_vault(entries, query, top_k=3)
                     paths = [hit.entry.path for hit in hits]
                     self.assertIn(packet, paths)
