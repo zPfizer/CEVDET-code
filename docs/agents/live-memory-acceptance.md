@@ -86,6 +86,21 @@ ortak kuyruk, digest ve hook testleri bu birleşik sürümde tekrar çalıştır
 Yalnız bu sekiz PR'ı birleştiren test, önceki #6–19 paketlerinin birlikte
 çalıştığını veya hedef Vault'un güncellendiğini kanıtlamaz.
 
+### Eski gizlilik politikasından geçiş
+
+İşlenmiş konuşmalar bulunan hedefte `persistent-turns-v1` → `persistent-turns-v2`
+geçişi ayrıca doğrulanır. Eski seed ile aynı filtrelenmiş önekin tam digest
+eşleşmesi kanıtlanırsa tamamlanan konum korunarak yalnız metadata taşınır.
+Coverage ile yarım batch/prepared kayıtları birlikte değerlendirilir; geçmiş
+otomatik olarak sıfırdan özetletilmez.
+
+Eşleşmeyen veya politikası doğrulanamayan kayıt `flush-policy-migration-required`
+ile yayın öncesinde durmalıdır. Bu durumda canlı etkinleştirme kabulü verilmez;
+eski günlük/Companion çıktıları, tamamlanan kapsam ve kurtarma kanıtları korunur.
+Etkilenen eski türevler mevcut kaynaklı suppression yolu ile kontrollü canlı
+geçişte incelenip dışlanır; yalnız hata kaydını veya coverage dosyasını silmek
+geçiş sayılmaz. Bu geçmiş üzerinde modelle yeniden işleme ayrı açık yetki ister.
+
 ## Gerçek App kabulü
 
 Etkinleştirme yetkisinden sonra, olayın zamanı ve oturum kimliği ile runtime
@@ -96,7 +111,12 @@ Zamanı eski, başka köke veya başka oturuma ait kanıtı güncel kabul yerine
 | --- | --- |
 | Yeni zararsız bilgi | Kullanıcı yeni App oturumunda bilgiyi kendisi verir; Stop sonrası kaynaklı günlük/oturum kaydı oluşur. |
 | Sonraki oturum | Yeni oturum önceki bilgiye konuşma geçmişinden değil, okunan kalıcı kaynaktan cevap verir; kaynak ve anlam eşleşir. |
+| İki oturum katkısı | İki gerçek App oturumunun ayrı zararsız katkıları aynı günlük/Companion akışına girer; katkılar ve kaynak kimlikleri korunur, biri diğerini ezmez. |
+| Bağlantıdan sentez | Paylaşılan bir kaynağın gerçek içeriği okunur; sentez kaynağına bağlanır. Kısa alıntı yetmezse tam kaynak ve ilgili iç bağlantılar izlenebilir; okunamayan içerik okunmuş sayılmaz. |
+| Eksik bilgi | İlgili adaylar ve kaynaklar yetersizse belirsizlik açıkça söylenir; sınırlı ilk arama sonucu bütün Vault'ta bilgi bulunmadığına dönüştürülmez. |
 | Tekrarlı olay | Aynı içerik için Stop, PreCompact ve SessionEnd tek kayıt üretir; coverage boş yere tekrar özetletmez. |
+| Açık düzeltme | Kullanıcı daha önce kaydedilmiş zararsız bir bilgiyi açıkça düzeltir. Yeni bilgi tarih/gerekçesi ve kaynağıyla uygulanır; önceki kayıt ve değişim geçmişi korunur, sonraki oturum güncel durumu doğru aktarır. |
+| Açık unutma | Kullanıcı daha önce kaydedilmiş zararsız bilgiyi açık hedefle unutturur. Kaynak sessizce silinmeden ilgili türevler sonraki oturum okuması ve derleme girdisinden dışlanır; ilgisiz bilgi korunur. |
 | Kaydetmeme | “Bunu kaydetme, lütfen” gibi ifade ilgili katkıyı ve onu tekrarlayan yanıtı model girdisi/kayıt dışında bırakır; ilgisiz katkı korunur. |
 | Sır süzme | Gerçek kimlik bilgisi kullanmadan, tanınan bir sır biçiminde benzersiz sentetik canary kullanıcı tarafından gerçek App oturumuna girilir. Gerçek hook olaylarından sonra canary arka plan özetleyici/derleyici model girdilerinde, kalıcı kuyruk payload'larında, günlük/Companion/knowledge kayıtlarında ve filtreli görünümlerde bulunmaz. Asıl kullanıcı girdisinin bulunduğu ham transcript bu türev kontrollerinden ayrı tutulur. |
 | Geç gelen oturuma özel tutma | Önce bir kayıt yayımlanır; sonra kullanıcı “bu konuşmada kalsın” der. Ajan mevcut `suppress_derived_memory` yoluyla geçmiş karşılıkları dışlar; kaynakları silmeden yeni oturum okuması ve derleme girdisinde dışlama doğrulanır. Yalnız session marker varlığı başarı değildir. |
@@ -105,8 +125,9 @@ Zamanı eski, başka köke veya başka oturuma ait kanıtı güncel kabul yerine
 | Salt okunur arama | Arama cache ve filtrelenmiş içerik dosyalarını değiştirmeden doğru kaynağı sunar; teknik sağlık metadata'sı içerik yazımıyla karıştırılmaz. |
 | Kapanış ve sıkıştırma | Gerçek host olayları alınır; `SessionEnd` matcher'ı gerçek kapanma nedeniyle eşleşir. Kapanış olayı olmadan uygulama kesilmesi ayrıca sınır olarak gösterilir. |
 | Kesinti ve kilit | Kuyruk kabulü gecikince kaynak/teslim girdisi korunur. Yarım çok dosyalı yayın sağlıklı görünmez; sahipliği belirsiz süreç tekrar başlatılmaz. |
+| Büyük girdi ve korunmuş ek | Uzun koşullu ifade ve büyük sentetik satır yanlış başarıya veya eksik iddiaya dönüşmez. Geçici özgün eki artık bulunmayan korunmuş ek yalnız doğrulanmış kaynak eşlemesiyle yeniden okunur; içerik değişimi ve güncel gizlilik tercihi denetlenir. |
 | Başarısız kayıt | Gerçek unresolved terminal hata görünürdür; doğrulanmış successor ile kurtarılmış geçmiş kayıt yeni kayıp gibi bildirilmez. |
-| Anlam ve kaynak | Öneri kullanıcı kararı yapılmaz; ara soru ana işi silmez; kaynaktaki belirsizlik doğrulanmış dış olguya dönüşmez. |
+| Anlam ve kaynak | Profil ile eski analiz, kalıcı tercih ile işe özel tercih ayrılır. Assistant önerisi/dış alıntı kullanıcı kararı yapılmaz; kısa onay kendi bağlamında değerlendirilir. Ara soru ana işi silmez; kaynaktaki belirsizlik doğrulanmış dış olguya dönüşmez. |
 
 Geç gelen gizlilik tercihi mevcut tasarımda agent destekli kapsam çözümünü
 gerektirir. Bu kabul başarılı olmadan bütün oturumun özel kaldığı söylenmez.
