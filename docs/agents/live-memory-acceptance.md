@@ -131,6 +131,15 @@ satırındaki iki ayrı sorgu dahil, kendi koşullarını sağlamalıdır. İlgi
 gerçek bir kaynağın bulunması veya yalnız kaynak bağlantısı verilmesi başarı
 değildir. Eksik kaynak varsa satır atlanmaz; o kapsamın canlı kabulü açık kalır.
 
+Koşudan önce seçilen en az bir sorgu, cache ısınmadan ve ısındıktan sonra;
+hedef sürümün mevcut cache kapasitesini aşan izinli okumalarla eviction
+oluşturulduktan ve korpusa izinli ilgisiz kayıtlar eklendikten sonra yeniden
+çalıştırılır. Kapasite/eviction kanıtı, eklenen kaynak kümesi ve bütün sonuçlar
+özel kabul kaydında tutulur. Aynı beklenen kaynak, dayanak ve önceden belirlenen
+sıralama korunmalıdır; korpus büyümesi veya cache sınırı aday kapsamını
+daraltamaz. Hedefte cache yoksa bu durum kaynak/çalışma kanıtıyla kaydedilir;
+uydurma eviction sonucu yazılmaz ve korpus büyümesi deneyi yine yapılır.
+
 ### Oturum, gizlilik ve teslim senaryoları
 
 | Senaryo | Başarı ölçütü |
@@ -146,6 +155,7 @@ değildir. Eksik kaynak varsa satır atlanmaz; o kapsamın canlı kabulü açık
 | Açık düzeltme | Kullanıcı daha önce kaydedilmiş zararsız bir bilgiyi açıkça düzeltir. Yeni bilgi tarih/gerekçesi ve kaynağıyla uygulanır; önceki kayıt ve değişim geçmişi korunur, sonraki oturum güncel durumu doğru aktarır. |
 | Açık unutma | Kullanıcı daha önce kaydedilmiş zararsız bilgiyi açık hedefle unutturur. Kaynak sessizce silinmeden ilgili türevler sonraki oturum okuması ve derleme girdisinden dışlanır; ilgisiz bilgi korunur. |
 | Kaydetmeme | “Bunu kaydetme, lütfen” gibi ifade ilgili katkıyı ve onu tekrarlayan yanıtı model girdisi/kayıt dışında bırakır; ilgisiz katkı korunur. |
+| Alıntıdaki kaydetmeme ifadesi | Gerçek App girdisinde anlamlı zararsız kullanıcı katkısının yanında “bunu kaydetme” ifadesi önce açıkça alıntı örneği, ayrı koşuda fenced kod örneği olarak verilir. Gizlilik direktifi/marker oluşmaz; çevredeki gerçek katkı kaynak kimliğiyle kaydedilir ve sonraki oturumda bulunur. Örnek ifade kullanıcı tercihi sayılmaz ve katkının tamamı sessizce dışlanmaz. |
 | Sır süzme | Gerçek kimlik bilgisi kullanmadan, en az `DATABASE_PASSWORD`, `MY_TOKEN` ve `AWS_SECRET_ACCESS_KEY` atamalarının her birine farklı benzersiz sentetik canary değeri verilerek gerçek App oturumuna girilir; kolay tanınan tek bir `api_key` örneği yeterli değildir. Gerçek hook olaylarından sonra her canary arka plan özetleyici/derleyici model girdilerinde, kalıcı kuyruk payload'larında, günlük/Companion/knowledge kayıtlarında ve filtreli görünümlerde bulunmaz. Asıl kullanıcı girdisinin bulunduğu ham transcript bu türev kontrollerinden ayrı tutulur. |
 | Geç gelen oturuma özel tutma | Önce bir kayıt yayımlanır; sonra kullanıcı “bu konuşmada kalsın” der. Ajan mevcut `suppress_derived_memory` yoluyla geçmiş karşılıkları dışlar; kaynakları silmeden yeni oturum okuması ve derleme girdisinde dışlama doğrulanır. Yalnız session marker varlığı başarı değildir. |
 | İncelemeden uygulamaya | Audit sonrası eylem isteyen soru doğru kapsamı açar. Bilgi sorusu, olumsuzluk, alıntı ve aynı mesajdaki açık salt okunur sınır bunu açmaz. `Onaylıysa... dosyayı düzelt.`, `Gerekirse... dosyayı düzelt.`, `Sanırım... dosyayı düzelt.` ve açıkça varsayımsal istekler ayrı gerçek App girdileriyle denenir; read-only durum ve yazmama sonucu birlikte doğrulanır. |
