@@ -360,8 +360,8 @@ def _json_regions(text: str) -> Iterator[tuple[int, int]]:
             yield opening.start(), end
 
 
-def _json_string_regions(text: str) -> Iterator[tuple[int, int]]:
-    """Yield complete JSON string spans inside validated JSON regions."""
+def _json_string_regions(text: str) -> Iterator[tuple[int, int, bool]]:
+    """Yield complete JSON string spans and whether each span is a value."""
     decoder = json.JSONDecoder()
     for region_start, region_end in _json_regions(text):
         cursor = region_start
@@ -376,8 +376,12 @@ def _json_string_regions(text: str) -> Iterator[tuple[int, int]]:
                 continue
             if end > region_end:
                 break
-            yield opening, end
-            cursor = end
+            tail = end
+            while tail < region_end and text[tail].isspace():
+                tail += 1
+            is_value = tail >= region_end or text[tail] != ':'
+            yield opening, end, is_value
+            cursor = tail + 1 if tail < region_end and text[tail] == ':' else tail
 
 
 _MEMORY_VIEW_IDENTIFIER = re.compile(
@@ -431,7 +435,7 @@ def sanitize_text(
     regions = _json_regions(text)
     json_strings = _json_string_regions(text)
     region: tuple[int, int] | None = None
-    json_string: tuple[int, int] | None = None
+    json_string: tuple[int, int, bool] | None = None
     pieces: list[str] = []
     cursor = 0
     while match := CREDENTIAL.search(text, cursor):
@@ -440,6 +444,8 @@ def sanitize_text(
             if json_string is None:
                 break
         if json_string is not None and json_string[0] < match.start() < json_string[1]:
+            if not json_string[2]:
+                raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
             pieces.extend((text[cursor:json_string[0]], json.dumps("<REDACTED>")))
             cursor = json_string[1]
             continue
