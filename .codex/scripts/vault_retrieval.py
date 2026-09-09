@@ -122,13 +122,25 @@ HISTORY_QUERY_INFLECTION_CASE_SUFFIXES = frozenset({
     "e", "i", "in", "te", "ten", "de", "den", "ye", "yi",
     "ne", "ni", "nin", "nde", "nden",
 })
-HISTORY_QUERY_INFLECTION_SUFFIXES = frozenset(
-    number + possessive + case
-    for number in ("", "ler")
-    for possessive in ("", "im", "in", "i", "imiz", "iniz", "leri")
-    for case in ("", *HISTORY_QUERY_INFLECTION_CASE_SUFFIXES)
-    if number or possessive or case
-)
+HISTORY_QUERY_INFLECTION_VOWELS = frozenset("aeiou")
+HISTORY_QUERY_INFLECTION_POSSESSIVES = {
+    "vowel": ("", "m", "n", "si", "miz", "niz", "leri"),
+    "consonant": ("", "im", "in", "i", "imiz", "iniz", "leri"),
+}
+HISTORY_QUERY_INFLECTION_SUFFIXES = {
+    stem_type: frozenset(
+        number + possessive + case
+        for number in ("", "ler")
+        for possessive in (
+            HISTORY_QUERY_INFLECTION_POSSESSIVES["vowel"]
+            if stem_type == "vowel" and not number
+            else HISTORY_QUERY_INFLECTION_POSSESSIVES["consonant"]
+        )
+        for case in ("", *HISTORY_QUERY_INFLECTION_CASE_SUFFIXES)
+        if number or possessive or case
+    )
+    for stem_type in ("vowel", "consonant")
+}
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
@@ -1157,7 +1169,10 @@ def _is_personal_query(query_terms: frozenset[str]) -> bool:
 
 def _is_history_query(query_terms: frozenset[str]) -> bool:
     if query_terms & HISTORY_QUERY_TERMS or any(
-        term.startswith(root) and term[len(root):] in HISTORY_QUERY_INFLECTION_SUFFIXES
+        term.startswith(root)
+        and term[len(root):] in HISTORY_QUERY_INFLECTION_SUFFIXES[
+            "vowel" if root[-1] in HISTORY_QUERY_INFLECTION_VOWELS else "consonant"
+        ]
         for term in query_terms
         for root in HISTORY_QUERY_INFLECTION_ROOTS
     ):
