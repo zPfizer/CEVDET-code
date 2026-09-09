@@ -37,8 +37,6 @@ dosyalı incelemelerde graf kullanma kararı bu dar sonuçla elenemez.
   kümesi (keşif çağıran/test; hata çağıran/çağrılan/test; PR sembolleri) her
   üç graf tekrarında karşılaştırılır: toplam 18 küme kontrolü. Kaynakla daha
   önce bağımsız doğrulanan test/PR kimlikleri sabit commit için betikte tutulur.
-  Her kümenin yalnız üçüncü tekrarında eksik veya sahte düğüm üreten altı
-  negatif kontrol de beklenen hatayla durdu; yanlış sonuçların JSON kanıtı korundu.
   Kasıtlı kısaltılmış ara yanıt yerine her sorgunun son, tamamlanmış yanıtı
   doğrulanır. Risk ve akış önceliklerinin anlamsal doğruluğu bu sayıya dahil değildir.
   Bu kontroller açık hata kontrolleridir; Python `-O` / `PYTHONOPTIMIZE` ile
