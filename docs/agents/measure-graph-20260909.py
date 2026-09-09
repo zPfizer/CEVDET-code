@@ -18,6 +18,11 @@ BASELINE = "16d5e2139fb750045bb0a6717d284fd611f7bc96"
 ROOT = Path(sys.argv[1]).resolve()
 OUTPUT = Path(sys.argv[2])
 FILES = [".codex/hooks", ".codex/scripts", ".codex/tests"]
+TASKS = {
+    "discovery": "Find all direct callers and tests of file_lock.locked",
+    "debug": "Debug callers, callees and tests around vault_retrieval._stable_source_snapshot",
+    "pr": "Review the profile preference snapshot change in HEAD~1..HEAD",
+}
 # Independently source-reviewed goldens for BASELINE, including class parents.
 LOCK_TESTS = {
     ".codex/tests/test_file_lock.py::LockedContextTests." + name for name in (
@@ -100,7 +105,7 @@ def query(pattern, target, payloads):
 
 
 def graph(case):
-    payloads = [get_minimal_context(task=case, repo_root=str(ROOT), base="HEAD~1")]
+    payloads = [get_minimal_context(task=TASKS[case], repo_root=str(ROOT), base="HEAD~1")]
     assert payloads[0]["status"] == "ok", payloads[0]
     if case == "discovery":
         target = ".codex/scripts/file_lock.py::locked"

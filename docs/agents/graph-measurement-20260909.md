@@ -1,9 +1,11 @@
 # CEVDET Code Review Graph ölçümü — 9 Eylül 2026
 
-Üç sınırlı örnekte graf, normal aramaya göre bağlam veya süre tasarrufu sağlamadı.
-Doğrudan ilişkileri doğru buldu; PR için ek yapısal öncelik bilgisi verdi.
-Bu nedenle bilinen sembolde `rg`, belirsiz ilişkilerde graf; otomatik PR raporu
-ise engelleyici olmayan yardımcı özet olarak kullanılacak.
+Bu deney, başlangıç sembolleri önceden bilinen iki sorgu ve küçük bir PR'da
+bağlam edinme maliyetini ölçer. Bu sorgu protokolünde graf metin/süre tasarrufu
+sağlamadı; doğrudan ilişkileri doğru buldu ve PR için yapısal öncelik bilgisi verdi.
+Sonuç doğal sorudan başlangıç bulmayı, dolaylı etki zincirlerini, mimari keşfi
+ve tam bir model oturumunu ölçmez. Ortak bileşenlerdeki değişiklik ve çok
+dosyalı incelemelerde graf kullanma kararı bu dar sonuçla elenemez.
 
 ## Yöntem ve sınır
 
@@ -17,6 +19,9 @@ ise engelleyici olmayan yardımcı özet olarak kullanılacak.
 - Graf yolu `get_minimal_context` ile başlar. Gerekli tam liste için `minimal`
   sonucu genişletmenin maliyeti de sayılır. Dosya yolları kısaltılmadan, tek JSON
   gösteriminin karakterleri sayılır; MCP'nin metin/structuredContent kopyaları çift sayılmaz.
+  Görev açıklamaları açıktır; ancak 2.3.8'de bu araç genel graf/diff özetini
+  verir ve görev kelimelerini yalnız sonraki araç önerilerinde kullanır.
+  Başlangıç sembolleri bu deneyde önceden verilir; doğal dil araması sınanmaz.
 - İki yönteme aynı seçili uygulama/test kaynak okumaları eklenir. Bunlar kilit
   uygulaması ve testleri; snapshot yardımcıları/çağrı noktası/ilgili yarış testi;
   son PR'ın değişen üretim fonksiyonu ve iki test metodudur.
@@ -85,6 +90,19 @@ deponun bütün olası ilişkileri için doğruluk oranı vermez. Örneğin
 içindeki `real_handle` alias yolları bu doğrudan çağrı kümesinin dışındadır.
 
 ## Kurala dönüşen bulgular
+
+Tek konumu bulma işi `rg` ile başlayabilir. Ortak bileşende davranış değişikliği,
+çağıranların çağıranlarını izleme, mimari keşif ve PR etki incelemesi graf için
+ayrı ve güçlü kullanım gerekçeleridir. [FAQ](https://github.com/tirth8205/code-review-graph/blob/main/docs/FAQ.md)
+de grafın asıl değerini bu çok adımlı işlerde konumlandırır. Bu deney, grafın
+bütün bu işlerdeki faydasını veya 35 dilli genel doğruluğunu kanıtlamaz.
+
+Tekrarlanan geniş değerlendirme gerekirse yeni bir ölçüm motoru büyütmek yerine
+hazır `agent_baseline` ve `multi_hop_retrieval` akışları CEVDET sorularıyla
+değerlendirilir. İlki en iyi üç dosyayı okuyan bir simülasyondur; ikincisi
+doğal sorgu → başlangıç sembolü → komşu ilişkileri zincirini sınar. İkisi de
+tek başına gerçek model/kota ölçümü değildir. Bu tarihli betik dar deneyin
+yeniden üretim kanıtı olarak kalır; ürün veya haftalık CI akışına eklenmez.
 
 - `minimal`, `max_results=100` verilse bile kilidin 53 çağıranından 5'ini,
   9 testinden 5'ini gösterdi. Kalanlar tamamlanmadan inceleme bitirilemez.

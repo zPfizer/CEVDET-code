@@ -40,11 +40,11 @@ Her bağımsız kod işi güncel `origin/main` üzerinden ayrı `codex/` branch 
 
 ## Code Review Graph
 
-Bilinen dosya veya sembolde önce `rg` ve ilgili kaynağı kullan. Çok dosyalı ilişkiler belirsizse veya yapısal PR etki özeti gerekiyorsa grafla kapsamı daralt; her işe zorunlu graf çağrısı ekleme.
+Tek bir dosya veya sembolün yerini bulurken `rg` ve ilgili kaynağı kullan. Ortak bileşende davranış değişikliği, çok dosyalı hata/refactor, mimari keşif ve PR etki incelemesinde grafı aktif kullan. Sembolün adını bilmek, değişikliğin etkisini bildiğin anlamına gelmez; basit metin işlerine zorunlu graf çağrısı ekleme.
 
-1. **Kod keşfi:** Graf gerektiğinde `get_minimal_context_tool(task=...)` ile başla; sembol araması veya `query_graph_tool` ile ilgili alanı bul, ardından uygulamayı ve bağlı testleri oku. Belirsiz sembol eşleşmesinde tam `qualified_name` kullan.
-2. **Hata araştırması:** Belirtiyi kaynakta daralt; çağrı zinciri belirsizse `callers_of` / `callees_of` ve gerekiyorsa tek ilgili akışı incele. Kök nedeni kaynakta doğrula; düzeltmeyi ilgili testle sına.
-3. **Değişiklik / PR incelemesi:** Yerel değişiklikte tabanı `HEAD`, PR'da `git merge-base origin/main HEAD` sonucu olarak seç. Aynı tabanı bağlam ve `detect_changes_tool` çağrılarına geçir; kritik çağıranları, etkilenen akışları ve `tests_for` sonuçlarını kaynakla kontrol et.
+1. **Kod keşfi:** Graf gerektiğinde gerçek görev açıklamasıyla `get_minimal_context_tool(task=...)` çağır; bu özet başlangıç sembolünü aramanın yerine geçmez. Bilinmeyen başlangıç için `semantic_search_nodes_tool`, mimari soru için `get_architecture_overview_tool` kullan; ardından ilgili kaynağı oku. Belirsiz sembolde tam `qualified_name` kullan.
+2. **Hata araştırması:** Belirtiyi kaynakta daralt; `callers_of` / `callees_of`, birden fazla bağlantı adımında `traverse_graph_tool` ve gerekiyorsa tek ilgili akışla zinciri izle. Kök nedeni kaynakta doğrula; düzeltmeyi ilgili testle sına.
+3. **Değişiklik / PR incelemesi:** Ortak bileşeni değiştirirken `get_impact_radius_tool` ile çağıranları, bağımlıları ve testleri araştır. Yerel değişiklikte tabanı `HEAD`, PR'da `git merge-base origin/main HEAD` sonucu olarak seç. Aynı tabanı bağlam ve `detect_changes_tool` çağrılarına geçir; kritik çağıranları, etkilenen akışları ve `tests_for` sonuçlarını kaynakla kontrol et.
 
 Her çağrıda aktif worktree'nin mutlak `repo_root` yolunu ver. Graf kullanılacak yetkili kod uygulamasında başlangıçta ve değişiklik grubu sonrasında grafı güncelle; commit uyuşmazlığı sürerse tam oluştur. Salt okunur görevde grafı değiştirme; eksik veya eskiyse kaynak aramasına dön ve sınırı belirt.
 
