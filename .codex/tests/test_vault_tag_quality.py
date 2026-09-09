@@ -32,6 +32,82 @@ class VaultTagQualityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.taxonomy = tag_taxonomy.load_taxonomy(TAXONOMY_PATH)
 
+    def test_taxonomy_keeps_generic_policy_entries(self) -> None:
+        taxonomy = json.loads(TAXONOMY_PATH.read_text(encoding="utf-8"))
+
+        canonical = set(taxonomy["canonical"])
+        scoped = {
+            tag
+            for tags in taxonomy["scoped"].values()
+            for tag in tags
+        }
+        self.assertEqual(scoped & canonical, set())
+        self.assertNotIn("ajanlar", taxonomy["canonical"])
+        self.assertIn("kod-inceleme", taxonomy["canonical"])
+        self.assertNotEqual(
+            taxonomy["aliases"].get("code-review"),
+            "sürüm-kontrolü",
+        )
+
+    def test_scoped_tags_are_allowed_only_below_their_project_path(self) -> None:
+        project_name = "Project Alpha"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            taxonomy_path = root / "taxonomy.json"
+            taxonomy_path.write_text(
+                json.dumps(
+                    {
+                        "canonical": ["finans"],
+                        "scoped": {project_name: ["sinyal-stratejisi"]},
+                        "aliases": {},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            project = root / project_name
+            other = root / "Other"
+            project.mkdir()
+            other.mkdir()
+            note = "---\ntags: [finans, sinyal-stratejisi]\n---\n# Note\n"
+            (project / "allowed.md").write_text(note, encoding="utf-8")
+            (other / "blocked.md").write_text(note, encoding="utf-8")
+
+            taxonomy = tag_taxonomy.load_taxonomy(taxonomy_path)
+            violations = tag_taxonomy.audit_vault(root, taxonomy)
+
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0].path.name, "blocked.md")
+        self.assertEqual(violations[0].tag, "sinyal-stratejisi")
+
+    def test_project_scoped_tags_can_use_obsidian_hierarchy(self) -> None:
+        project_name = "Project Alpha"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            taxonomy_path = root / "taxonomy.json"
+            taxonomy_path.write_text(
+                json.dumps(
+                    {
+                        "canonical": ["finans"],
+                        "scoped": {project_name: ["project/technical/formasyon"]},
+                        "aliases": {},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            project = root / project_name
+            project.mkdir()
+            (project / "note.md").write_text(
+                "---\ntags: [project/technical/formasyon]\n---\n# Note\n",
+                encoding="utf-8",
+            )
+
+            taxonomy = tag_taxonomy.load_taxonomy(taxonomy_path)
+            violations = tag_taxonomy.audit_vault(root, taxonomy)
+
+        self.assertEqual(violations, [])
+
     def test_financial_valuation_is_not_a_real_estate_alias(self) -> None:
         taxonomy = json.loads(TAXONOMY_PATH.read_text(encoding="utf-8"))
 
