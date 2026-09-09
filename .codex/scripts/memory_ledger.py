@@ -332,7 +332,8 @@ def sanitize_text(
                 _, end = json.JSONDecoder().raw_decode(text, match.start('value'))
                 quoted_field = bool(match.group('key_quote')) and match.group('prefix').rstrip().endswith(':')
                 if end < len(text) and not (text[end].isspace() or (quoted_field and text[end] in ',}]')):
-                    end = len(text)
+                    while end < len(text) and not text[end].isspace():
+                        end += 1
             except (ValueError, RecursionError):
                 # Unknown container boundaries must not expose the remaining payload.
                 end = len(text)

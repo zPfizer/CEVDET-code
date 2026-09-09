@@ -47,6 +47,12 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertEqual(sanitized, 'keep before; token=<REDACTED>')
                 self.assertEqual(redactions, ("credential",))
 
+    def test_plain_container_keeps_content_after_the_credential_whitespace_boundary(self) -> None:
+        for value in ('{"safe":1};', '{"safe": 1},TRAILING_SECRET', '[1]TRAILING_SECRET'):
+            with self.subTest(value=value):
+                sanitized, _ = ledger.sanitize_text('token=' + value + ' important decision', max_chars=None)
+                self.assertEqual(sanitized, 'token=<REDACTED> important decision')
+
     def test_sanitizer_redacts_plain_quoted_and_escaped_credentials(self) -> None:
         text = (
             'plain password=plain-secret; '
