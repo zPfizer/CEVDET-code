@@ -96,12 +96,15 @@ def graph(case):
 
 
 def baseline(case):
+    # Explicit tracked files avoid multi-root ignore traversal differences.
+    paths = command("git", "ls-files", "--", *FILES).splitlines()
+    assert paths, "No tracked source files"
     if case == "discovery":
-        return [command("rg", "-n", r"\blocked\s*\(", *FILES)]
+        return [command("rg", "--no-ignore", "-n", r"\blocked\s*\(", *paths)]
     if case == "debug":
-        return [command("rg", "-n", "_stable_source_snapshot|_source_snapshot|_source_signature", *FILES)]
+        return [command("rg", "--no-ignore", "-n", "_stable_source_snapshot|_source_snapshot|_source_signature", *paths)]
     return [command("git", "diff", "--no-ext-diff", "--unified=3", "HEAD~1", "HEAD"),
-            command("rg", "-n", r"\bhandle_user_prompt\s*\(", *FILES)]
+            command("rg", "--no-ignore", "-n", r"\bhandle_user_prompt\s*\(", *paths)]
 
 
 def main():

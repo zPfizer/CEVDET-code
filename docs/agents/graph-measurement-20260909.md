@@ -11,7 +11,9 @@ ise engelleyici olmayan yardımcı özet olarak kullanılacak.
 - Windows, Python 3.14.7, `code-review-graph==2.3.8`, ek embedding/Jedi kurulumu yok.
   Grafın 100 dosyasının tümü Git'te izlenen kaynaklarla eşleşti; metadata aynı HEAD'i gösterdi.
 - Önceden seçilmiş üç görev, üç tekrar, dönüşümlü yöntem sırası; tabloda medyanlar var.
-  Normal yöntem bütün depoyu okumaz: `rg -n` ve PR için `git diff --unified=3` kullanır.
+  Normal yöntem bütün depoyu okumaz: üç kod dizininin `git ls-files` çıktısı üzerinden
+  `rg --no-ignore -n` ve PR için `git diff --unified=3` kullanır. Dosya listesi
+  çıkarma süresi her normal arama örneğine dahildir; yalnız Git'te kayıtlı dosyalar aranır.
 - Graf yolu `get_minimal_context` ile başlar. Gerekli tam liste için `minimal`
   sonucu genişletmenin maliyeti de sayılır. Dosya yolları kısaltılmadan, tek JSON
   gösteriminin karakterleri sayılır; MCP'nin metin/structuredContent kopyaları çift sayılmaz.
@@ -32,9 +34,9 @@ Toplam karakter, arama/graf yanıtı ile ortak kaynak doğrulamasının toplamı
 
 | Görev | rg toplam karakter | Graf toplam karakter | Graf farkı | rg süre | Graf süre |
 |---|---:|---:|---:|---:|---:|
-| `file_lock.locked`: çağıranlar ve testler | 20.614 | 71.802 | +%248,3 | 0,0145 sn | 0,1385 sn |
-| `_stable_source_snapshot`: çağrı zinciri | 17.303 | 17.668 | +%2,1 | 0,0159 sn | 0,1506 sn |
-| Son gerçek PR: değişen semboller | 31.095 | 32.076 | +%3,2 | 0,0380 sn | 0,2546 sn |
+| `file_lock.locked`: çağıranlar ve testler | 20.614 | 71.802 | +%248,3 | 0,0314 sn | 0,1342 sn |
+| `_stable_source_snapshot`: çağrı zinciri | 17.303 | 17.668 | +%2,1 | 0,0331 sn | 0,1468 sn |
+| Son gerçek PR: değişen semboller | 31.095 | 32.076 | +%3,2 | 0,0532 sn | 0,2466 sn |
 
 Ortak kaynak okuması sırasıyla 14.269, 14.895 ve 23.667 karakterdir.
 Grafın yalnız sorgu çıktısı sırasıyla 57.533, 2.773 ve 8.409 karakterdir.
@@ -78,6 +80,11 @@ içindeki `real_handle` alias yolları bu doğrudan çağrı kümesinin dışın
 - `minimal`, `max_results=100` verilse bile kilidin 53 çağıranından 5'ini,
   9 testinden 5'ini gösterdi. Kalanlar tamamlanmadan inceleme bitirilemez.
   Tam JSON'ı otomatik büyütmek yerine hedefli kaynak araması tercih edilebilir.
+- Otomatik inceleme POSIX/ripgrep 15.1.0 ortamında çoklu kök aramasında eksik
+  sonuç bildirdi. Windows/ripgrep 15.2.0 kontrolünde iki sorgu 30'ar tekrarda
+  aynı 6.345 / 2.408 karakteri verdi. Yeniden üretim için arama yine de açık
+  Git dosya listesine sabitlendi; metin miktarları değişmedi, tablodaki süreler
+  dosya listesini çıkaran son koşuya aittir.
 - Kısa `locked` adı 40 adayla belirsizdi. Ölçüm, iki yöntemde de bilinen dosya
   ve sembolü kullandı; graf sorgusunda tam `qualified_name` verildi.
 - PR'ın `minimal` sonucu yalnız üç öncelik adı verdi; bütün değişen sembol
