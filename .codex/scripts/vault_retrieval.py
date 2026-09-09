@@ -116,7 +116,6 @@ HISTORY_QUERY_TERMS = frozenset({
     "gecmis", "tarihce", "tarihsel", "eski", "onceki", "degisim", "karsilastir",
     "karsilastirma", "history", "historical", "before", "past", "previous", "change", "compare",
 })
-HISTORY_QUERY_PREFIXES = ("gecmis", "tarih", "eski", "onceki", "degis", "karsilastir", "histor", "before", "past", "previous", "change", "compar")
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
@@ -1150,11 +1149,7 @@ def _is_personal_query(query_terms: frozenset[str]) -> bool:
 
 
 def _is_history_query(query_terms: frozenset[str]) -> bool:
-    if query_terms & HISTORY_QUERY_TERMS or any(
-        term.startswith(prefix)
-        for term in query_terms
-        for prefix in HISTORY_QUERY_PREFIXES
-    ):
+    if query_terms & HISTORY_QUERY_TERMS:
         return True
     return (
         any(re.fullmatch(r"\d{4}", term) for term in query_terms)

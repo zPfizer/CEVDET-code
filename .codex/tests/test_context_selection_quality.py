@@ -364,6 +364,47 @@ Eylül etiket denetimi.
         self.assertEqual(history[0].entry.path, "🏰 300-Projects/Tansu/Python-eski.md")
         self.assertEqual(current[0].entry.path, "🏰 300-Projects/Tansu/Python-guncel.md")
 
+    def test_ordinary_history_prefix_match_keeps_active_record_ahead_of_archived_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write(
+                root,
+                "🏰 300-Projects/Tansu/a-archived.md",
+                """---
+title: Değişken Seçimi Eski
+status: archived
+type: note
+---
+# Değişken Seçimi Eski
+Değişken seçimi için ortak karar ve kanıt.
+""",
+            )
+            _write(
+                root,
+                "🏰 300-Projects/Tansu/z-active.md",
+                """---
+title: Değişken Seçimi Güncel
+status: active
+type: note
+---
+# Değişken Seçimi Güncel
+Değişken seçimi için ortak karar ve kanıt.
+""",
+            )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            hits = retrieval.search_vault(entries, "değişken seçimi", top_k=2)
+
+        self.assertFalse(
+            retrieval._is_history_query(retrieval._retrieval_terms("değişken seçimi"))
+        )
+        self.assertEqual(
+            [hit.entry.path for hit in hits],
+            [
+                "🏰 300-Projects/Tansu/z-active.md",
+                "🏰 300-Projects/Tansu/a-archived.md",
+            ],
+        )
+
     def test_identical_copies_do_not_fill_top_three_when_an_independent_source_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
