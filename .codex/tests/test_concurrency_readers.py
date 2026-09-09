@@ -70,14 +70,19 @@ class RetrievalRaceTests(unittest.TestCase):
                 (root / vault_retrieval.CACHE_RELATIVE_PATH).read_text(encoding="utf-8")
             )
             final_stat = changing.stat()
+            expected_content_hash = vault_retrieval._source_snapshot(root, changing)[2]
+            expected_source_hash = vault_retrieval._source_sha256(changing)
             self.assertEqual(stable.read_text(encoding="utf-8"), "# Sabit Kanıt\nsabit içerik\n")
 
         self.assertEqual({entry.title for entry in entries}, {"Yeni Kanıt", "Sabit Kanıt"})
         cached = cache["files"]["🧠 500-Knowledge/degisen.md"]
-        self.assertEqual(cached["size"], final_stat.st_size)
-        self.assertEqual(cached["mtime_ns"], final_stat.st_mtime_ns)
-        self.assertEqual(cached["ctime_ns"], final_stat.st_ctime_ns)
+        self.assertNotIn("size", cached)
+        self.assertNotIn("mtime_ns", cached)
+        self.assertNotIn("ctime_ns", cached)
+        self.assertEqual(cached["dev"], final_stat.st_dev)
         self.assertEqual(cached["ino"], final_stat.st_ino)
+        self.assertEqual(cached["content_sha256"], expected_content_hash)
+        self.assertEqual(cached["source_sha256"], expected_source_hash)
 
     def test_disappearing_selected_source_keeps_other_fresh_hit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
