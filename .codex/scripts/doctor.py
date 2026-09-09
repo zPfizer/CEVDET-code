@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from functools import cached_property
 import json
 import math
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import shutil
@@ -33,9 +33,11 @@ from vault_corpus import (
     HUMAN_NOTE_ROOTS,
     KNOWLEDGE_ROOT,
     NoteIndex,
+    TEMPLATES_ROOT,
     by_key,
     by_stem,
     link_key,
+    markdown_paths,
     resolve_link,
     vault_notes,
 )
@@ -1466,6 +1468,16 @@ def _vault_link_check(ctx: Context) -> Check:
 
     keyed = by_key(notes)
     broken: list[str] = []
+    base_keys: set[str] = set()
+    base_names: dict[str, list[str]] = {}
+    for base_path in markdown_paths(
+        ctx.vault,
+        excluded_root_dirs=frozenset({"tmp"}),
+        suffix=".base",
+    ):
+        key = base_path.relative_to(ctx.vault).as_posix()
+        base_keys.add(key)
+        base_names.setdefault(base_path.name, []).append(key)
     for source in files:
         if source.error:
             return Check(
@@ -1476,6 +1488,25 @@ def _vault_link_check(ctx: Context) -> Check:
         for match in WIKILINK.finditer(source.text):
             target = wikilink_target(match.group(1))
             if not target:
+                continue
+            base_target = PurePosixPath(target)
+            if base_target.suffix.casefold() == ".base":
+                base_key = base_target.as_posix()
+                source_base_key = (source.relative.parent / base_target).as_posix()
+                if (
+                    link_key(target) is not None
+                    and ".." not in base_target.parts
+                    and (
+                        base_key in base_keys
+                        or source_base_key in base_keys
+                        or (
+                            len(base_target.parts) == 1
+                            and len(base_names.get(base_target.name, ())) == 1
+                        )
+                    )
+                ):
+                    continue
+                broken.append(f"{source.key} -> {target}")
                 continue
             if resolve_link(target, keyed, stems) is None:
                 broken.append(f"{source.key} -> {target}")
@@ -1581,7 +1612,11 @@ def _metadata_schema_check(ctx: Context) -> Check:
         if missing:
             offenders.append(f"{note.key}: {','.join(missing)}")
         title = fields.get("title", "")
-        if isinstance(title, str) and title:
+        if (
+            isinstance(title, str)
+            and title
+            and not (note.root == TEMPLATES_ROOT and title.strip() == "{{title}}")
+        ):
             titles.setdefault(title, []).append(note.key)
     duplicate_titles = {title: keys for title, keys in titles.items() if len(keys) > 1}
     if duplicate_titles:

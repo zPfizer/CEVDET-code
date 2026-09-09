@@ -77,7 +77,12 @@ class NoteIndex:
         return self.relative.as_posix()
 
 
-def markdown_paths(root: Path, *, excluded_root_dirs: frozenset[str] = frozenset()) -> Iterator[Path]:
+def markdown_paths(
+    root: Path,
+    *,
+    excluded_root_dirs: frozenset[str] = frozenset(),
+    suffix: str = ".md",
+) -> Iterator[Path]:
     """Shared traversal: never descend into infrastructure or linked directories."""
     if root.is_symlink() or root.is_junction():
         return
@@ -95,7 +100,7 @@ def markdown_paths(root: Path, *, excluded_root_dirs: frozenset[str] = frozenset
         ]
         for name in files:
             path = current_path / name
-            if path.suffix.lower() != ".md":
+            if path.suffix.lower() != suffix.casefold():
                 continue
             if not stat.S_ISREG(path.lstat().st_mode):
                 continue

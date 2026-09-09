@@ -827,6 +827,46 @@ tags: [doğrulama]
         self.assertEqual(check.status, "FAIL")
         self.assertIn("../outside", check.evidence)
 
+    def test_doctor_accepts_existing_base_file_wikilink_with_view_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            note = project / "Dashboard.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(
+                "# Dashboard\n"
+                "[[Tansu Kaynakları.base#Sinyal ve Strateji]]\n"
+                "[[🏰 300-Projects/Tansu X Veri Havuzu/Tansu Kaynakları.base#Veri ve Kanıt]]\n",
+                encoding="utf-8",
+            )
+            (project / "Tansu Kaynakları.base").write_text(
+                "views:\n  - name: Sinyal ve Strateji\n",
+                encoding="utf-8",
+            )
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "OK")
+
+    def test_doctor_fails_when_base_file_wikilink_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            note = vault / "🧠 500-Knowledge" / "Dashboard.md"
+            note.parent.mkdir(parents=True)
+            (vault / "other").mkdir()
+            (vault / "other" / "Views.base").write_text("views: []\n", encoding="utf-8")
+            (note.parent / "Missing.md").write_text("# Missing\n", encoding="utf-8")
+            note.write_text(
+                "# Dashboard\n[[missing/Views.base]]\n[[Missing.base]]\n",
+                encoding="utf-8",
+            )
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("2 kırık", check.evidence)
+        self.assertIn("missing/Views.base", check.evidence)
+
     def test_doctor_fails_when_human_note_metadata_is_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -855,6 +895,35 @@ tags: [doğrulama]
 
         self.assertEqual(check.status, "FAIL")
         self.assertIn("modified", check.evidence)
+
+    def test_doctor_ignores_template_placeholder_titles_but_rejects_normal_duplicates(self) -> None:
+        template = (
+            "---\n"
+            'title: "{{title}}"\n'
+            "created: 2026-08-27\n"
+            "updated: 2026-08-27\n"
+            "tags: [template]\n"
+            "---\n"
+            "# {{title}}\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            templates = vault / "📋 Templates"
+            templates.mkdir(parents=True)
+            (templates / "One.md").write_text(template, encoding="utf-8")
+            (templates / "Two.md").write_text(template, encoding="utf-8")
+
+            self.assertEqual(doctor._metadata_schema_check(doctor.Context(vault)).status, "OK")
+
+            knowledge = vault / "🧠 500-Knowledge"
+            knowledge.mkdir()
+            normal = template.replace("{{title}}", "Aynı Başlık")
+            (knowledge / "One.md").write_text(normal, encoding="utf-8")
+            (knowledge / "Two.md").write_text(normal, encoding="utf-8")
+            check = doctor._metadata_schema_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("duplicate title", check.evidence)
 
     def test_doctor_bounds_oversized_session_sources_before_budget_check(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
