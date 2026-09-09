@@ -310,16 +310,26 @@ class VaultTagQualityTests(unittest.TestCase):
 
     def test_cli_revalidates_captured_notes_before_reporting(self) -> None:
         original_audit = tag_taxonomy.audit_vault
-        for inline in ("", "#eskietiket"):
-            with self.subTest(inline=inline), tempfile.TemporaryDirectory() as temporary:
+        for mutation in ("added", "removed", "changed"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 note = root / "note.md"
-                note.write_text(f"---\ntags: [arama]\n---\n{inline}\n", encoding="utf-8")
-                changed = "---\ntags: [bilinmeyen]\n---\n#yenietiket\n"
+                note.write_text("---\ntags: [arama]\n---\n", encoding="utf-8")
 
                 def audit_then_change(*args):
                     result = original_audit(*args)
-                    note.write_text(changed, encoding="utf-8")
+                    if mutation == "added":
+                        (root / "new.md").write_text(
+                            "---\ntags: [bilinmeyen]\n---\n#yenietiket\n",
+                            encoding="utf-8",
+                        )
+                    elif mutation == "removed":
+                        note.unlink()
+                    else:
+                        note.write_text(
+                            "---\ntags: [bilinmeyen]\n---\n#yenietiket\n",
+                            encoding="utf-8",
+                        )
                     return result
 
                 output = io.StringIO()
@@ -332,11 +342,19 @@ class VaultTagQualityTests(unittest.TestCase):
                         ["--root", str(root), "--taxonomy", str(TAXONOMY_PATH)]
                     )
 
-                self.assertEqual(scan.call_count, 1)
                 self.assertEqual(exit_code, 1)
-                self.assertIn("ERROR\tnote-changed:note.md", output.getvalue())
+                self.assertEqual(scan.call_count, 2)
+                self.assertIn(
+                    "ERROR\tnote-set-changed" if mutation != "changed" else "ERROR\tnote-changed:note.md",
+                    output.getvalue(),
+                )
                 self.assertNotIn("CANONICAL\t", output.getvalue())
-                self.assertEqual(note.read_text(encoding="utf-8"), changed)
+                if mutation == "added":
+                    self.assertTrue((root / "new.md").is_file())
+                elif mutation == "removed":
+                    self.assertFalse(note.exists())
+                else:
+                    self.assertIn("bilinmeyen", note.read_text(encoding="utf-8"))
 
     def test_cli_fails_closed_on_unreadable_note_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -358,6 +376,37 @@ class VaultTagQualityTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 1)
+        self.assertIn("ERROR\tnote-unreadable:note.md:PermissionError", output.getvalue())
+        self.assertNotIn("CANONICAL\t", output.getvalue())
+
+    def test_cli_fails_closed_when_final_note_snapshot_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            note = root / "note.md"
+            note.write_text("---\ntags: [arama]\n---\n", encoding="utf-8")
+            captured = tag_taxonomy.vault_notes(root)
+            unreadable = tag_taxonomy.NoteIndex(
+                note,
+                PurePosixPath("note.md"),
+                "",
+                {},
+                "PermissionError",
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.object(
+                    tag_taxonomy,
+                    "vault_notes",
+                    side_effect=[captured, (unreadable,)],
+                ) as scan,
+                mock.patch.object(tag_taxonomy.sys, "stdout", output),
+            ):
+                exit_code = tag_taxonomy.main(
+                    ["--root", str(root), "--taxonomy", str(TAXONOMY_PATH)]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(scan.call_count, 2)
         self.assertIn("ERROR\tnote-unreadable:note.md:PermissionError", output.getvalue())
         self.assertNotIn("CANONICAL\t", output.getvalue())
 
@@ -398,7 +447,7 @@ class VaultTagQualityTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         writer.assert_not_called()
         self.assertIn("CONFLICTS\t1", rendered)
-        self.assertEqual(scan.call_count, 2)
+        self.assertEqual(scan.call_count, 3)
         self.assertIn("VIOLATIONS\t0", rendered.splitlines())
         self.assertIn("INLINE_VIOLATIONS\t1", rendered.splitlines())
         self.assertIn("yarisan", rendered)
