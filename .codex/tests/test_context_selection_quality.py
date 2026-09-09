@@ -510,9 +510,15 @@ title: Hook Protokolü
 """,
             )
             entries = retrieval.build_vault_map(root, write_cache=False)
-            for marker in ("geçmişte", "geçmişten", "eskiden"):
+            for marker in (
+                "geçmişte", "geçmişten", "geçmişe", "geçmişi", "geçmişin",
+                "eskiden", "eskiye", "eskiyi", "öncekiler",
+            ):
                 with self.subTest(marker=marker):
                     query = f"{marker} hook sözleşmesi"
+                    self.assertTrue(
+                        retrieval._is_history_query(retrieval._retrieval_terms(query))
+                    )
                     hits = retrieval.search_vault(entries, query, top_k=3)
                     paths = [hit.entry.path for hit in hits]
                     self.assertIn(packet, paths)

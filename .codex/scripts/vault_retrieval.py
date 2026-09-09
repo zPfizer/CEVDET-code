@@ -113,8 +113,14 @@ SEMANTIC_SENTINELS = {
 CURRENT_CLAIM = re.compile(r"(?i)^\s*-\s*`gecerli`\s+")
 HTML_COMMENT = re.compile(r"<!--.*?(?:-->|$)", re.DOTALL)
 HISTORY_QUERY_TERMS = frozenset({
-    "gecmis", "gecmiste", "gecmisten", "tarihce", "tarihsel", "eski", "eskiden", "onceki", "degisim", "karsilastir",
+    "gecmis", "tarihce", "tarihsel", "eski", "onceki", "degisim", "karsilastir",
     "karsilastirma", "history", "historical", "before", "past", "previous", "change", "compare",
+})
+HISTORY_QUERY_INFLECTION_ROOTS = frozenset({"gecmis", "eski", "onceki"})
+HISTORY_QUERY_INFLECTION_SUFFIXES = frozenset({
+    "e", "i", "in", "te", "ten", "de", "den", "ye", "yi",
+    "ne", "ni", "nin", "nde", "nden",
+    "ler", "leri", "lere", "lerde", "lerden", "lerin",
 })
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
 PERSONAL_WORK_TERMS = frozenset({
@@ -1143,7 +1149,11 @@ def _is_personal_query(query_terms: frozenset[str]) -> bool:
 
 
 def _is_history_query(query_terms: frozenset[str]) -> bool:
-    if query_terms & HISTORY_QUERY_TERMS:
+    if query_terms & HISTORY_QUERY_TERMS or any(
+        term.startswith(root) and term[len(root):] in HISTORY_QUERY_INFLECTION_SUFFIXES
+        for term in query_terms
+        for root in HISTORY_QUERY_INFLECTION_ROOTS
+    ):
         return True
     return (
         any(re.fullmatch(r"\d{4}", term) for term in query_terms)
