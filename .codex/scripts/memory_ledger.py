@@ -4,9 +4,11 @@ from dataclasses import dataclass, field
 from contextlib import contextmanager
 import datetime as dt
 import hashlib
+import io
 import json
 from pathlib import Path, PurePosixPath
 import re
+import tokenize
 from typing import Callable, Iterator, Sequence
 import unicodedata
 
@@ -301,6 +303,35 @@ def memory_view_relative_path(relative: str) -> str:
     return f'.codex/private-memory/views/{_sha256_text(relative)}.md'
 
 
+def _balanced_value_end(text: str, start: int) -> int | None:
+    """Use the stdlib lexer for non-JSON brace values; never evaluate them."""
+    pairs = {')': '(', ']': '[', '}': '{'}
+    length = min(256, len(text) - start)
+    while True:
+        # Grow only the value window, not the remaining document for every field.
+        fragment = text[start:start + length]
+        stack: list[str] = []
+        try:
+            for token in tokenize.generate_tokens(io.StringIO(fragment).readline):
+                if token.type == tokenize.ERRORTOKEN and token.string in {'"', "'", '\\'}:
+                    break
+                if token.type != tokenize.OP:
+                    continue
+                if token.string in '([{':
+                    stack.append(token.string)
+                elif token.string in pairs:
+                    if not stack or stack.pop() != pairs[token.string]:
+                        return None
+                    if not stack:
+                        line, column = token.end
+                        return start + sum(len(part) + 1 for part in fragment.split('\n')[:line - 1]) + column
+        except (tokenize.TokenError, SyntaxError):
+            pass
+        if start + length >= len(text):
+            return None
+        length = min(length * 2, len(text) - start)
+
+
 def _json_regions(text: str) -> Iterator[tuple[int, int]]:
     """Validated JSON objects/arrays ending at an ordinary text boundary."""
     decoder = json.JSONDecoder()
@@ -349,20 +380,24 @@ def sanitize_text(
     while match := CREDENTIAL.search(text, cursor):
         end = match.end()
         if text[match.start('value')] in '{[':
+            quoted_field = False
             try:
                 _, end = json.JSONDecoder().raw_decode(text, match.start('value'))
+            except (ValueError, RecursionError):
+                end = _balanced_value_end(text, match.start('value'))
+                if end is None:
+                    # An unclosed/ambiguous value cannot expose its remaining payload.
+                    end = len(text)
+            else:
                 while region is None or region[1] <= match.start():
                     region = next(regions, None)
                     if region is None:
                         break
                 quoted_field = (region is not None and region[0] <= match.start() and end <= region[1]
                                 and match.group('key_quote') == '"' and match.group('prefix').rstrip().endswith(':'))
-                if end < len(text) and not (text[end].isspace() or (quoted_field and text[end] in ',}]')):
-                    while end < len(text) and not text[end].isspace():
-                        end += 1
-            except (ValueError, RecursionError):
-                # Unknown container boundaries must not expose the remaining payload.
-                end = len(text)
+            if not quoted_field:
+                while end < len(text) and not text[end].isspace():
+                    end += 1
         replacement = (f'{match.group("prefix")}"<REDACTED>"' if match.group('key_quote')
                        else f"{match.group('key')}=<REDACTED>")
         pieces.extend((text[cursor:match.start()], replacement))

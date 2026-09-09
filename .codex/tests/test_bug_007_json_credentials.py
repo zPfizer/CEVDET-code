@@ -68,6 +68,15 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 sanitized, _ = ledger.sanitize_text(prefix + payload + suffix, max_chars=None)
                 self.assertEqual(sanitized, prefix + safe + suffix)
 
+    def test_balanced_non_json_values_keep_the_following_text(self) -> None:
+        for value in ('{not-json}', '[placeholder]', "{'value': 'DICT_SECRET', 'nested': [1, '}']}",
+                      "{'label': 'satır\u2028iki',\n 'value': 'UNICODE_SECRET'}",
+                      "{'label': 'satır',\r\n 'value': 'UNICODE_SECRET'}",
+                      "{'value': '" + 'LONG_SECRET' * 100 + "'}"):
+            with self.subTest(value=value):
+                sanitized, _ = ledger.sanitize_text('token=' + value + ' important decision', max_chars=None)
+                self.assertEqual(sanitized, 'token=<REDACTED> important decision')
+
     def test_sanitizer_redacts_plain_quoted_and_escaped_credentials(self) -> None:
         text = (
             'plain password=plain-secret; '
