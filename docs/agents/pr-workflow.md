@@ -10,7 +10,7 @@ Yerel Vault ve eski Vault Git geçmişi bu depodan ayrıdır.
 3. Yalnız görev dosyalarını commit et; `git add .` ile ortak çalışmaları toplama. Yeni dosyayı mevcut `.gitignore` izin listesine açıkça ekle.
 4. Odaklı testleri çalıştır. Davranış değişikliği varsa mevcut tam sentetik test paketini de çalıştır. CI Windows/Python 3.14 üzerinde aynı paketi çalıştırır.
 5. Branch'i push et ve PR aç. Bitmemiş iş için draft kullan; incelemeye hazır olduğunda ready durumuna geçir. Hedef branch `main` olsun.
-6. Codex otomatik incelemesini ve CI sonucunu takip et. Yeni commit sonrasında önceki incelemeyi güncel kabul etme; son commit için yeniden inceleme al. Gerekirse PR yorumunda `@codex review` iste; yorum gönderme yetkisi görev kapsamında yoksa kullanıcıdan al.
+6. İlgili sözleşme ile diff'in uyumunu incele; Codex otomatik incelemesini ve CI sonucunu takip et. Yeni commit sonrasında önceki incelemeyi güncel kabul etme; son commit için yeniden inceleme al. Gerekirse PR yorumunda `@codex review` iste; yorum gönderme yetkisi görev kapsamında yoksa kullanıcıdan al.
 7. Bulguları çöz ve gerekli testleri tekrar çalıştır. Kullanıcı onayından sonra squash merge yap; otomatik merge açma. GitHub koruması varsa yeşil kontroller ve çözülmüş konuşmalar aranır.
 8. Sonraki bağımsız işi güncel `origin/main` üzerinden başlat. Worktree temiz ve kullanım dışı olmadan kaldırma; başka görevin branch'ini değiştirme.
 
