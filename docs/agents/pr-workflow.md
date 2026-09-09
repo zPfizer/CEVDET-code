@@ -33,6 +33,31 @@ Codex ayarlarında bu depo için `Review my PRs` ve `On every push` etkinleştir
 
 Kaynak: https://learn.chatgpt.com/docs/third-party/github (8 Eylül 2026).
 
+## PR Code Review Graph pilotu
+
+`.github/workflows/pr-graph-report.yml`, yalnız kod, bağımlılık veya workflow
+dosyası içeren pull request'lerde çalışır; yalnız belge değiştiren PR'larda
+gereksiz graph işi başlatmaz. Job Windows üzerinde Python 3.14 kullanır,
+PR'ın `head.sha` commit'ini `fetch-depth: 0` ile checkout eder, event'teki
+`base.sha` commit'ini alır ve `git merge-base base.sha head.sha` sonucunu
+karşılaştırma tabanı yapar.
+
+Rapor işi `code-review-graph==2.3.8` ile native full build çalıştırır ve
+`tools.detect_changes_func` çağrısını yalnız bu checkout üzerinde yapar; ürün
+kodu import veya execute edilmez. Sonuç job summary ve artifact olarak
+üretilir. Aynı repository içindeki PR'larda ayrı publisher job, yalnızca
+`pull-requests: write` izniyle `<!-- cevdet-pr-graph-report -->` işaretli tek
+bot yorumunu günceller. Fork PR'larında summary ve artifact yeterlidir; yorum
+job'ı çalışmaz. `pull_request_target`, cache ve untrusted artifact yürütmesi
+kullanılmaz.
+
+Rapor bulguları açıkça statik adaydır. `tests_for` ilişkisinin bulunmaması test
+yokluğunun kanıtı değildir; risk skoru merge gate değildir. Bu pilot model
+tokenı, kota veya gerçek dünya tasarrufu ölçmez. Silinen veya tamamen
+kaldırılmış semboller HEAD grafında görünmeyebilir. Build, graph veya analysis
+`status:error` dönerse workflow başarısız olur ve summary/artifact başarılı
+rapor gibi gösterilmez.
+
 Eski audit uygulamalarına başlamadan önce [eşlenmiş uygulama paketlerine](audit-packages-20260908.md) bak; tarihsel çözümü güncel kodla karşılaştırmadan yeniden uygulama.
 
 İlk kurulum stack'inde concurrency PR #3, #2 branch'ine alınır; ardından #1 ve birleşik #2 main'e gider. Bu bir kerelik bağımlı kurulumda commit ancestry'yi koruyan merge commit kullanılır; böylece başka PR'ın geçmişini force-push ile yeniden yazmak gerekmez. Normal bağımsız işlerde yukarıdaki squash akışı sürer.

@@ -169,10 +169,15 @@
 !/.github/workflows/
 /.github/workflows/*
 !/.github/workflows/tests.yml
+!/.github/workflows/pr-graph-report.yml
+!/.github/scripts
+/.github/scripts/*
+!/.github/scripts/pr_graph_report.py
 !/docs/agents/pr-workflow.md
 !/docs/agents/graph-measurement-20260909.md
 !/docs/agents/measure-graph-20260909.py
 !/docs/agents/audit-packages-20260908.md
+!/.codex/tests/test_pr_graph_report.py
 !/.codex/tests/test_concurrency_checkpoint.py
 !/.codex/tests/test_concurrency_integration.py
 !/.codex/tests/test_concurrency_process.py
