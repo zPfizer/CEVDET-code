@@ -171,6 +171,7 @@
 !/.github/workflows/tests.yml
 !/.github/workflows/pr-graph-report.yml
 !/.github/scripts
+/.github/scripts/*
 !/.github/scripts/pr_graph_report.py
 !/docs/agents/pr-workflow.md
 !/docs/agents/audit-packages-20260908.md
