@@ -38,6 +38,18 @@ Branch -> yerel testler -> özel GitHub'a push -> PR -> kullanıcı onayı -> me
 
 Her bağımsız kod işi güncel `origin/main` üzerinden ayrı `codex/` branch ve worktree kullanır; ilk aktarım merge edilene kadar `docs/agents/pr-workflow.md` içindeki başlangıç sınırı geçerlidir. Aynı worktree'de eşzamanlı görev çalıştırma. PR şablonunu doldur, son commit'in CI ve inceleme sonuçlarını doğrula; yalnız kullanıcı onayıyla merge et. Tam akış: `docs/agents/pr-workflow.md`.
 
+## Code Review Graph
+
+Kod keşfi ve çok dosyalı davranış incelemesinde kapsamı önce grafla daralt. Basit metin veya açıkça tek noktayı etkileyen değişikliklerde doğrudan kaynakla ilerle.
+
+1. **Kod keşfi:** `get_minimal_context_tool(task=...)` ile başla; sembol araması veya `query_graph_tool` ile ilgili alanı bul, ardından uygulamayı ve bağlı testleri oku.
+2. **Hata araştırması:** `get_minimal_context_tool(task=...)` ile hata belirtisinden ilgili sembolü bul; `callers_of` / `callees_of` ile çağrı zincirini, gerekiyorsa tek ilgili akışı incele. Kök nedeni kaynakta doğrula; düzeltmeyi ilgili testle sına.
+3. **Değişiklik / PR incelemesi:** Yerel değişiklikte tabanı `HEAD`, PR'da `git merge-base origin/main HEAD` sonucu olarak seç. Aynı tabanı bağlam ve `detect_changes_tool` çağrılarına geçir; kritik çağıranları, etkilenen akışları ve `tests_for` sonuçlarını kaynakla kontrol et.
+
+Her çağrıda aktif worktree'nin mutlak `repo_root` yolunu ver. Yetkili kod uygulamasında başlangıçta ve değişiklik grubu sonrasında grafı güncelle; commit uyuşmazlığı sürerse tam oluştur. Salt okunur görevde grafı değiştirme; eksik veya eskiyse kaynak aramasına dön ve sınırı belirt.
+
+Destekleyen araçlarda `detail_level="minimal"` ile başla; yalnız gerekli sonuçları genişlet, kesilmiş çıktıyı tam liste sayma. Kaynak ve gerçek testler otoritedir; grafın boş sonucu yokluk, silme güvenliği veya test kapsamı kanıtı değildir.
+
 ## Code Review Rules
 
 - Bu deponun istenen teslim ve doğrulama ortamı Windows/Python 3.14'tür. POSIX-only bulguları ayrı platform sınırı olarak raporla; Windows etkisi olmayan POSIX testlerini bu teslimin merge koşuluna dönüştürme. Genel gizlilik ve veri kaybı bulgularını platform bahanesiyle dışlama.

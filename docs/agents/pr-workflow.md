@@ -7,7 +7,7 @@ Yerel Vault ve eski Vault Git geçmişi bu depodan ayrıdır.
 
 1. Kod deposunda `git fetch origin` çalıştır. Güncel `origin/main` üzerinden ayrı `codex/<konu>` branch'i ve komşu bir worktree oluştur. Aynı worktree'de eşzamanlı görev çalıştırma.
 2. Bir görev birkaç bağımsız değişiklik içeriyorsa her birini ayrı branch/PR'a ayır. Birbirine zorunlu bağımlı değişiklikler aynı PR'da olabilir.
-3. Yalnız görev dosyalarını commit et; `git add .` ile ortak çalışmaları toplama. Yeni dosyayı mevcut `.gitignore` izin listesine açıkça ekle.
+3. Yalnız görev dosyalarını commit et; `git add .` ile ortak çalışmaları toplama. Yeni dosyayı mevcut `.gitignore` izin listesine açıkça ekle. Kod incelemesinde [Code Review Graph akışını](../../AGENTS.md#code-review-graph) uygula; PR karşılaştırmasında merge-base kullan. Graf, kaynak incelemesi ve testlerin yerine geçmez.
 4. Odaklı testleri çalıştır. Davranış değişikliği varsa mevcut tam sentetik test paketini de çalıştır. CI Windows/Python 3.14 üzerinde aynı paketi çalıştırır.
 5. Branch'i push et ve PR aç. Bitmemiş iş için draft kullan; incelemeye hazır olduğunda ready durumuna geçir. Hedef branch `main` olsun.
 6. Codex otomatik incelemesini ve CI sonucunu takip et. Yeni commit sonrasında önceki incelemeyi güncel kabul etme; son commit için yeniden inceleme al. Gerekirse PR yorumunda `@codex review` iste; yorum gönderme yetkisi görev kapsamında yoksa kullanıcıdan al.
