@@ -33,8 +33,17 @@ class MemoryDirectiveTests(unittest.TestCase):
                 self.assertEqual(memory_ledger.persistent_turns([('user', text)]), [('user', text)])
         target = 'Şunu unut: "Levent Ankara’da yaşıyor"'
         self.assertEqual(memory_ledger.memory_directive(target).kind, 'forget')
-        self.assertEqual(memory_ledger.memory_directive('"Geçici bilgi". Bunu kaydetme.').kind,
-                         'do-not-save')
+        quoted_target = '"Geçici bilgi". Bunu kaydetme.'
+        self.assertEqual(memory_ledger.memory_directive(quoted_target).kind, 'do-not-save')
+        self.assertEqual(memory_ledger.memory_directive(quoted_target).target, quoted_target)
+        self.assertEqual(
+            memory_ledger.persistent_turns([
+                ('user', 'Eski karar.'),
+                ('assistant', 'Eski yanıt.'),
+                ('user', quoted_target),
+            ]),
+            [('user', 'Eski karar.'), ('assistant', 'Eski yanıt.')],
+        )
 
     def test_natural_memory_controls_are_deterministic(self) -> None:
         cases = {
@@ -49,6 +58,9 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Lütfen, bunu kaydetme!": ("do-not-save", ""),
             "Bunu kaydetme! Lütfen.": ("do-not-save", ""),
             "Bunu kaydetme? Lütfen…": ("do-not-save", ""),
+            "Bunu kaydetme - lütfen.": ("do-not-save", ""),
+            "Bunu kaydetme—lütfen.": ("do-not-save", ""),
+            "—Bunu kaydetme.": ("do-not-save", ""),
             "Bunu kaydetme, lütfen bunu ayrıca açıkla.": (
                 "do-not-save",
                 "Bunu kaydetme, lütfen bunu ayrıca açıkla.",

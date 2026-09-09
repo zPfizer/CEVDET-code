@@ -52,7 +52,7 @@ PERSONAL_CREDENTIAL = re.compile(
     r"(?:\s*[:=]\s*|\s+)(?:şu\s+|bu\s+)?\S[^\r\n]*"
 )
 CONTROL_TRAILING = re.compile(r"[\s.!?]+\Z")
-CONTROL_SEPARATOR = re.compile(r"[\s.,:;!?…\u2012\u2013\u2014]+")
+CONTROL_SEPARATOR = re.compile(r"[\s.,:;!?…\u2012\u2013\u2014\-]+")
 FORGET_WITH_TARGET = re.compile(
     r"(?is)^\s*(?:şunu|bu\s+bilgiyi)?\s*unut\s*[:：]\s*(.+?)\s*[.!?]*\s*$"
 )
@@ -370,10 +370,9 @@ def memory_directive(text: str) -> MemoryDirective:
         return MemoryDirective("what-known")
     if re.search(r'\b' + DO_NOT_SAVE + r'\b', folded):
         standalone_text = CONTROL_SEPARATOR.sub(" ", folded).strip()
-        standalone = re.fullmatch(
-            STANDALONE_DO_NOT_SAVE,
-            standalone_text,
-        )
+        standalone = None
+        if QUOTED_CONTENT.search(text) is None:
+            standalone = re.fullmatch(STANDALONE_DO_NOT_SAVE, standalone_text)
         return MemoryDirective("do-not-save", "" if standalone else raw)
     if re.search(r"\b(?:unut(?:ur\s+musun)?|hafızandan\s+(?:çıkar|sil)|hatırlamanı\s+istemiyorum)\b", folded):
         match = FORGET_WITH_TARGET.match(raw) or FORGET_SUFFIX.match(raw)

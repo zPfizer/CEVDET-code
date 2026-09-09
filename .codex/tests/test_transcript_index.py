@@ -140,7 +140,7 @@ class TranscriptIndexTests(unittest.TestCase):
             )
             self._index(state, "session", source)
             with source.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps({"role": "user", "content": "Bunu kaydetme! Lütfen."}) + "\n")
+                handle.write(json.dumps({"role": "user", "content": "Bunu kaydetme - lütfen."}) + "\n")
                 handle.write(json.dumps({"role": "user", "content": "new"}) + "\n")
             index = self._index(state, "session", source)
 
@@ -153,7 +153,7 @@ class TranscriptIndexTests(unittest.TestCase):
             root = Path(temporary)
             state = root / ".state"
             source = root / "rollout.jsonl"
-            courtesy = "Bunu kaydetme! Lütfen."
+            courtesy = "Bunu kaydetme - lütfen."
             source.write_text(
                 "\n".join(
                     json.dumps({"role": role, "content": text})
