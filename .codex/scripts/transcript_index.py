@@ -115,10 +115,18 @@ class TranscriptIndex:
     def chunks(self) -> tuple[ChunkRef, ...]:
         return self._chunks
 
-    def coverage_digest(self, count: int) -> str:
+    def coverage_digest(self, count: int, *, policy_version: str | None = None) -> str:
         if not isinstance(count, int) or isinstance(count, bool) or not 0 <= count < len(self._coverage_chain):
             raise ValueError("transcript-index-coverage-invalid")
-        return self._coverage_chain[count].hex()
+        if policy_version is None or policy_version == self.state["policy_version"]:
+            return self._coverage_chain[count].hex()
+        state = dict(self.state)
+        state["policy_version"] = policy_version
+        digest = _coverage_seed(state)
+        for chunk in self._chunks[:count]:
+            row = self._rows[chunk.row_index]
+            digest = hashlib.sha256(digest + _coverage_token(row, chunk)).digest()
+        return digest.hex()
 
     def previous_retained_row(self, row_index: int) -> int | None:
         if not isinstance(row_index, int) or not 0 <= row_index < len(self.rows):

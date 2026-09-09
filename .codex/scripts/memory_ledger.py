@@ -21,7 +21,7 @@ from user_evidence import filter_evidence, USER_LINK, proof_for_link
 
 MAX_EVENT_CHARS = 65_536
 SUPPRESSION_SCHEMA = 1
-PERSISTENT_TURNS_VERSION = "persistent-turns-v1"
+PERSISTENT_TURNS_VERSION = "persistent-turns-v2"
 _COMPANION_SOURCE_ALIASES = {
     '🔮 850-Companion/Sources/Last-Session.md': '🔮 850-Companion/Last-Session.md',
     '🔮 850-Companion/Sources/Journal.md': '🔮 850-Companion/Journal.md',
@@ -54,6 +54,7 @@ PERSONAL_CREDENTIAL = re.compile(
     r"(?:\s*[:=]\s*|\s+)(?:şu\s+|bu\s+)?\S[^\r\n]*"
 )
 CONTROL_TRAILING = re.compile(r"[\s.!?]+\Z")
+CONTROL_SEPARATOR = re.compile(r"[\s.,:;!?…\u2012\u2013\u2014\-]+")
 FORGET_WITH_TARGET = re.compile(
     r"(?is)^\s*(?:şunu|bu\s+bilgiyi)?\s*unut\s*[:：]\s*(.+?)\s*[.!?]*\s*$"
 )
@@ -81,6 +82,10 @@ QUOTED_CONTENT = re.compile(
     r'`[^`\n]*`|"[^"\n]*"|“[^”]*”|‘[^’]*’|«[^»]*»'
 )
 DO_NOT_SAVE = r'(?:(?:bunu|bu bilgiyi|bu ayrıntıyı)\s+)?(?:kaydetme|saklama|hafızana alma|hafızanda tutma|kaydetmeni istemiyorum)'
+STANDALONE_DO_NOT_SAVE = (
+    r'(?:lütfen\s+)?' + DO_NOT_SAVE
+    + r'(?:\s+lütfen)?'
+)
 READ_ONLY_REQUEST = re.compile(
     r"\b(?:salt[ -]?okunur|read[ -]?only|sadece\s+incele|"
     r"hiçbir\s+dosyayı\s+değiştirme|dosyaları\s+değiştirme|"
@@ -355,6 +360,32 @@ def _json_regions(text: str) -> Iterator[tuple[int, int]]:
             yield opening.start(), end
 
 
+_MEMORY_VIEW_IDENTIFIER = re.compile(
+    r'^\.codex/private-memory/views/(?P<digest>[0-9a-f]{64})\.md$'
+)
+
+
+def _resolve_memory_view_source(vault_root: Path, relative: str) -> Path | None:
+    match = _MEMORY_VIEW_IDENTIFIER.fullmatch(relative)
+    if match is None:
+        return None
+    from companion_memory import CANONICAL_RELATIVE, VIEW_NAMES
+    from vault_corpus import COMPANION_ROOT, markdown_paths
+
+    root = vault_root.resolve(strict=True)
+    digest = match.group('digest')
+    for candidate in markdown_paths(root, excluded_root_dirs=frozenset({'tmp'})):
+        candidate_relative = candidate.relative_to(root).as_posix()
+        if _sha256_text(candidate_relative) == digest:
+            return candidate
+    if (root / CANONICAL_RELATIVE).is_file():
+        for name in VIEW_NAMES:
+            candidate_relative = f'{COMPANION_ROOT}/{name}'
+            if _sha256_text(candidate_relative) == digest:
+                return root / candidate_relative
+    return None
+
+
 def sanitize_text(
     text: str,
     *,
@@ -448,6 +479,7 @@ def memory_directive(text: str) -> MemoryDirective:
     raw = text.strip()
     unquoted = _unquoted_request(text)
     folded = unicodedata.normalize("NFKC", unquoted).casefold().replace("i\u0307", "i")
+    raw_folded = unicodedata.normalize("NFKC", raw).casefold().replace("i\u0307", "i")
     if re.search(r'\b(?:bu (?:konuşmada|sohbette|oturumda|sohbet aramızda)|aramızda) kalsın\b', folded):
         return MemoryDirective("session-only")
     if contains_secret(raw):
@@ -455,10 +487,8 @@ def memory_directive(text: str) -> MemoryDirective:
     if re.search(r"\bbenim\s+hakkımda\s+ne\s+biliyorsun\b", folded):
         return MemoryDirective("what-known")
     if re.search(r'\b' + DO_NOT_SAVE + r'\b', folded):
-        standalone = re.fullmatch(
-            r'(?:lütfen\s+)?' + DO_NOT_SAVE,
-            CONTROL_TRAILING.sub("", folded),
-        )
+        standalone_text = CONTROL_SEPARATOR.sub(" ", raw_folded).strip()
+        standalone = re.fullmatch(STANDALONE_DO_NOT_SAVE, standalone_text)
         return MemoryDirective("do-not-save", "" if standalone else raw)
     if re.search(r"\b(?:unut(?:ur\s+musun)?|hafızandan\s+(?:çıkar|sil)|hatırlamanı\s+istemiyorum)\b", folded):
         match = FORGET_WITH_TARGET.match(raw) or FORGET_SUFFIX.match(raw)
@@ -820,7 +850,33 @@ def memory_read(vault_root: Path) -> Iterator[MemoryRead]:
 
 def read_memory_source(vault_root: Path, path: Path) -> str:
     with memory_read(vault_root) as memory:
-        _relative, text = memory.read_source(path)
+        root = vault_root.resolve(strict=True)
+        resolved = path.resolve(strict=False)
+        if not resolved.is_relative_to(root):
+            raise MemorySourceError('memory-source-outside-vault')
+        relative = resolved.relative_to(root).as_posix()
+        if _MEMORY_VIEW_IDENTIFIER.fullmatch(relative):
+            source = _resolve_memory_view_source(root, relative)
+            if source is None:
+                raise MemorySourceError('memory-view-source-unavailable')
+            source_relative = source.relative_to(root).as_posix()
+            if memory.active:
+                from vault_retrieval import _apply_memory_suppressions, build_vault_map
+
+                indexed = build_vault_map(root, write_cache=False)
+                visible = _apply_memory_suppressions(root, indexed, memory)
+                # ponytail: render all visible sources for opaque link targets; if a large Vault makes this costly, use requested-only rendering with opaque alias mapping.
+                sources = [(entry.path, entry.title) for entry in visible]
+                if source_relative not in {relative for relative, _title in sources}:
+                    sources.insert(0, (source_relative, PurePosixPath(source_relative).stem))
+                rendered, _paths = memory.render_views(
+                    sources,
+                )
+                text = rendered.get(source_relative)
+            else:
+                _relative, text = memory.read_source(source)
+        else:
+            _relative, text = memory.read_source(path)
         return text or ''
 
 
