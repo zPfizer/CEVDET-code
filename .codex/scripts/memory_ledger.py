@@ -157,7 +157,7 @@ BARE_WRITE_QUESTION = re.compile(
 
 NON_COMMITTAL_WRITE = re.compile(
     r"\b(?:eğer|şayet|uygunsa|mümkünse|istersen(?:iz)?|gerekirse|"
-    r"olursa|belki|sanırım)\b"
+    r"olursa|belki|san[ıi]r[ıi]m|sak[ıi]n|asla)\b"
 )
 CONDITIONAL_WRITE = re.compile(
     r"\b\w+(?:(?:[ıiuü]r|[ae]r|[uü]r|acak|ecek|iyor|ıyor|uyor|üyor|"

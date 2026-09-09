@@ -319,6 +319,10 @@ class ConversationContinuityTests(unittest.TestCase):
             'Onaylamadan düzeltme; sadece açıklama yap.',
             'Hangi dosyayı düzeltebilir misin?',
             'Hangi dosyayı düzelt.',
+            'Sakın dosyayı düzelt.',
+            'Asla dosyadaki hatayı düzelt.',
+            'SAKIN dosyayı düzelt.',
+            'SANIRIM dosyayı düzelt.',
         ):
             with self.subTest(prompt=prompt):
                 self._check_write_prompt_keeps_read_only_scope(prompt)
