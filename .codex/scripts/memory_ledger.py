@@ -130,6 +130,7 @@ _QUOTED_PATH = (
     r'''(?:"[^"\r\n]*\.[A-Za-z0-9_-]+"|'''
     r'''\'[^\'\r\n]*\.[A-Za-z0-9_-]+\')'''
 )
+_WRITE_FILENAME = r"[\w.-]+\.[A-Za-z0-9_-]+"
 _WRITE_TARGET = (
     rf"(?:bunu|bunları|şunu|şunları|onu|onları|"
     rf"(?:bu|şu|o)\s+{_WRITE_TARGET_OBJECT}|"
@@ -137,13 +138,13 @@ _WRITE_TARGET = (
     rf"{_WRITE_TARGET_OBJECT}|"
     rf"(?:[a-z]:[\\/]|\.{{1,2}}[\\/]|[\w.-]+[\\/])[\w./\\-]+"
     rf"(?:\s+{_WRITE_TARGET_OBJECT})?|"
-    rf"[\w.-]+\.[A-Za-z0-9_-]+(?:\s+{_WRITE_TARGET_OBJECT})?|"
+    rf"{_WRITE_FILENAME}(?:\s+{_WRITE_TARGET_OBJECT})?|"
     rf"{_QUOTED_PATH}(?:\s+{_WRITE_TARGET_OBJECT})?)"
 )
 _TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen)\s+)*"
 TARGETED_WRITE_COMMAND = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+{_WRITE_MUTATION}"
-    rf"(?:\s+lütfen)?\s*[.!]*\s*$"
+    rf"(?:\s*,?\s+lütfen)?\s*[.!]*\s*$"
 )
 TARGETED_WRITE_QUESTION = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+"
@@ -177,6 +178,7 @@ _NAMED_TARGET = re.compile(
     rf"modül(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}|"
     rf"{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER})$"
 )
+_NAMED_FILENAME = re.compile(_WRITE_FILENAME)
 
 
 @dataclass(frozen=True)
@@ -201,10 +203,10 @@ def _targeted_write_matches(pattern: re.Pattern[str], folded: str) -> bool:
     if named_target is None:
         return True
     name = named_target.group("name")
-    # A dot-qualified name is target data; only the bare named target can be
-    # the one-word conditional form (for example, "onaylıysa dosyayı").
+    # A dot-qualified name is target data only when it matches the filename
+    # grammar; punctuation such as an ellipsis remains prose.
     if "." in name:
-        return True
+        return _NAMED_FILENAME.fullmatch(name) is not None
     return not (
         NON_COMMITTAL_WRITE.fullmatch(name) is not None
         or CONDITIONAL_WRITE.fullmatch(name) is not None
