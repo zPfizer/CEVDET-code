@@ -48,7 +48,7 @@ CREDENTIAL = re.compile(
     r'''(?P=key_quote)\s*[:=]\s*)'''
     r'''(?P<value>[{\[]|"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s\r\n]+)'''
 )
-TOKEN_PREFIX = re.compile(r"\b(?:sk|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
+TOKEN_PREFIX = re.compile(r"\b(?:sk(?=[-_])|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
 PERSONAL_CREDENTIAL = re.compile(
     r"(?i)\b(?:api\s+anahtarım|parolam|şifrem|tokenım)\b"
     r"(?:\s*[:=]\s*|\s+)(?:şu\s+|bu\s+)?\S[^\r\n]*"

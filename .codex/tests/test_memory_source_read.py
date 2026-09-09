@@ -11,6 +11,39 @@ import vault_retrieval as retrieval
 
 
 class MemorySourceReadTests(unittest.TestCase):
+    def test_source_read_preserves_skewness_link_and_dedupe_key_while_redacting_token(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            source = vault / 'note.md'
+            original = (
+                '---\n'
+                'title: Rolling Alpha\n'
+                'dedupe_key: rolling-skewness-momentum-liste-katmani\n'
+                '---\n'
+                'Kaynak: [[knowledge/concepts/skewness-momentum-liste-katmani|'
+                'Rolling Skewness Momentum Liste Katmanı]]\n'
+                'Gerçek token örneği: sk-ABCDEFGHIJKLMNOPQRSTUV\n'
+            )
+            source.write_text(original, encoding='utf-8')
+
+            with ledger.memory_read(vault) as memory:
+                _relative, text = memory.read_source(source)
+
+            self.assertIn('dedupe_key: rolling-skewness-momentum-liste-katmani', text)
+            self.assertIn(
+                '[[knowledge/concepts/skewness-momentum-liste-katmani|'
+                'Rolling Skewness Momentum Liste Katmanı]]',
+                text,
+            )
+            self.assertIn('Gerçek token örneği: <REDACTED>', text)
+            self.assertNotIn('sk-ABCDEFGHIJKLMNOPQRSTUV', text)
+            self.assertEqual(source.read_text(encoding='utf-8'), original)
+            self.assertFalse(ledger.contains_secret('skewness-momentum-liste-katmani'))
+            self.assertEqual(
+                ledger.memory_directive('skewness-momentum-liste-katmani').kind,
+                'ordinary',
+            )
+
     def test_read_source_sanitizes_previous_summary_retrieval_and_cache_without_editing_sources(self):
         marker = 'BUG006_LEAK_SENTINEL'
         session = 'probe-session'

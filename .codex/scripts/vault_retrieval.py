@@ -34,7 +34,7 @@ MAX_CACHE_BYTES = 16 * 1024 * 1024
 MAX_CANDIDATES = 3
 MAX_CONTEXT_CHARS = 2_600
 MAX_EXCERPT_CHARS = 460
-CACHE_VERSION = 16
+CACHE_VERSION = 17
 CACHE_RELATIVE_PATH = Path(".codex/scripts/.state/vault-retrieval-cache.json")
 SOURCE_READ_ATTEMPTS = 3
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
@@ -999,9 +999,6 @@ def build_vault_map(
                     signature_matches = (
                         cached.get('dev') == file_stat.st_dev
                         and cached.get('ino') == file_stat.st_ino
-                        and cached.get('size') == file_stat.st_size
-                        and cached.get('mtime_ns') == file_stat.st_mtime_ns
-                        and cached.get('ctime_ns') == file_stat.st_ctime_ns
                         and isinstance(content_sha256, str)
                         and cached.get('content_sha256') == content_sha256
                     )
@@ -1050,9 +1047,6 @@ def build_vault_map(
                     next_files[relative] = {
                         'dev': post_stat.st_dev,
                         'ino': post_stat.st_ino,
-                        'size': post_stat.st_size,
-                        'mtime_ns': post_stat.st_mtime_ns,
-                        'ctime_ns': post_stat.st_ctime_ns,
                         'content_sha256': content_sha256,
                         'source_sha256': source_hash,
                         'entry': _entry_payload(entry),

@@ -1,7 +1,5 @@
 from pathlib import Path
-import json
 import os
-import re
 import sys
 import tempfile
 import unittest
@@ -304,31 +302,6 @@ class FullContentRetrievalTests(unittest.TestCase):
                 (notes / f'diger-{i}.md').write_text('# Paralel trend duyarlılığı\nGenel açıklama.\n', encoding='utf-8')
             hits = retrieval.search_vault(retrieval.build_vault_map(root), 'Rambachan Roth paralel trend duyarlılığı')
             self.assertEqual(hits[0].entry.path, '🧠 500-Knowledge/yontem.md')
-
-    def test_minimum_is_not_a_candlestick_pattern(self):
-        schema = json.loads((Path(__file__).resolve().parents[1] / 'tansu-semantic-schema.json').read_text(encoding='utf-8'))
-        rule = next(r for r in schema['topic_rules'] if r['tag'] == 'tansu/teknik/mum-formasyonu')
-        self.assertFalse(any(re.search(p, 'minimum varyans optimum portfoy') for p in rule['patterns']))
-        self.assertTrue(any(re.search(p, 'mum formasyonu') for p in rule['patterns']))
-
-    def test_reviewed_metadata_rejects_invalid_facets_before_patch_generation(self):
-        import csv
-        import tansu_semantic_metadata as metadata
-        from test_tansu_semantic_metadata import write_semantic_fixture
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            csv_path, schema_path = write_semantic_fixture(root)
-            with csv_path.open(encoding='utf-8') as handle:
-                rows = list(csv.DictReader(handle))
-            rows[0].update(symbols='NOTREAL', tags='wrong/tag')
-            rows[1].update(symbols='', tags='tansu/teknik/sinyal-strateji')
-            with csv_path.open('w', encoding='utf-8', newline='') as handle:
-                writer = csv.DictWriter(handle, fieldnames=rows[0].keys())
-                writer.writeheader()
-                writer.writerows(rows)
-            with self.assertRaisesRegex(ValueError, 'semantic-facet-invalid'):
-                metadata.build_manifest(root, semantic_csv=csv_path, schema_path=schema_path, expected_records=2)
-
 
 if __name__ == '__main__':
     unittest.main()

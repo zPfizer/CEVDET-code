@@ -119,6 +119,21 @@ class KnowledgeSchemaPathTests(TestCase):
         self.assertEqual((report.concepts, report.connections, report.index_rows), (2, 1, 2))
         self.assertEqual(after, before)
 
+    def test_escaped_connection_links_are_not_canonical_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_control_tree(root)
+            connection = root / "knowledge" / "connections" / "ikinci--ornek.md"
+            text = connection.read_text(encoding="utf-8").replace("[[", "\\[[")
+            connection.write_text(text, encoding="utf-8")
+
+            issues = knowledge_schema.validate_knowledge_tree(root).issues
+
+        self.assertIn(
+            "knowledge/connections/ikinci--ornek.md:concept-links",
+            issues,
+        )
+
     def test_linked_concept_is_rejected_before_external_read(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

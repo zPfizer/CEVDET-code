@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -96,6 +96,19 @@ class KnowledgeSchemaReport:
 
 
 @dataclass(frozen=True)
+class _Claim:
+    state: str
+    kind: str
+    freshness: str
+    claim_date: str
+    source: str
+    text: str
+    normalized: str
+    raw_line: str
+    user_anchor: str | None
+
+
+@dataclass(frozen=True)
 class StructuralRule:
     """One document-shape rule, stated once for the writer and the validator.
 
@@ -151,10 +164,27 @@ def wikilink_target(inner: str) -> str:
     return target.split("#", 1)[0].strip().replace("\\", "/")
 
 
+def _is_escaped(text: str, index: int) -> bool:
+    slashes = 0
+    index -= 1
+    while index >= 0 and text[index] == "\\":
+        slashes += 1
+        index -= 1
+    return slashes % 2 == 1
+
+
+def _wikilinks(text: str) -> Iterator[re.Match[str]]:
+    return (
+        match
+        for match in WIKILINK.finditer(text)
+        if not _is_escaped(text, match.start())
+    )
+
+
 def _link_slugs(text: str) -> set[str]:
     return {
         target
-        for match in WIKILINK.finditer(text)
+        for match in _wikilinks(text)
         if (target := wikilink_target(match.group(1)))
     }
 
@@ -237,41 +267,49 @@ def _normalized_claim(text: str) -> str:
     return normalized.casefold().replace("i\u0307", "i")
 
 
-def _claims(text: str) -> tuple[list[tuple[str, ...]], bool]:
+def _parse_claim(row: str) -> _Claim | None:
+    match = CLAIM_ROW.fullmatch(row)
+    if match is None:
+        return None
+    state, kind, freshness, claim_date, source_date, claim = match.groups()
+    link = USER_LINK.search(row)
+    return _Claim(
+        state=state,
+        kind=kind,
+        freshness=freshness,
+        claim_date=claim_date,
+        source=f"{source_date}.md",
+        text=claim,
+        normalized=_normalized_claim(claim),
+        raw_line=row,
+        user_anchor=link.group(2) if link else None,
+    )
+
+
+def _claims(text: str) -> tuple[list[_Claim], bool]:
     section = _heading_section(text, CLAIM_HEADING)
     rows = [line for line in section.splitlines() if line.strip()]
-    claims: list[tuple[str, ...]] = []
+    claims: list[_Claim] = []
     malformed = not rows
     for row in rows:
-        match = CLAIM_ROW.fullmatch(row)
-        if match is None:
+        claim = _parse_claim(row)
+        if claim is None:
             malformed = True
             continue
-        state, kind, freshness, claim_date, source_date, claim = match.groups()
-        claims.append(
-            (
-                state,
-                kind,
-                freshness,
-                claim_date,
-                f"{source_date}.md",
-                claim,
-                _normalized_claim(claim),
-            )
-        )
+        claims.append(claim)
     return claims, malformed
 
 
-def _claim_identity(claim: tuple[str, ...]) -> tuple[str, ...]:
-    return claim[1], claim[3], claim[4], claim[6]
+def _claim_identity(claim: _Claim) -> tuple[str, ...]:
+    return claim.kind, claim.claim_date, claim.source, claim.normalized
 
 
-def _claim_key(claim: tuple[str, ...]) -> tuple[str, ...]:
-    return claim[1], claim[6]
+def _claim_key(claim: _Claim) -> tuple[str, ...]:
+    return claim.kind, claim.normalized
 
 
-def _claim_sort_key(claim: tuple[str, ...]) -> tuple[str, ...]:
-    return claim[3], claim[4], claim[1], claim[6]
+def _claim_sort_key(claim: _Claim) -> tuple[str, ...]:
+    return claim.claim_date, claim.source, claim.kind, claim.normalized
 
 
 def normalize_claim_order(text: str) -> str:
@@ -284,11 +322,11 @@ def normalize_claim_order(text: str) -> str:
     section = _heading_section(text, CLAIM_HEADING)
     lines = section.splitlines(keepends=True)
     positions = [index for index, line in enumerate(lines) if line.strip()]
-    rows = [lines[index].rstrip('\r\n') for index in positions]
-    ordered = sorted(zip(claims, rows), key=lambda item: _claim_sort_key(item[0]))
-    for index, (_, row) in zip(positions, ordered):
-        ending = lines[index][len(lines[index].rstrip('\r\n')):]
-        lines[index] = row + ending
+    ordered = sorted(claims, key=_claim_sort_key)
+    for index, claim in zip(positions, ordered):
+        line = lines[index]
+        ending = line[len(line.splitlines()[0]):]
+        lines[index] = claim.raw_line + ending
     heading = _heading_matches(text, CLAIM_HEADING)
     if not heading:
         return text
@@ -330,7 +368,7 @@ def source_link_details(text: str) -> str:
     claims, _ = _claims(text)
     return (f'missing-footer={sorted(declared - linked)}; '
             f'extra-footer={sorted(linked - declared)}; '
-            f'undeclared-claims={sorted({claim[4] for claim in claims} - declared)}')
+            f'undeclared-claims={sorted({claim.source for claim in claims} - declared)}')
 
 
 def _source_links(text: str) -> set[str]:
@@ -369,7 +407,7 @@ def _concept_related_ok(path: Path, text: str) -> bool:
     if not _ordered(text, CONCEPT_HEADINGS):
         return True  # the headings rule already owns this failure
     related = _section(text, CONCEPT_HEADINGS[2], CONCEPT_HEADINGS[3])
-    return len(WIKILINK.findall(related)) >= RELATED_LINKS_MIN
+    return sum(1 for _ in _wikilinks(related)) >= RELATED_LINKS_MIN
 
 
 def _connection_path_ok(path: Path, text: str) -> bool:
@@ -655,7 +693,10 @@ def _validate_derived_concept(
     text: str,
     previous_text: str | None,
     issues: list[str],
-) -> list[tuple[str, ...]]:
+    *,
+    parsed: tuple[list[_Claim], bool] | None = None,
+    parsed_previous: tuple[list[_Claim], bool] | None = None,
+) -> list[_Claim]:
     frontmatter = parse_frontmatter(text)
     if frontmatter.get("schema") != DERIVED_SCHEMA:
         issues.append(f"{_issue_path(path)}:derived-schema")
@@ -665,7 +706,7 @@ def _validate_derived_concept(
         return []  # the legacy field validator owns this failure
     if sources != sorted(set(sources)):
         issues.append(f"{_issue_path(path)}:source-order")
-    claims, malformed = _claims(text)
+    claims, malformed = parsed if parsed is not None else _claims(text)
     if malformed:
         issues.append(f"{_issue_path(path)}:claims")
     identities = [_claim_identity(claim) for claim in claims]
@@ -674,25 +715,29 @@ def _validate_derived_concept(
         issues.append(f"{_issue_path(path)}:claim-duplicate")
     if claims != sorted(claims, key=_claim_sort_key):
         issues.append(f"{_issue_path(path)}:claim-order")
-    claim_sources = {claim[4] for claim in claims}
+    claim_sources = {claim.source for claim in claims}
     source_set = set(sources)
     if not claim_sources.issubset(source_set) or _source_links(
         _heading_section(text, CONCEPT_HEADINGS[3])
     ) != source_set:
         issues.append(f"{_issue_path(path)}:source-links")
     updated = frontmatter.get("updated")
-    dated = [claim[3] for claim in claims] + [source.removesuffix(".md") for source in sources]
+    dated = [claim.claim_date for claim in claims] + [source.removesuffix(".md") for source in sources]
     if isinstance(updated, str) and dated and updated < max(dated):
         issues.append(f"{_issue_path(path)}:updated-before-claim")
-    current_dates = [claim[3] for claim in claims if claim[0] == "gecerli"]
+    current_dates = [claim.claim_date for claim in claims if claim.state == "gecerli"]
     if any(
-        claim[0] == "gecmis"
-        and not any(current_date >= claim[3] for current_date in current_dates)
+        claim.state == "gecmis"
+        and not any(current_date >= claim.claim_date for current_date in current_dates)
         for claim in claims
     ):
         issues.append(f"{_issue_path(path)}:claim-history")
     if previous_text is not None:
-        previous_claims, _malformed = _claims(previous_text)
+        previous_claims, _malformed = (
+            parsed_previous
+            if parsed_previous is not None
+            else _claims(previous_text)
+        )
         if not {_claim_identity(claim) for claim in previous_claims}.issubset(set(identities)):
             issues.append(f"{_issue_path(path)}:claim-history")
         previous_sources = parse_frontmatter(previous_text).get("sources")
@@ -786,42 +831,35 @@ def _validate_knowledge_tree(
     for path in ordered_concepts:
         relative = path.relative_to(root).as_posix()
         text = path.read_text(encoding="utf-8")
+        parsed_claims = _claims(text)
+        previous_text = previous.get(relative)
+        parsed_previous = _claims(previous_text) if previous_text is not None else None
         if parse_frontmatter(text).get("schema") == DERIVED_SCHEMA or relative in changed:
             claims_for_path = _validate_derived_concept(
-                path, text, previous.get(relative), issues
+                path,
+                text,
+                previous_text,
+                issues,
+                parsed=parsed_claims,
+                parsed_previous=parsed_previous,
             )
         else:
-            claims_for_path, _malformed = _claims(text)
+            claims_for_path = parsed_claims[0]
         if relative in changed:
-            prior_rows: dict[tuple[str, ...], tuple[str, str, str | None]] = {}
-            for prior_line in _heading_section(previous.get(relative, ''), CLAIM_HEADING).splitlines():
-                prior_match = CLAIM_ROW.fullmatch(prior_line)
-                if prior_match:
-                    link = USER_LINK.search(prior_line)
-                    prior_state, prior_kind, prior_freshness, prior_claim_date, prior_source_date, prior_claim = prior_match.groups()
-                    prior_identity = (prior_kind, prior_claim_date, prior_source_date + '.md', _normalized_claim(prior_claim))
-                    prior_rows[prior_identity] = (
-                        prior_state,
-                        prior_freshness,
-                        link.group(2) if link else None,
-                    )
-            for line in _heading_section(text, CLAIM_HEADING).splitlines():
-                parsed = CLAIM_ROW.fullmatch(line)
-                if parsed is None:
+            prior_rows = {
+                _claim_identity(claim): claim
+                for claim in (parsed_previous[0] if parsed_previous is not None else ())
+            }
+            for claim in parsed_claims[0]:
+                if claim.kind != 'kullanici-dusuncesi':
                     continue
-                state, kind, freshness, claim_date, source_date, claim = parsed.groups()
-                if kind != 'kullanici-dusuncesi':
-                    continue
-                claim_identity = (kind, claim_date, source_date + '.md', _normalized_claim(claim))
-                previous_claim = prior_rows.get(claim_identity)
-                link = USER_LINK.search(line)
-                anchor = link.group(2) if link else None
+                previous_claim = prior_rows.get(_claim_identity(claim))
                 promoting = previous_claim is not None and (
-                    (previous_claim[0] != 'gecerli' and state == 'gecerli') or
-                    (previous_claim[1] != 'guncel' and freshness == 'guncel'))
-                if previous_claim is not None and previous_claim[2] == anchor and not promoting:
+                    (previous_claim.state != 'gecerli' and claim.state == 'gecerli') or
+                    (previous_claim.freshness != 'guncel' and claim.freshness == 'guncel'))
+                if previous_claim is not None and previous_claim.user_anchor == claim.user_anchor and not promoting:
                     continue  # Carry an unchanged source identity; read-time checks still validate it.
-                if (promoting and previous_claim is not None and previous_claim[2] == anchor) or proof_for_link(root, line) is None:
+                if (promoting and previous_claim is not None and previous_claim.user_anchor == claim.user_anchor) or proof_for_link(root, claim.raw_line) is None:
                     issues.append(f'{_issue_path(path)}:user-evidence')
         for claim in claims_for_path:
             identity = _claim_key(claim)

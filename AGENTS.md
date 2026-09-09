@@ -38,6 +38,20 @@ Branch -> yerel testler -> özel GitHub'a push -> PR -> kullanıcı onayı -> me
 
 Her bağımsız kod işi güncel `origin/main` üzerinden ayrı `codex/` branch ve worktree kullanır; ilk aktarım merge edilene kadar `docs/agents/pr-workflow.md` içindeki başlangıç sınırı geçerlidir. Aynı worktree'de eşzamanlı görev çalıştırma. PR şablonunu doldur, son commit'in CI ve inceleme sonuçlarını doğrula; yalnız kullanıcı onayıyla merge et. Tam akış: `docs/agents/pr-workflow.md`.
 
+## Code Review Graph
+
+Tek bir dosya veya sembolün yerini bulurken `rg` ve ilgili kaynağı kullan. Ortak bileşende davranış değişikliği, çok dosyalı hata/refactor, mimari keşif ve PR etki incelemesinde grafı aktif kullan. Sembolün adını bilmek, değişikliğin etkisini bildiğin anlamına gelmez; basit metin işlerine zorunlu graf çağrısı ekleme.
+
+1. **Kod keşfi:** Graf gerektiğinde gerçek görev açıklamasıyla `get_minimal_context_tool(task=...)` çağır; bu özet başlangıç sembolünü aramanın yerine geçmez. Bilinmeyen başlangıç için `semantic_search_nodes_tool`, mimari soru için `get_architecture_overview_tool` kullan; ardından ilgili kaynağı oku. Belirsiz sembolde tam `qualified_name` kullan.
+2. **Hata araştırması:** Belirtiyi kaynakta daralt; `callers_of` / `callees_of`, birden fazla bağlantı adımında `traverse_graph_tool` ve gerekiyorsa tek ilgili akışla zinciri izle. Kök nedeni kaynakta doğrula; düzeltmeyi ilgili testle sına.
+3. **Değişiklik / PR incelemesi:** Ortak bileşeni değiştirirken `get_impact_radius_tool` ile çağıranları, bağımlıları ve testleri araştır. Yerel değişiklikte tabanı `HEAD`, PR'da `git merge-base origin/main HEAD` sonucu olarak seç. Aynı tabanı bağlam ve `detect_changes_tool` çağrılarına geçir; kritik çağıranları, etkilenen akışları ve `tests_for` sonuçlarını kaynakla kontrol et.
+
+Her çağrıda aktif worktree'nin mutlak `repo_root` yolunu ver. Graf kullanılacak yetkili kod uygulamasında başlangıçta ve değişiklik grubu sonrasında grafı güncelle; commit uyuşmazlığı sürerse tam oluştur. Salt okunur görevde grafı değiştirme; eksik veya eskiyse kaynak aramasına dön ve sınırı belirt.
+
+Destekleyen araçlarda `detail_level="minimal"` ile başla. `results_omitted`, `truncated` ve toplam sayıları kontrol et; eksik gereken ilişkileri hedefli kaynak aramasıyla veya sınırlı genişletmeyle tamamla. `minimal` modunda `max_results` artırmak bütün sonuçları göstermeyebilir. Kaynak ve gerçek testler otoritedir; grafın boş sonucu yokluk, silme güvenliği veya test kapsamı kanıtı değildir. Çıkarımsal/belirsiz kenarları ve test sınıflarına verilen test-boşluğu etiketlerini doğrulanmış bulgu sayma.
+
+Faydayı aynı commit ve görevde normal `rg` + seçili kaynak okumaya karşı ölç; kaynak doğrulamasını, genişletmeleri ve graf bakım süresini hesaba kat. `chars/4` veya bütün dosyayı okumaya karşı verilen tasarruf, gerçek model tokenı ya da abonelik kazancı değildir. Ek araç filtreleri, Jedi ve embedding yalnız ölçülmüş eksikliği gideriyorsa eklenir; wiki ve ayrı hafıza döngüsü varsayılan değildir.
+
 ## Code Review Rules
 
 - Bu deponun istenen teslim ve doğrulama ortamı Windows/Python 3.14'tür. POSIX-only bulguları ayrı platform sınırı olarak raporla; Windows etkisi olmayan POSIX testlerini bu teslimin merge koşuluna dönüştürme. Genel gizlilik ve veri kaybı bulgularını platform bahanesiyle dışlama.

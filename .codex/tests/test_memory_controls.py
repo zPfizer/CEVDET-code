@@ -187,12 +187,22 @@ class MemoryDirectiveTests(unittest.TestCase):
 
 class TranscriptPrivacyTests(unittest.TestCase):
     def test_sanitizer_redacts_credentials_before_persistence(self) -> None:
+        tokens = (
+            "sk-ABCDEFGHIJKLMNOPQRSTUV",
+            "sk_ABCDEFGHIJKLMNOPQRSTUV",
+            "ghp_ABCDEFGHIJKLMNOPQRSTUV",
+            "github_pat_ABCDEFGHIJKLMNOPQRSTUV",
+            "AKIAABCDEFGHIJKLMNOPQRSTUV",
+        )
         sanitized, redactions = memory_ledger.sanitize_text(
-            "Authorization: Bearer hidden-token\napi_key=sk-ABCDEFGHIJKLMNOPQRSTUV"
+            "Authorization: Bearer hidden-token\n"
+            "api_key=sk-ABCDEFGHIJKLMNOPQRSTUV\n"
+            + "\n".join(f"sample {token}" for token in tokens)
         )
 
         self.assertNotIn("hidden-token", sanitized)
-        self.assertNotIn("sk-ABCDEFGHIJKLMNOPQRSTUV", sanitized)
+        for token in tokens:
+            self.assertNotIn(token, sanitized)
         self.assertIn("authorization", redactions)
         self.assertIn("credential", redactions)
 

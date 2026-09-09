@@ -30,6 +30,7 @@ from compile_state import (
 )
 from file_lock import LockUnavailable, locked
 from memory_ledger import (
+    contains_secret,
     contains_suppressed_unit,
     filter_suppressed_text,
     load_suppressed_hashes,
@@ -152,6 +153,7 @@ def _iso_now() -> str:
 
 def write_health(state_dir: Path, error: str, warning: bool = False) -> None:
     """Record the latest compiler problem and preserve warning history."""
+    error, _ = sanitize_text(error, max_chars=None)
     try:
         write_component_health(
             state_dir,
@@ -189,6 +191,10 @@ def _git(
 
 def _commit_machine_snapshot(vault_root: Path, label: str) -> tuple[str, str]:
     """Use Git's index lock and ref CAS; never borrow the user's staging area."""
+    try:
+        _check_secret_path(label)
+    except PolicyError:
+        return "deferred", "source-path-contains-secret"
     # Plumbing must not silently bypass a repository's porcelain commit policy.
     signing = _git(vault_root, "config", "--bool", "--get", "commit.gpgsign")
     hooks = _git(vault_root, "rev-parse", "--git-path", "hooks")
@@ -245,8 +251,30 @@ def _commit_machine_snapshot(vault_root: Path, label: str) -> tuple[str, str]:
             paths = [path for path in changed.stdout.split("\0") if path]
             if changed.returncode or not paths:
                 return "deferred", "machine-stage-empty-or-unreadable"
+            try:
+                for path in paths:
+                    _check_secret_path(path)
+            except PolicyError:
+                return "deferred", "source-path-contains-secret"
             if any(not path.startswith(("daily/", "knowledge/")) for path in paths):
                 return "deferred", "machine-stage-boundary"
+            snapshot = _git(
+                vault_root,
+                "ls-files",
+                "-z",
+                "--",
+                "daily",
+                "knowledge",
+                index_file=private_index,
+            )
+            snapshot_paths = [path for path in snapshot.stdout.split("\0") if path]
+            if snapshot.returncode:
+                return "deferred", "machine-stage-snapshot-unreadable"
+            try:
+                for path in snapshot_paths:
+                    _check_secret_path(path)
+            except PolicyError:
+                return "deferred", "source-path-contains-secret"
             tree = _git(vault_root, "write-tree", index_file=private_index)
             if tree.returncode:
                 return "deferred", "machine-tree-failed"
@@ -346,6 +374,7 @@ def build_compile_prompt(
     timestamp: str,
     canonical_tags: Sequence[str],
 ) -> str:
+    _check_secret_path(daily_name)
     return COMPILE_PROMPT.format(
         schema_rules=schema_rules_text(),
         concept_fields=", ".join(CONCEPT_FIELDS),
@@ -358,7 +387,33 @@ def build_compile_prompt(
     )
 
 
+def _check_secret_path(relative: str) -> None:
+    sanitized, _ = sanitize_text(relative, max_chars=None)
+    if contains_secret(relative) or sanitized != relative:
+        raise PolicyError("source-path-contains-secret")
+
+
+def _validate_compile_state_paths(state: CompileState) -> None:
+    paths = [*state.ingested, state.cursor]
+    paths.extend(
+        run.get("daily_file")
+        for run in state.runs
+        if isinstance(run, dict) and isinstance(run.get("daily_file"), str)
+    )
+    try:
+        for path in paths:
+            _check_secret_path(path)
+    except PolicyError as exc:
+        raise PolicyError("compile-state-path-contains-secret") from exc
+
+
 def _check_source(path: Path, vault_root: Path, directory: bool) -> None:
+    relative = path.name
+    try:
+        relative = path.relative_to(vault_root).as_posix()
+    except ValueError:
+        pass
+    _check_secret_path(relative)
     source_stat = path.lstat()
     if stat.S_ISLNK(source_stat.st_mode):
         raise PolicyError(f"source-symlink:{path.relative_to(vault_root)}")
@@ -630,6 +685,8 @@ def _manifest(root: Path) -> dict[str, tuple[str, str]]:
         current_path = Path(current)
         for name in directory_names:
             path = current_path / name
+            relative = path.relative_to(root).as_posix()
+            _check_secret_path(relative)
             path_stat = path.lstat()
             if stat.S_ISLNK(path_stat.st_mode):
                 raise PolicyError(f"staging-symlink:{path.name}")
@@ -638,10 +695,11 @@ def _manifest(root: Path) -> dict[str, tuple[str, str]]:
             resolved = path.resolve(strict=True)
             if not _path_within(resolved, root_resolved):
                 raise PolicyError(f"staging-escape:{path.name}")
-            relative = path.relative_to(root).as_posix()
             manifest[relative] = ("dir", "")
         for name in file_names:
             path = current_path / name
+            relative = path.relative_to(root).as_posix()
+            _check_secret_path(relative)
             path_stat = path.lstat()
             if stat.S_ISLNK(path_stat.st_mode):
                 raise PolicyError(f"staging-symlink:{path.name}")
@@ -650,7 +708,6 @@ def _manifest(root: Path) -> dict[str, tuple[str, str]]:
             resolved = path.resolve(strict=True)
             if not _path_within(resolved, root_resolved):
                 raise PolicyError(f"staging-escape:{path.name}")
-            relative = path.relative_to(root).as_posix()
             manifest[relative] = ("file", _sha256(path))
     return manifest
 
@@ -682,6 +739,8 @@ def _validate_manifest_diff(
     before: dict[str, tuple[str, str]],
     after: dict[str, tuple[str, str]],
 ) -> list[str]:
+    for relative in set(before) | set(after):
+        _check_secret_path(relative)
     deleted = sorted(set(before) - set(after))
     if deleted:
         raise PolicyError(f"deletion:{deleted[0]}")
@@ -711,6 +770,7 @@ def _validate_live_destination(
     relative: str,
     expected_digest: str | None,
 ) -> Path:
+    _check_secret_path(relative)
     if not _is_allowed_output_file(relative):
         raise PolicyError(f"forbidden-promotion:{relative}")
     destination = vault_root / relative
@@ -787,6 +847,7 @@ def _source_snapshot_matches(
 def _publication_source_path(vault_root: Path, relative: object) -> Path:
     if not isinstance(relative, str) or "\\" in relative:
         raise PolicyError("publication-source-invalid")
+    _check_secret_path(relative)
     path = Path(relative)
     if (
         path.parts[:1] != ("daily",)
@@ -805,6 +866,7 @@ def _publication_source_path(vault_root: Path, relative: object) -> Path:
 def _validate_publication_source_relative(relative: object) -> str:
     if not isinstance(relative, str) or "\\" in relative:
         raise PolicyError("publication-source-invalid")
+    _check_secret_path(relative)
     path = Path(relative)
     if (
         path.parts[:1] != ("daily",)
@@ -1005,6 +1067,7 @@ def _promote_changes(
     manifest = _manifest(stage)
     destinations: list[tuple[str, Path, str | None, str]] = []
     for relative in changed_files:
+        _check_secret_path(relative)
         if not _is_allowed_output_file(relative):
             raise PolicyError(f"forbidden-promotion:{relative}")
         if relative not in live_baseline:
@@ -1089,6 +1152,7 @@ def _run_codex(prompt: str, stage: Path) -> str | None:
     prompt_path = stage / ".__alf4_compile_prompt.md"
     cleanup_unverified = False
     try:
+        _manifest(stage)
         prompt_path.write_text(prompt, encoding="utf-8")
         _, reason = codex_runner.run_exec(
             "Read .__alf4_compile_prompt.md. Follow its instructions."
@@ -1292,6 +1356,7 @@ def _validate_publication_stage(
         after_digest = target.get("after_sha256")
         if not isinstance(relative, str) or not isinstance(after_digest, str):
             raise PolicyError("publication-journal-invalid")
+        _check_secret_path(relative)
         if manifest.get(relative) != ("file", after_digest):
             raise PolicyError(f"publication-stage-drift:{relative}")
     return manifest
@@ -1472,10 +1537,11 @@ def rebuild_knowledge(
         )
         inputs: list[tuple[Path, str, str]] = []
         for source, digest in changed_dailies(vault, CompileState()):
+            _check_secret_path(source.name)
             try:
                 day_date = dt.date.fromisoformat(source.stem)
             except ValueError as exc:
-                raise PolicyError(f"rebuild-daily-name-invalid:{source.name}") from exc
+                raise PolicyError("rebuild-daily-name-invalid") from exc
             destination = build / "daily" / source.name
             _copy_source_file(source, destination, vault)
             inputs.append((destination, digest, day_date.isoformat()))
@@ -1529,6 +1595,16 @@ def _record_failure(
     *,
     persist_state: bool = True,
 ) -> None:
+    if persist_state:
+        try:
+            _validate_compile_state_paths(state)
+        except PolicyError:
+            persist_state = False
+    raw_daily_name = daily_name
+    daily_name, _ = sanitize_text(daily_name, max_chars=None)
+    if daily_name != raw_daily_name:
+        daily_name = "<redacted-path>"
+    detail, _ = sanitize_text(detail, max_chars=None)
     timestamp = _iso_now()
     state.last_run = timestamp
     state.last_status = f"fail:{reason}"
@@ -1599,6 +1675,21 @@ def _run_locked(
             persist_state=False,
         )
         return True
+    try:
+        _validate_compile_state_paths(state)
+    except PolicyError as exc:
+        if dry_run:
+            return True
+        _record_failure(
+            state_dir,
+            state,
+            "",
+            "compile-state-path-invalid",
+            str(exc),
+            trigger_claim,
+            persist_state=False,
+        )
+        return True
     if not dry_run:
         try:
             recovered = _recover_pending_publication(vault_root, state_dir)
@@ -1649,6 +1740,7 @@ def _run_locked(
     selected = changed[:max_calls]
     if dry_run:
         for daily_path, _digest in selected:
+            _check_secret_path(daily_path.name)
             print(daily_path.name)
         return False
 
@@ -1807,6 +1899,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception as exc:  # Compiler must preserve the hook exit contract.
             try:
                 state = compile_state.load(STATE_DIR)
+                _validate_compile_state_paths(state)
                 persist_state = True
             except (OSError, ValueError):
                 state = CompileState()
