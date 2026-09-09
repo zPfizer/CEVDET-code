@@ -18,6 +18,31 @@ BASELINE = "16d5e2139fb750045bb0a6717d284fd611f7bc96"
 ROOT = Path(sys.argv[1]).resolve()
 OUTPUT = Path(sys.argv[2])
 FILES = [".codex/hooks", ".codex/scripts", ".codex/tests"]
+# Independently source-reviewed goldens for BASELINE, including class parents.
+LOCK_TESTS = {
+    ".codex/tests/test_file_lock.py::LockedContextTests." + name for name in (
+        "test_lock_file_is_the_resource_path_with_lock_suffix",
+        "test_lock_path_argument_is_idempotent",
+        "test_timeout_zero_raises_while_another_handle_holds_the_lock",
+        "test_lock_is_acquirable_again_after_the_holder_releases",
+        "test_positive_timeout_retries_then_raises_at_the_deadline",
+        "test_default_timeout_waits_past_the_windows_ten_second_cliff",
+        "test_non_contention_os_error_is_not_reported_as_lock_busy",
+        "test_contention_error_still_classifies_as_lock_busy",
+    )
+} | {".codex/tests/test_codex_brain.py::VaultRetrievalTests.test_cache_is_read_under_lock_contention_but_not_rewritten"}
+SNAPSHOT_CALLEES = {
+    ".codex/scripts/vault_retrieval.py::_source_snapshot",
+    ".codex/scripts/vault_retrieval.py::_source_signature",
+    "external::range", "external::lstat", "external::S_ISREG",
+}
+PR_NODES = {
+    ".codex/hooks/hook.py::handle_user_prompt",
+    ".codex/tests/test_concurrency_readers.py::PromptMemorySnapshotTests",
+    ".codex/tests/test_concurrency_readers.py::PromptMemorySnapshotTests.test_profile_and_warning_share_the_checked_preference_snapshot",
+    ".codex/tests/test_concurrency_readers.py::RetrievalRaceTests",
+    ".codex/tests/test_concurrency_readers.py::RetrievalRaceTests.test_hook_does_not_offer_raw_search_after_incomplete_retrieval",
+}
 
 
 def command(*args):
@@ -107,6 +132,42 @@ def baseline(case):
             command("rg", "--no-ignore", "-n", r"\bhandle_user_prompt\s*\(", *paths)]
 
 
+def compare_graph_samples(cases, source_truth):
+    expected = {
+        "discovery": {"callers_of": set(source_truth["locked"]) | LOCK_TESTS,
+                      "tests_for": LOCK_TESTS},
+        "debug": {"callers_of": set(source_truth["_stable_source_snapshot"]),
+                  "callees_of": SNAPSHOT_CALLEES, "tests_for": set()},
+        "pr": {"changed_functions": PR_NODES},
+    }
+    quality = []
+    for case, queries in expected.items():
+        for repeat, sample in enumerate(cases[case]["graph"], 1):
+            if sample["status"] != "ok":
+                continue
+            for query_name, wanted in queries.items():
+                if query_name == "changed_functions":
+                    # The standard expansion contains the complete PR node set.
+                    nodes = sample["payloads"][-1][query_name]
+                else:
+                    # Minimal responses can be intentionally partial; validate
+                    # the final expanded response that the replay actually uses.
+                    result = [p for p in sample["payloads"] if p.get("pattern") == query_name][-1]
+                    nodes = result["results"]
+                actual = set()
+                for node in nodes:
+                    identity = node.get("qualified_name")
+                    if identity is None:
+                        # Minimal results in these fixed cases are unambiguous
+                        # top-level functions, or explicitly external callees.
+                        identity = node.get("file_path", "external") + "::" + node["name"]
+                    actual.add(identity.removeprefix(ROOT.as_posix() + "/"))
+                quality.append({"case": case, "repeat": repeat, "query": query_name,
+                    "expected": len(wanted), "found": len(actual & wanted),
+                    "missing": sorted(wanted - actual), "extra": sorted(actual - wanted)})
+    return quality
+
+
 def main():
     assert command("git", "rev-parse", "HEAD").strip() == BASELINE
     assert not command("git", "diff", "HEAD", "--", ".codex/hooks", ".codex/scripts", ".codex/tests")
@@ -147,18 +208,7 @@ def main():
                 except Exception as error:
                     samples[method].append({"status": "error", "error": str(error)})
         report["cases"][case] = samples
-    quality = {}
-    for case, symbol in (("discovery", "locked"), ("debug", "_stable_source_snapshot")):
-        first = report["cases"][case]["graph"][0]
-        if first["status"] != "ok":
-            continue
-        results = [p for p in first["payloads"] if p.get("pattern") == "callers_of"][-1]["results"]
-        actual = {n.get("qualified_name", n.get("file_path", "") + "::" + n["name"])
-                  .removeprefix(ROOT.as_posix() + "/")
-                  for n in results if "/tests/" not in n.get("file_path", "")}
-        expected = set(report["source_truth"][symbol])
-        quality[case] = {"expected": len(expected), "found": len(actual & expected),
-                         "missing": sorted(expected - actual), "extra": sorted(actual - expected)}
+    quality = compare_graph_samples(report["cases"], report["source_truth"])
     report["quality"] = quality
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -172,7 +222,7 @@ def main():
     assert all(s["status"] == "ok" for methods in report["cases"].values()
                for samples in methods.values() for s in samples), "Failed probes are not savings"
     print("quality", quality)
-    assert all(not row["missing"] and not row["extra"] for row in quality.values()), \
+    assert len(quality) == 18 and all(not row["missing"] and not row["extra"] for row in quality), \
         "Graph accuracy differs from source; negative results remain in the JSON output"
 
 

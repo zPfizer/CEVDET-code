@@ -22,15 +22,20 @@ ise engelleyici olmayan yardımcı özet olarak kullanılacak.
   son PR'ın değişen üretim fonksiyonu ve iki test metodudur.
 - Bu, Python API üzerinden **bağlam edinme akışının tekrarıdır**. Kör, iki ayrı
   model oturumunun karşılaştırması değildir. Süreye API/rg çalışması ve seçili
-  kaynak okuması dahildir; model düşünmesi, MCP taşıması ve önceden yüklenmiş
+  kaynak okuması dahildir; bağımsız doğruluk karşılaştırması, model düşünmesi, MCP taşıması ve önceden yüklenmiş
   Python modüllerinin açılışı dahil değildir. Karakter sayısı gerçek model
   tokenı, cache faturası veya abonelik kotası değildir.
 - Başarısız örnek tasarruf sayılmaz. Son koşudaki 18 örneğin tamamı başarılıdır.
   Ölçüm hazırlığında kaynak aralığı hatası veren iki koşu dışarıda bırakıldı.
   Kaynakla karşılaştırmada eksik/fazla çağıran varsa betik başarısız çıkar;
-  zaman, metin ve yanlış ilişki kanıtları yine JSON'da korunur. Bir çağıran
-  cevaptan çıkarılarak bu hata yolu ayrıca sınandı: 43/44 bulundu, betik
-  beklenen hata ile durdu ve eksik çağıranın kaydı JSON'da kaldı.
+  zaman, metin ve yanlış ilişki kanıtları yine JSON'da korunur. Altı doğruluk
+  kümesi (keşif çağıran/test; hata çağıran/çağrılan/test; PR sembolleri) her
+  üç graf tekrarında karşılaştırılır: toplam 18 küme kontrolü. Kaynakla daha
+  önce bağımsız doğrulanan test/PR kimlikleri sabit commit için betikte tutulur.
+  Her kümenin yalnız üçüncü tekrarında eksik veya sahte düğüm üreten altı
+  negatif kontrol de beklenen hatayla durdu; yanlış sonuçların JSON kanıtı korundu.
+  Kasıtlı kısaltılmış ara yanıt yerine her sorgunun son, tamamlanmış yanıtı
+  doğrulanır. Risk ve akış önceliklerinin anlamsal doğruluğu bu sayıya dahil değildir.
 
 ## Sonuç
 
@@ -38,9 +43,9 @@ Toplam karakter, arama/graf yanıtı ile ortak kaynak doğrulamasının toplamı
 
 | Görev | rg toplam karakter | Graf toplam karakter | Graf farkı | rg süre | Graf süre |
 |---|---:|---:|---:|---:|---:|
-| `file_lock.locked`: çağıranlar ve testler | 20.614 | 71.802 | +%248,3 | 0,0320 sn | 0,1343 sn |
-| `_stable_source_snapshot`: çağrı zinciri | 17.303 | 17.668 | +%2,1 | 0,0327 sn | 0,1496 sn |
-| Son gerçek PR: değişen semboller | 31.095 | 32.076 | +%3,2 | 0,0559 sn | 0,2520 sn |
+| `file_lock.locked`: çağıranlar ve testler | 20.614 | 71.802 | +%248,3 | 0,0315 sn | 0,1381 sn |
+| `_stable_source_snapshot`: çağrı zinciri | 17.303 | 17.668 | +%2,1 | 0,0322 sn | 0,1515 sn |
+| Son gerçek PR: değişen semboller | 31.095 | 32.076 | +%3,2 | 0,0575 sn | 0,2486 sn |
 
 Ortak kaynak okuması sırasıyla 14.269, 14.895 ve 23.667 karakterdir.
 Grafın yalnız sorgu çıktısı sırasıyla 57.533, 2.773 ve 8.409 karakterdir.
