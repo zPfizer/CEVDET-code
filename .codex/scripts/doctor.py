@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from functools import cached_property
 import json
 import math
-from pathlib import Path
+import ntpath
+import os
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import shutil
@@ -38,9 +40,11 @@ from vault_corpus import (
     HUMAN_NOTE_ROOTS,
     KNOWLEDGE_ROOT,
     NoteIndex,
+    TEMPLATES_ROOT,
     by_key,
     by_stem,
     link_key,
+    markdown_paths,
     resolve_link,
     vault_notes,
 )
@@ -69,6 +73,30 @@ SESSION_START_REQUIRED_SECTIONS = {
 REQUIRED_NOTE_FIELDS = ("title", "created", "updated", "tags")
 # Roots whose wikilinks are validated; daily joined in tur 2 (spec 3f).
 LINK_ROOTS = frozenset({*HUMAN_NOTE_ROOTS, KNOWLEDGE_ROOT, DAILY_ROOT})
+
+
+def _native_path_key(value: str) -> str:
+    return value.casefold() if os.name == "nt" else value
+
+
+def _source_relative_base_key(source_parent: PurePosixPath, target: str) -> str | None:
+    parts = target.split("/")
+    if parts and parts[0] == ".":
+        parts = parts[1:]
+    elif not parts or parts[0] != "..":
+        return None
+    parent = source_parent
+    while parts and parts[0] == "..":
+        if parent == PurePosixPath("."):
+            return None
+        parent = parent.parent
+        parts.pop(0)
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return None
+    key = (parent / PurePosixPath(*parts)).as_posix()
+    return None if key == ".." or key.startswith("../") else key
+
+
 ALLOWED_ROOT_FILES = {
     ".beyin-version",
     ".gitattributes",
@@ -101,9 +129,19 @@ class Context:
     now: float = 0.0
 
     @cached_property
+    def corpus_paths(self) -> tuple[Path, ...]:
+        return tuple(
+            markdown_paths(
+                self.vault.resolve(),
+                excluded_root_dirs=frozenset({"tmp"}),
+                suffixes=frozenset({".md", ".base"}),
+            )
+        )
+
+    @cached_property
     def notes(self) -> tuple[NoteIndex, ...]:
         """The vault read once; every vault check filters this same index."""
-        return vault_notes(self.vault)
+        return vault_notes(self.vault, paths=self.corpus_paths)
 
 
 def _finite_timestamp(value: object) -> float | None:
@@ -1628,6 +1666,23 @@ def _vault_link_check(ctx: Context) -> Check:
 
     keyed = by_key(notes)
     broken: list[str] = []
+    base_keys: set[str] = set()
+    base_names: dict[str, list[str]] = {}
+    vault_root = ctx.vault.resolve()
+    for base_path in (
+        path for path in ctx.corpus_paths if path.suffix.casefold() == ".base"
+    ):
+        key = base_path.relative_to(vault_root).as_posix()
+        try:
+            base_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            return Check(
+                "Vault bağlantıları",
+                "FAIL",
+                f"okunamadı: {base_path.name} ({exc.__class__.__name__})",
+            )
+        base_keys.add(_native_path_key(key))
+        base_names.setdefault(_native_path_key(base_path.name), []).append(key)
     for source in files:
         if source.error:
             return Check(
@@ -1638,6 +1693,42 @@ def _vault_link_check(ctx: Context) -> Check:
         for match in WIKILINK.finditer(source.text):
             target = wikilink_target(match.group(1))
             if not target:
+                continue
+            base_target = PurePosixPath(target)
+            if base_target.suffix.casefold() == ".base":
+                source_relative_key = _source_relative_base_key(
+                    source.relative.parent, target
+                )
+                explicit_relative = target.startswith("./") or target.startswith("../")
+                if explicit_relative:
+                    if (
+                        not ntpath.isabs(target)
+                        and source_relative_key is not None
+                        and _native_path_key(source_relative_key) in base_keys
+                    ):
+                        continue
+                elif (
+                    not ntpath.isabs(target)
+                    and not any(part in {"", "."} for part in target.split("/"))
+                    and (
+                        _native_path_key(PurePosixPath(target).as_posix()) in base_keys
+                        or (
+                            _native_path_key(
+                                (source.relative.parent / base_target).as_posix()
+                            )
+                            in base_keys
+                        )
+                        or (
+                            len(base_target.parts) == 1
+                            and len(
+                                base_names.get(_native_path_key(base_target.name), ())
+                            )
+                            == 1
+                        )
+                    )
+                ):
+                    continue
+                broken.append(f"{source.key} -> {target}")
                 continue
             if resolve_link(target, keyed, stems) is None:
                 broken.append(f"{source.key} -> {target}")
@@ -1743,7 +1834,11 @@ def _metadata_schema_check(ctx: Context) -> Check:
         if missing:
             offenders.append(f"{note.key}: {','.join(missing)}")
         title = fields.get("title", "")
-        if isinstance(title, str) and title:
+        if (
+            isinstance(title, str)
+            and title
+            and not (note.root == TEMPLATES_ROOT and title.strip() == "{{title}}")
+        ):
             titles.setdefault(title, []).append(note.key)
     duplicate_titles = {title: keys for title, keys in titles.items() if len(keys) > 1}
     if duplicate_titles:

@@ -911,6 +911,152 @@ tags: [doğrulama]
         self.assertEqual(check.status, "FAIL")
         self.assertIn("../outside", check.evidence)
 
+    def test_doctor_accepts_existing_base_file_wikilink_with_view_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            note = project / "Dashboard.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(
+                "# Dashboard\n"
+                "[[./Tansu Kaynakları.base#Sinyal ve Strateji]]\n"
+                "[[Tansu Kaynakları.base#Sinyal ve Strateji]]\n"
+                "[[🏰 300-Projects/Tansu X Veri Havuzu/Tansu Kaynakları.base#Veri ve Kanıt]]\n",
+                encoding="utf-8",
+            )
+            (project / "Tansu Kaynakları.base").write_text(
+                "views:\n  - name: Sinyal ve Strateji\n",
+                encoding="utf-8",
+            )
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "OK")
+
+    def test_doctor_accepts_source_relative_base_file_wikilink_and_rejects_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            vault.mkdir()
+            (root / "outside.base").write_text("views: []\n", encoding="utf-8")
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            nested = project / "nested"
+            nested.mkdir(parents=True)
+            (project / "Views.base").write_text("views: []\n", encoding="utf-8")
+            note = nested / "Dashboard.md"
+            note.write_text("# Dashboard\n[[../Views.base]]\n", encoding="utf-8")
+
+            accepted = doctor._vault_link_check(doctor.Context(vault))
+            note.write_text("# Dashboard\n[[foo/../../Views.base]]\n", encoding="utf-8")
+            malformed = doctor._vault_link_check(doctor.Context(vault))
+            note.write_text("# Dashboard\n[[../../../../outside.base]]\n", encoding="utf-8")
+            rejected = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(accepted.status, "OK")
+        self.assertEqual(malformed.status, "FAIL")
+        self.assertEqual(rejected.status, "FAIL")
+        self.assertIn("outside.base", rejected.evidence)
+
+    def test_doctor_rejects_explicit_relative_base_link_to_global_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            note = project / "Dashboard.md"
+            note.parent.mkdir(parents=True)
+            (vault / "Views.base").write_text("views: []\n", encoding="utf-8")
+            note.write_text("# Dashboard\n[[./Views.base]]\n", encoding="utf-8")
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("./Views.base", check.evidence)
+
+    def test_doctor_rejects_nonexplicit_base_path_with_literal_dot_segment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            folder = project / "folder"
+            note = project / "Dashboard.md"
+            folder.mkdir(parents=True)
+            (folder / "Views.base").write_text("views: []\n", encoding="utf-8")
+            note.write_text("# Dashboard\n[[folder/./Views.base]]\n", encoding="utf-8")
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("folder/./Views.base", check.evidence)
+
+    @unittest.skipUnless(os.name == "nt", "Windows path case contract")
+    def test_doctor_matches_base_file_wikilinks_case_insensitively_on_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            project.mkdir(parents=True)
+            (project / "Views.base").write_text("views: []\n", encoding="utf-8")
+            (project / "Dashboard.md").write_text(
+                "# Dashboard\n[[views.base]]\n", encoding="utf-8"
+            )
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "OK")
+
+    def test_doctor_fails_when_base_file_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            note = vault / "🧠 500-Knowledge" / "Dashboard.md"
+            note.parent.mkdir(parents=True)
+            base = vault / "Views.base"
+            base.write_text("views: []\n", encoding="utf-8")
+            note.write_text("# Dashboard\n[[Views.base]]\n", encoding="utf-8")
+            original_read_text = Path.read_text
+
+            def read_text(path: Path, *args: object, **kwargs: object) -> str:
+                if path == base:
+                    raise PermissionError("locked")
+                return original_read_text(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", new=read_text):
+                check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("Views.base", check.evidence)
+        self.assertIn("PermissionError", check.evidence)
+
+    def test_doctor_base_index_accepts_relative_vault_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            project.mkdir(parents=True)
+            (project / "Views.base").write_text("views: []\n", encoding="utf-8")
+            (project / "Dashboard.md").write_text(
+                "# Dashboard\n[[Views.base]]\n", encoding="utf-8"
+            )
+            relative_vault = Path(os.path.relpath(vault))
+
+            check = doctor._vault_link_check(doctor.Context(relative_vault))
+
+        self.assertEqual(check.status, "OK")
+
+    def test_doctor_fails_when_base_file_wikilink_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            note = vault / "🧠 500-Knowledge" / "Dashboard.md"
+            note.parent.mkdir(parents=True)
+            (vault / "other").mkdir()
+            (vault / "other" / "Views.base").write_text("views: []\n", encoding="utf-8")
+            (note.parent / "Missing.md").write_text("# Missing\n", encoding="utf-8")
+            note.write_text(
+                "# Dashboard\n[[missing/Views.base]]\n[[Missing.base]]\n",
+                encoding="utf-8",
+            )
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("2 kırık", check.evidence)
+        self.assertIn("missing/Views.base", check.evidence)
+
     def test_doctor_fails_when_human_note_metadata_is_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -939,6 +1085,35 @@ tags: [doğrulama]
 
         self.assertEqual(check.status, "FAIL")
         self.assertIn("modified", check.evidence)
+
+    def test_doctor_ignores_template_placeholder_titles_but_rejects_normal_duplicates(self) -> None:
+        template = (
+            "---\n"
+            'title: "{{title}}"\n'
+            "created: 2026-08-27\n"
+            "updated: 2026-08-27\n"
+            "tags: [template]\n"
+            "---\n"
+            "# {{title}}\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            templates = vault / "📋 Templates"
+            templates.mkdir(parents=True)
+            (templates / "One.md").write_text(template, encoding="utf-8")
+            (templates / "Two.md").write_text(template, encoding="utf-8")
+
+            self.assertEqual(doctor._metadata_schema_check(doctor.Context(vault)).status, "OK")
+
+            knowledge = vault / "🧠 500-Knowledge"
+            knowledge.mkdir()
+            normal = template.replace("{{title}}", "Aynı Başlık")
+            (knowledge / "One.md").write_text(normal, encoding="utf-8")
+            (knowledge / "Two.md").write_text(normal, encoding="utf-8")
+            check = doctor._metadata_schema_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("duplicate title", check.evidence)
 
     def test_doctor_bounds_oversized_session_sources_before_budget_check(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
