@@ -18,7 +18,7 @@ from knowledge_schema import parse_frontmatter
 
 
 # The one exclusion set: infrastructure directories that never hold vault notes.
-EXCLUDED_DIRS = frozenset({".git", ".codex", ".obsidian", ".scratch", ".agents", "node_modules", "__pycache__"})
+EXCLUDED_DIRS = frozenset({".git", ".codex", ".obsidian", ".scratch", ".agents", ".code-review-graph", "node_modules", "__pycache__"})
 HUMAN_NOTE_ROOTS = (
     "📥 000-Inbox",
     "🎯 100-Command-Center",
