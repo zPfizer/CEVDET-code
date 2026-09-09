@@ -360,6 +360,26 @@ def _json_regions(text: str) -> Iterator[tuple[int, int]]:
             yield opening.start(), end
 
 
+def _json_string_regions(text: str) -> Iterator[tuple[int, int]]:
+    """Yield complete JSON string spans inside validated JSON regions."""
+    decoder = json.JSONDecoder()
+    for region_start, region_end in _json_regions(text):
+        cursor = region_start
+        while cursor < region_end:
+            opening = text.find('"', cursor, region_end)
+            if opening < 0:
+                break
+            try:
+                _, end = decoder.raw_decode(text, opening)
+            except (ValueError, RecursionError):
+                cursor = opening + 1
+                continue
+            if end > region_end:
+                break
+            yield opening, end
+            cursor = end
+
+
 _MEMORY_VIEW_IDENTIFIER = re.compile(
     r'^\.codex/private-memory/views/(?P<digest>[0-9a-f]{64})\.md$'
 )
@@ -409,10 +429,20 @@ def sanitize_text(
                            else "Authorization: Bearer <REDACTED>"),
             "authorization")
     regions = _json_regions(text)
+    json_strings = _json_string_regions(text)
     region: tuple[int, int] | None = None
+    json_string: tuple[int, int] | None = None
     pieces: list[str] = []
     cursor = 0
     while match := CREDENTIAL.search(text, cursor):
+        while json_string is None or json_string[1] <= match.start():
+            json_string = next(json_strings, None)
+            if json_string is None:
+                break
+        if json_string is not None and json_string[0] < match.start() < json_string[1]:
+            pieces.extend((text[cursor:json_string[0]], json.dumps("<REDACTED>")))
+            cursor = json_string[1]
+            continue
         end = match.end()
         if text[match.start('value')] in '{[':
             quoted_field = False

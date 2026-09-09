@@ -65,6 +65,18 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         with self.assertRaisesRegex(ledger.MemoryPreferenceError, '^memory-credential-container-unverifiable$'):
             ledger.sanitize_text("{'token': {'a': 1},'keep':'ordinary'} after", max_chars=None)
 
+    def test_json_string_credential_snippet_keeps_outer_siblings(self) -> None:
+        original = json.dumps(
+            {"message": "example 'token': {'a': 1} in docs", "keep": "ordinary"},
+            separators=(",", ":"),
+        )
+        sanitized, redactions = ledger.sanitize_text(original, max_chars=None)
+        self.assertEqual(
+            sanitized,
+            json.dumps({"message": "<REDACTED>", "keep": "ordinary"}, separators=(",", ":")),
+        )
+        self.assertIn("credential", redactions)
+
     def test_valid_json_fragments_keep_siblings_and_surrounding_prose(self) -> None:
         payload = '{"token":{"value":"OBJECT_SECRET"},"keep":"ordinary"}'
         safe = '{"token":"<REDACTED>","keep":"ordinary"}'
@@ -156,7 +168,8 @@ class Bug007JsonCredentialTests(unittest.TestCase):
             source = home / "attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt"
             source.parent.mkdir(parents=True)
             original = "example '" + json.dumps(
-                {"password": "LEAK_PROBE_SYNTHETIC", "api_key": "key-secret", "keep": "ordinary",
+                {"message": "example 'token': {'a': 1} in docs", "password": "LEAK_PROBE_SYNTHETIC",
+                 "api_key": "key-secret", "keep": "ordinary",
                  "token": {"value": "OBJECT_SECRET", "items": ["ARRAY_SECRET"]}},
                 ensure_ascii=False,
             ) + "' after"
@@ -180,12 +193,14 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertNotIn("key-secret", prompts[0])
                 self.assertNotIn("OBJECT_SECRET", prompts[0])
                 self.assertNotIn("ARRAY_SECRET", prompts[0])
+                self.assertIn('"message": "<REDACTED>"', prompts[0])
                 note = root / (result[0][0] + ".md")
                 saved = note.read_text(encoding="utf-8")
                 self.assertNotIn("LEAK_PROBE_SYNTHETIC", saved)
                 self.assertNotIn("key-secret", saved)
                 self.assertNotIn("OBJECT_SECRET", saved)
                 self.assertNotIn("ARRAY_SECRET", saved)
+                self.assertIn('"message": "<REDACTED>"', saved)
                 self.assertIn('"keep": "ordinary"', saved)
                 self.assertEqual(source.read_bytes(), original_bytes)
 
