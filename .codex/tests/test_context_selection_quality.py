@@ -16,6 +16,76 @@ def _write(root: Path, relative: str, text: str) -> None:
 
 
 class ContextSelectionQualityTests(unittest.TestCase):
+    def test_wayfinding_queries_keep_sources_in_top_three(self) -> None:
+        # Synthetic sources: no exported Vault notes, identifiers, or quotations.
+        cases = (
+            ('🧠 500-Knowledge/n001.md',
+             '---\ntitle: Merkez Eğilim\naliases: [Ortanca göstergesi]\n---\n'
+             'Medyan tabanlı gösterge uç değer etkisini azaltır.\n',
+             (('Ortanca göstergesi ne öneriyordu?', 'ortanca göstergesi'),
+              ('Medyan uç değer etkisi', 'medyan değer'))),
+            ('🧠 500-Knowledge/n002.md',
+             '# Oynaklık Tahmini\nKoşullu varyans modeli risk bütçesini ayarlamayı tartışır.\n',
+             (('Koşullu varyans risk bütçesi', 'varyans risk'),
+              ('Oynaklık tahmini ne işe yarar?', 'oynaklık tahmini'))),
+            ('📥 000-Inbox/n003.md',
+             '# Değerleme Görseli\n![[example.png]]\n'
+             'Görsel açıklaması: indirgenmiş nakit akışı ağırlıkları A ve B senaryolarını birleştirir.\n',
+             (('Nakit akışı ağırlıkları görseli', 'nakit akışı'),
+              ('Değerleme görseli', 'değerleme görseli'))),
+            ('knowledge/concepts/n004.md',
+             '---\ntitle: Gerçekleşmeyen Adaylar\n'
+             'aliases: [Nonfill, İşleme dönüşmeyen adaylar]\n---\n'
+             'Nonfill, adayın işleme dönüşmemesidir. '
+             'Kazanma oranı ile aday sayısı ayrı raporlanır.\n',
+             (('İşleme dönüşmeyen adaylar', 'işleme adaylar'),
+              ('Nonfill adaylar', 'nonfill adaylar'),
+              ('Kazanma oranı aday sayısı', 'kazanma oranı'))),
+            ('knowledge/concepts/n005.md',
+             '---\ntitle: Cynefin\naliases: [Karmaşıklık çerçevesi]\n---\n'
+             'Karmaşık durumda küçük deneylerle öğrenme yaklaşımı.\n',
+             (('Karmaşıklık çerçevesi', 'karmaşıklık çerçevesi'),
+              ('Cynefin küçük deneyler', 'cynefin küçük'))),
+            ('📦 900-Archive/n006.md',
+             '---\ntitle: Sınıflandırma Denetimi\nstatus: archived\n---\n'
+             'Eski etiket denetimi sınıflandırma kararlarının geçmiş gerekçelerini korur.\n',
+             (('Eski etiket denetimi', 'eski etiket'),
+              ('Sınıflandırma Denetimi', 'sınıflandırma denetimi'),
+              ('Geçmiş sınıflandırma gerekçeleri', 'geçmiş sınıflandırma'))),
+            ('🧠 500-Knowledge/n007.md',
+             '# Uzun Deney Kaydı\n' + ('Hazırlık aşamasında genel gözlemler tutuldu.\n\n' * 200)
+             + '## Teknik Ek\nMor pusula protokolü örneklem dışı doğrulamada sabit veri aralığı kullanır.\n',
+             (('Mor pusula protokolü', 'mor pusula'),
+              ('Örneklem dışı sabit veri aralığı', 'örneklem sabit'),
+              ('Uzun Deney Kaydı teknik ek', 'deney teknik'))),
+            ('🏰 300-Projects/Atlas.md',
+             '# Atlas\nKarar: yerel önbellek. Gerekçe: çevrimdışı kullanım. '
+             'Açık soru: veri güncelliği nasıl korunacak?\n',
+             (('Atlas için ne seçtik?', 'atlas seçtik'),
+              ('Atlas kararının gerekçesi', 'atlas kararının'),
+              ('Atlas çevrimdışı kullanım', 'atlas kullanım'))),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for path, text, _queries in cases:
+                _write(root, path, text)
+            for path, source_text, queries in cases:
+                for query, competing_terms in queries:
+                    with self.subTest(query=query):
+                        # Comparable-length body matches keep this a ranking test,
+                        # rather than a competition with keyword-only stubs.
+                        for index in range(4):
+                            status = '---\nstatus: archived\n---\n' if 'status: archived' in source_text else ''
+                            _write(root, f'🧠 500-Knowledge/distractor-{index}.md',
+                                   status + f'# Yan Araştırma {index}\n' + competing_terms + '\n'
+                                   + ('Ayrı konunun genel açıklaması ve çalışma ayrıntıları.\n'
+                                      * max(1, len(source_text) // 50)))
+                        entries = retrieval.build_vault_map(root, write_cache=False)
+                        hits = retrieval.search_vault(entries, query, top_k=20)
+                        self.assertGreaterEqual(len(hits), 4, 'Ranking requires eligible competitors')
+                        top_hits = retrieval.search_vault(entries, query)
+                        self.assertIn(path, [hit.entry.path for hit in top_hits])
+
     def test_vault_system_priority_keeps_the_fully_named_note(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

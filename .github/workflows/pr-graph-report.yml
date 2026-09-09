@@ -1,0 +1,187 @@
+name: PR Code Review Graph report
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "**.py"
+      - "**.pyi"
+      - "**/requirements*.txt"
+      - "**/requirements*.in"
+      - "**/pyproject.toml"
+      - "**/poetry.lock"
+      - "**/Pipfile*"
+      - "**/setup.cfg"
+      - "**/tox.ini"
+      - "**/pytest.ini"
+      - "**/uv.lock"
+      - ".github/**"
+
+# The analysis job can read source; only the same-repository publisher gets
+# pull-request write permission. No pull_request_target or cache is used.
+permissions: {}
+
+concurrency:
+  group: cevdet-pr-graph-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  graph-report:
+    name: Code Review Graph analysis (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      report_b64: ${{ steps.export-report.outputs.report_b64 }}
+    env:
+      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout the PR head commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the event base commit and verify full history
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          $shallow = (git rev-parse --is-shallow-repository).Trim()
+          if ($shallow -ne "false") {
+            throw "The PR graph job requires a non-shallow checkout; got $shallow"
+          }
+          $tokenBytes = [Text.Encoding]::ASCII.GetBytes("x-access-token:$env:GITHUB_TOKEN")
+          $auth = [Convert]::ToBase64String($tokenBytes)
+          $header = "AUTHORIZATION: basic $auth"
+          git -c "http.extraheader=$header" fetch --no-tags --no-prune "https://github.com/$env:GITHUB_REPOSITORY.git" $env:PR_BASE_SHA
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not fetch event base.sha $env:PR_BASE_SHA"
+          }
+          if ((git rev-parse --verify "$env:PR_BASE_SHA^{commit}").Trim() -ne $env:PR_BASE_SHA) {
+            throw "Fetched base.sha does not resolve to the requested commit"
+          }
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.14"
+
+      - name: Install pinned graph tool without cache
+        shell: pwsh
+        run: |
+          python --version
+          python -m pip install --disable-pip-version-check --no-cache-dir --no-warn-script-location "code-review-graph==2.3.8"
+
+      - name: Build and render the PR report
+        id: analysis
+        shell: pwsh
+        run: |
+          python -X utf8 .github/scripts/pr_graph_report.py `
+            --repo-root . `
+            --base-sha $env:PR_BASE_SHA `
+            --head-sha $env:PR_HEAD_SHA `
+            --output artifacts/pr-graph-report.md `
+            --json-output artifacts/pr-graph-report.json
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "PR graph report failed; summary and artifact contain the failure details."
+            exit $LASTEXITCODE
+          }
+
+      - name: Add the report to the job summary
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path artifacts/pr-graph-report.md) {
+            Get-Content -Raw artifacts/pr-graph-report.md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          } else {
+            "## Code Review Graph PR raporu`n`n- Durum: **başarısız**`n- Rapor dosyası üretilemedi." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
+
+      - name: Export the report for same-repository comment publishing
+        id: export-report
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path artifacts/pr-graph-report.md) {
+            $bytes = [IO.File]::ReadAllBytes((Resolve-Path artifacts/pr-graph-report.md))
+          } else {
+            $fallback = @(
+              "<!-- cevdet-pr-graph-report -->",
+              "## Code Review Graph PR raporu",
+              "",
+              "- Durum: **başarısız**",
+              "- Rapor üretim adımı tamamlanamadı.",
+              "- HEAD: ``$env:PR_HEAD_SHA``",
+              "",
+              "Eski başarılı rapor varsa bu başarısız rapor geçerlidir."
+            ) -join "`n"
+            $bytes = [Text.Encoding]::UTF8.GetBytes($fallback + "`n")
+          }
+          $encoded = [Convert]::ToBase64String($bytes)
+          "report_b64=$encoded" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload the report artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr-code-review-graph-report-${{ github.event.pull_request.number }}
+          path: artifacts
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-comment:
+    name: Update the sticky PR report comment
+    if: >-
+      always() &&
+      needs.graph-report.result != 'cancelled' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    needs: graph-report
+    runs-on: windows-latest
+    permissions:
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      REPORT_B64: ${{ needs.graph-report.outputs.report_b64 }}
+    steps:
+      - name: Upsert one bot comment
+        shell: pwsh
+        run: |
+          $marker = "<!-- cevdet-pr-graph-report -->"
+          $currentHead = (gh api "repos/$env:REPO/pulls/$env:PR_NUMBER" --jq .head.sha | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not read the current PR head SHA"
+          }
+          if ($currentHead -ne $env:EVENT_HEAD_SHA) {
+            Write-Output "Skipping stale report run for $env:EVENT_HEAD_SHA; current head is $currentHead"
+            exit 0
+          }
+          $report = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:REPORT_B64))
+          $payload = @{ body = $report } | ConvertTo-Json -Compress
+          $endpoint = "repos/$env:REPO/issues/$env:PR_NUMBER/comments"
+          $pages = (gh api --paginate --slurp $endpoint | Out-String)
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not list existing PR comments"
+          }
+          $decoded = $pages | ConvertFrom-Json
+          $comments = @($decoded | ForEach-Object { $_ })
+          $existing = $comments | Where-Object {
+            [string]$_.body -like "*$marker*" -and
+            [string]$_.user.login -eq "github-actions[bot]"
+          } | Select-Object -First 1
+          if ($null -ne $existing) {
+            $payload | gh api --method PATCH --input - "repos/$env:REPO/issues/comments/$($existing.id)" | Out-Null
+          } else {
+            $payload | gh api --method POST --input - $endpoint | Out-Null
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not upsert the PR report comment"
+          }
