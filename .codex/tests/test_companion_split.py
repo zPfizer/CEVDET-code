@@ -134,6 +134,52 @@ class CompanionSplitTests(unittest.TestCase):
                 for path in root.rglob("*") if path.is_file()
             })
 
+    def test_opaque_retrieval_reads_missing_canonical_view_without_creating_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            companion = _seed(root)
+            companion_memory.migrate(root)
+            companion_memory.publish(
+                root,
+                root / ".state",
+                _summary("H08 canonical görünüm.\nH08 gizli canonical."),
+                EVENT,
+                "a" * 64,
+                "one",
+                frozenset(),
+            )
+            memory_ledger.suppress_derived_memory(
+                root / ".codex/private-memory", "H08 gizli canonical.", now=1
+            )
+            for name in companion_memory.VIEW_NAMES:
+                (companion / name).unlink()
+            before = {
+                path.relative_to(root): path.read_bytes()
+                for path in root.rglob("*") if path.is_file()
+            }
+            relative = f"🔮 850-Companion/{companion_memory.VIEW_NAMES[0]}"
+            opaque = memory_ledger.memory_view_relative_path(relative)
+
+            result = vault_retrieval.retrieve_vault_context_detailed(
+                root,
+                "H08 canonical görünüm",
+                write_cache=False,
+                write_views=False,
+            )
+            text = memory_ledger.read_memory_source(root, root / opaque)
+            after = {
+                path.relative_to(root): path.read_bytes()
+                for path in root.rglob("*") if path.is_file()
+            }
+            view_exists = (companion / companion_memory.VIEW_NAMES[0]).exists()
+
+        self.assertGreater(result.hits, 0)
+        self.assertIn(opaque, result.text)
+        self.assertIn("H08 canonical görünüm.", text)
+        self.assertNotIn("H08 gizli canonical.", text)
+        self.assertEqual(before, after)
+        self.assertFalse(view_exists)
+
     def test_source_read_and_search_prefer_new_manual_source_to_existing_stale_view(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

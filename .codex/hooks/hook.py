@@ -741,6 +741,8 @@ def handle_user_prompt(
                 vault_root,
                 retrieval_query,
                 max_chars=min(MAX_CONTEXT_CHARS, USER_PROMPT_CONTEXT_TARGET_CHARS - len('\n\n'.join(context)) - (2 if context else 0)),
+                write_cache=not (read_only_requested or read_only_scope),
+                write_views=not (read_only_requested or read_only_scope),
             )
             record = {
                 "ts": int(time.time() if now is None else now),

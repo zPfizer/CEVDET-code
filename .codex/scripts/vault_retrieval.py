@@ -1395,9 +1395,21 @@ def _json_text(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _context_item(hit: VaultHit, displayed_path: str) -> str:
+def _context_item(
+    hit: VaultHit,
+    displayed_path: str | None,
+    *,
+    source_id: str | None = None,
+) -> str:
+    path_line = f"\n- path: {_json_text(displayed_path)}" if displayed_path is not None else ''
+    source_line = (
+        f"\n- source_id: {_json_text(source_id)}"
+        '\n  source_reader: "memory_ledger.read_memory_source(vault_root, vault_root / source_id)"'
+        if source_id is not None
+        else ''
+    )
     return (
-        f"\n- path: {_json_text(displayed_path)}\n"
+        f"{path_line}{source_line}\n"
         f"  title: {_json_text(hit.entry.title)}\n"
         f"  status: {_json_text(hit.entry.status)}\n"
         f"  matched: {_json_text(', '.join(hit.matched_terms))}\n"
@@ -1522,6 +1534,7 @@ def retrieve_vault_context_detailed(
     max_chars: int = MAX_CONTEXT_CHARS,
     route: str | None = None,
     write_cache: bool = True,
+    write_views: bool = True,
 ) -> VaultContextResult:
     if not _retrieval_terms(query):
         return VaultContextResult("skipped", "", 0, 0, (), max_chars)
@@ -1555,13 +1568,16 @@ def retrieve_vault_context_detailed(
         )
         if memory.active:
             header += ' ' + MEMORY_READ_RULE
-        def item(hit: VaultHit, path: str) -> str:
-            return (
-                f"\n- path: {_json_text(path)}\n"
-                f"  title: {_json_text(hit.entry.title)}\n"
-                f"  status: {_json_text(hit.entry.status)}\n"
-                f"  matched: {_json_text(', '.join(hit.matched_terms))}\n"
-                f"  excerpt: {_json_text(hit.excerpt)}"
+        render_only = memory.active and not write_views
+        if render_only:
+            header = header.replace(
+                'İlgili iddiada tam dosyayı oku, drift-riskli proje gerçeğini canlı kaynaktan doğrula.',
+                'Salt okunur kapsamda aşağıdaki süzülmüş alıntıyı kullan; tam kaynağı source_id üzerinden '
+                'memory_ledger.read_memory_source(vault_root, vault_root / source_id) ile oku.',
+            )
+            header += (
+                ' Salt okunur süzülmüş görünüm bellekte oluşturuldu; görünüm dosyası '
+                'yazılmadı; source_id yalnız MemoryRead süzmesinden geçen okuyucuya verildi.'
             )
 
         parts = [header]
@@ -1572,7 +1588,11 @@ def retrieve_vault_context_detailed(
                 if memory.active
                 else hit.entry.path
             )
-            candidate = item(hit, view_path)
+            candidate = _context_item(
+                hit,
+                None if render_only else view_path,
+                source_id=memory_view_relative_path(hit.entry.path) if render_only else None,
+            )
             if len("\n".join([*parts, candidate])) > max_chars:
                 break
             parts.append(candidate)
@@ -1594,10 +1614,19 @@ def retrieve_vault_context_detailed(
             memory,
             alias_entries=indexed,
         )
-        views = memory.views(
-            view_sources,
-            alias_sources=[(entry.path, entry.title) for entry in indexed],
-        )
+        if memory.active and write_views:
+            views = memory.views(
+                view_sources,
+                alias_sources=[(entry.path, entry.title) for entry in indexed],
+            )
+        elif memory.active:
+            _rendered, views = memory.render_views(
+                view_sources,
+                alias_sources=[(entry.path, entry.title) for entry in indexed],
+            )
+        else:
+            views = {}
+
         emitted_paths: list[str] = []
         parts = [header]
         for hit in emitted_hits:
@@ -1610,7 +1639,13 @@ def retrieve_vault_context_detailed(
                 actual_path = views.get(hit.entry.path)
                 if actual_path is None or actual_path != expected_path:
                     raise MemoryPreferenceError("memory-view-unavailable")
-            parts.append(item(hit, expected_path))
+            parts.append(
+                _context_item(
+                    hit,
+                    None if render_only else expected_path,
+                    source_id=memory_view_relative_path(hit.entry.path) if render_only else None,
+                )
+            )
             emitted_paths.append(hit.entry.path)
         text = "\n".join(parts)
         return VaultContextResult(

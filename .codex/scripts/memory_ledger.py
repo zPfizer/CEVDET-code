@@ -306,6 +306,32 @@ def memory_view_relative_path(relative: str) -> str:
     return f'.codex/private-memory/views/{_sha256_text(relative)}.md'
 
 
+_MEMORY_VIEW_IDENTIFIER = re.compile(
+    r'^\.codex/private-memory/views/(?P<digest>[0-9a-f]{64})\.md$'
+)
+
+
+def _resolve_memory_view_source(vault_root: Path, relative: str) -> Path | None:
+    match = _MEMORY_VIEW_IDENTIFIER.fullmatch(relative)
+    if match is None:
+        return None
+    from companion_memory import CANONICAL_RELATIVE, VIEW_NAMES
+    from vault_corpus import COMPANION_ROOT, markdown_paths
+
+    root = vault_root.resolve(strict=True)
+    digest = match.group('digest')
+    for candidate in markdown_paths(root, excluded_root_dirs=frozenset({'tmp'})):
+        candidate_relative = candidate.relative_to(root).as_posix()
+        if _sha256_text(candidate_relative) == digest:
+            return candidate
+    if (root / CANONICAL_RELATIVE).is_file():
+        for name in VIEW_NAMES:
+            candidate_relative = f'{COMPANION_ROOT}/{name}'
+            if _sha256_text(candidate_relative) == digest:
+                return root / candidate_relative
+    return None
+
+
 def sanitize_text(
     text: str,
     *,
@@ -733,7 +759,33 @@ def memory_read(vault_root: Path) -> Iterator[MemoryRead]:
 
 def read_memory_source(vault_root: Path, path: Path) -> str:
     with memory_read(vault_root) as memory:
-        _relative, text = memory.read_source(path)
+        root = vault_root.resolve(strict=True)
+        resolved = path.resolve(strict=False)
+        if not resolved.is_relative_to(root):
+            raise MemorySourceError('memory-source-outside-vault')
+        relative = resolved.relative_to(root).as_posix()
+        if _MEMORY_VIEW_IDENTIFIER.fullmatch(relative):
+            source = _resolve_memory_view_source(root, relative)
+            if source is None:
+                raise MemorySourceError('memory-view-source-unavailable')
+            source_relative = source.relative_to(root).as_posix()
+            if memory.active:
+                from vault_retrieval import _apply_memory_suppressions, build_vault_map
+
+                indexed = build_vault_map(root, write_cache=False)
+                visible = _apply_memory_suppressions(root, indexed, memory)
+                # ponytail: render all visible sources for opaque link targets; if a large Vault makes this costly, use requested-only rendering with opaque alias mapping.
+                sources = [(entry.path, entry.title) for entry in visible]
+                if source_relative not in {relative for relative, _title in sources}:
+                    sources.insert(0, (source_relative, PurePosixPath(source_relative).stem))
+                rendered, _paths = memory.render_views(
+                    sources,
+                )
+                text = rendered.get(source_relative)
+            else:
+                _relative, text = memory.read_source(source)
+        else:
+            _relative, text = memory.read_source(path)
         return text or ''
 
 
