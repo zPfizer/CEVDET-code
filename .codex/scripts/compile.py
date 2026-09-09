@@ -258,6 +258,23 @@ def _commit_machine_snapshot(vault_root: Path, label: str) -> tuple[str, str]:
                 return "deferred", "source-path-contains-secret"
             if any(not path.startswith(("daily/", "knowledge/")) for path in paths):
                 return "deferred", "machine-stage-boundary"
+            snapshot = _git(
+                vault_root,
+                "ls-files",
+                "-z",
+                "--",
+                "daily",
+                "knowledge",
+                index_file=private_index,
+            )
+            snapshot_paths = [path for path in snapshot.stdout.split("\0") if path]
+            if snapshot.returncode:
+                return "deferred", "machine-stage-snapshot-unreadable"
+            try:
+                for path in snapshot_paths:
+                    _check_secret_path(path)
+            except PolicyError:
+                return "deferred", "source-path-contains-secret"
             tree = _git(vault_root, "write-tree", index_file=private_index)
             if tree.returncode:
                 return "deferred", "machine-tree-failed"

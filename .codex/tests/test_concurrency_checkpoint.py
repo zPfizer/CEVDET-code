@@ -147,6 +147,27 @@ class CheckpointConcurrencyTests(unittest.TestCase):
         self.assertEqual(secret.read_text(encoding='utf-8'), 'secret\n')
         self.assertFalse((self.root / '.git/index.lock').exists())
 
+    def test_tracked_secret_filename_blocks_a_safe_checkpoint_snapshot(self):
+        secret = self.root / 'daily/password=synthetic.md'
+        secret.write_text('secret\n', encoding='utf-8')
+        self.git('add', '--', 'daily/password=synthetic.md')
+        self.git('commit', '-qm', 'tracked synthetic path')
+        self.daily.write_text('safe machine update\n', encoding='utf-8')
+        original_secret = secret.read_bytes()
+        index_path = self.root / '.git/index'
+        original_index = index_path.read_bytes()
+        parent = self.git('rev-parse', 'HEAD').stdout.strip()
+
+        outcome, detail = compiler._checkpoint_machine_outputs(
+            self.root, self.state, 'tracked-secret',
+        )
+
+        self.assertEqual((outcome, detail), ('deferred', 'source-path-contains-secret'))
+        self.assertEqual(self.git('rev-parse', 'HEAD').stdout.strip(), parent)
+        self.assertEqual(index_path.read_bytes(), original_index)
+        self.assertEqual(secret.read_bytes(), original_secret)
+        self.assertFalse((self.root / '.git/index.lock').exists())
+
     def test_foreign_index_lock_is_preserved(self):
         lock_path = self.root / '.git/index.lock'
         lock_path.write_bytes(b'foreign owner')
