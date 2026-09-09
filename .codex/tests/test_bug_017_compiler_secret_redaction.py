@@ -1,6 +1,7 @@
 import hashlib
 from contextlib import redirect_stdout
 import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -13,6 +14,88 @@ from test_second_brain_acceptance import _deterministic_compiler, _seed_vault
 
 
 class CompilerSecretRedactionTests(unittest.TestCase):
+    def test_secret_path_failure_receipt_does_not_block_next_valid_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _seed_vault(vault)
+            safe = vault / "daily/2026-09-03.md"
+            unsafe = vault / "daily/password=synthetic.md"
+            unsafe.write_bytes(safe.read_bytes())
+            safe.unlink()
+            (vault / "daily/2026-09-04.md").unlink()
+            state_dir = vault / ".codex/scripts/.state"
+
+            def unexpected_model(_prompt, _stage):
+                raise AssertionError("secret path reached model")
+
+            with patch.object(memory_compile, "VAULT_ROOT", vault), \
+                    patch.object(memory_compile, "STATE_DIR", state_dir), \
+                    patch.object(memory_compile, "_run_codex", side_effect=unexpected_model), \
+                    patch.object(memory_compile, "_checkpoint_machine_outputs"):
+                self.assertEqual(memory_compile.main(["--strict", "--max-calls", "1"]), 1)
+
+            failed_state = memory_compile.compile_state.load(state_dir)
+            self.assertEqual(failed_state.runs[-1]["daily_file"], "<redacted-path>")
+            unsafe.rename(safe)
+
+            with patch.object(memory_compile, "VAULT_ROOT", vault), \
+                    patch.object(memory_compile, "STATE_DIR", state_dir), \
+                    patch.object(memory_compile, "_run_codex", side_effect=_deterministic_compiler), \
+                    patch.object(memory_compile, "_checkpoint_machine_outputs", return_value=("clean", "")):
+                result = memory_compile.main(["--strict", "--max-calls", "1"])
+
+            state = memory_compile.compile_state.load(state_dir)
+            self.assertEqual(result, 0)
+            self.assertIn("2026-09-03.md", state.ingested)
+
+    def test_cli_rejects_unsafe_legacy_state_without_rewriting_or_model(self):
+        for field in ("ingested", "cursor", "runs"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                vault = Path(temporary)
+                _seed_vault(vault)
+                state_dir = vault / ".codex/scripts/.state"
+                state_path = state_dir / "compile-state.json"
+                ingested = {
+                    path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in (vault / "daily").glob("*.md")
+                }
+                state = {
+                    "ingested": ingested,
+                    "cursor": "2026-09-04.md",
+                    "last_run": "",
+                    "last_status": "ok",
+                    "runs": [],
+                }
+                if field == "ingested":
+                    state["ingested"]["password=synthetic.md"] = "0" * 64
+                elif field == "cursor":
+                    state["cursor"] = "password=synthetic.md"
+                else:
+                    state["runs"] = [{"daily_file": "password=synthetic.md", "status": "ok"}]
+                state_path.write_text(json.dumps(state), encoding="utf-8")
+                original_state = state_path.read_bytes()
+                original_source = (vault / "daily/2026-09-03.md").read_bytes()
+                calls = []
+
+                def unexpected_model(_prompt, _stage):
+                    calls.append("model")
+                    raise AssertionError("unsafe legacy state reached model")
+
+                with patch.object(memory_compile, "VAULT_ROOT", vault), \
+                        patch.object(memory_compile, "STATE_DIR", state_dir), \
+                        patch.object(memory_compile, "_run_codex", side_effect=unexpected_model), \
+                        patch.object(memory_compile, "_checkpoint_machine_outputs") as checkpoint:
+                    result = memory_compile.main(["--strict", "--max-calls", "1"])
+
+                health = (state_dir / "health.json").read_text(encoding="utf-8")
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                checkpoint.assert_not_called()
+                self.assertEqual(state_path.read_bytes(), original_state)
+                self.assertEqual((vault / "daily/2026-09-03.md").read_bytes(), original_source)
+                self.assertIn("compile-state-path-contains-secret", health)
+                self.assertNotIn("password=synthetic.md", health)
+
     def test_dry_run_rejects_secret_source_before_printing_name(self):
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

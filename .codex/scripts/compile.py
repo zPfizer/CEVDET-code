@@ -393,6 +393,20 @@ def _check_secret_path(relative: str) -> None:
         raise PolicyError("source-path-contains-secret")
 
 
+def _validate_compile_state_paths(state: CompileState) -> None:
+    paths = [*state.ingested, state.cursor]
+    paths.extend(
+        run.get("daily_file")
+        for run in state.runs
+        if isinstance(run, dict) and isinstance(run.get("daily_file"), str)
+    )
+    try:
+        for path in paths:
+            _check_secret_path(path)
+    except PolicyError as exc:
+        raise PolicyError("compile-state-path-contains-secret") from exc
+
+
 def _check_source(path: Path, vault_root: Path, directory: bool) -> None:
     relative = path.name
     try:
@@ -1581,7 +1595,15 @@ def _record_failure(
     *,
     persist_state: bool = True,
 ) -> None:
+    if persist_state:
+        try:
+            _validate_compile_state_paths(state)
+        except PolicyError:
+            persist_state = False
+    raw_daily_name = daily_name
     daily_name, _ = sanitize_text(daily_name, max_chars=None)
+    if daily_name != raw_daily_name:
+        daily_name = "<redacted-path>"
     detail, _ = sanitize_text(detail, max_chars=None)
     timestamp = _iso_now()
     state.last_run = timestamp
@@ -1648,6 +1670,21 @@ def _run_locked(
             CompileState(),
             "",
             "state-or-daily-read-failed",
+            str(exc),
+            trigger_claim,
+            persist_state=False,
+        )
+        return True
+    try:
+        _validate_compile_state_paths(state)
+    except PolicyError as exc:
+        if dry_run:
+            return True
+        _record_failure(
+            state_dir,
+            state,
+            "",
+            "compile-state-path-invalid",
             str(exc),
             trigger_claim,
             persist_state=False,
@@ -1862,6 +1899,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception as exc:  # Compiler must preserve the hook exit contract.
             try:
                 state = compile_state.load(STATE_DIR)
+                _validate_compile_state_paths(state)
                 persist_state = True
             except (OSError, ValueError):
                 state = CompileState()
