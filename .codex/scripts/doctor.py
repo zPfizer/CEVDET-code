@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from functools import cached_property
 import json
 import math
-from pathlib import Path
+import ntpath
+import os
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import shutil
@@ -19,23 +21,30 @@ from codex_runner import find_codex
 from graph_integrity import graph_notes, graph_summary
 from knowledge_schema import WIKILINK, validate_knowledge_tree, wikilink_target
 from process_control import pid_is_alive
-from worker_supervisor import STALE_HOOK_INPUT_SECONDS, inspect_worker_queue, has_unverified_process_tree
+from worker_supervisor import (
+    STALE_HOOK_INPUT_SECONDS,
+    SUPERVISOR_SCHEMA_VERSION,
+    _process_owner_is_active,
+    inspect_worker_queue,
+    has_unverified_process_tree,
+)
 from tag_taxonomy import (
     TaxonomyError,
     audit_inline_tags,
     audit_vault,
     load_taxonomy,
 )
-from tansu_semantic_metadata import audit_manifest as audit_tansu_semantic_manifest
 from vault_corpus import (
     ARCHIVE_ROOT,
     DAILY_ROOT,
     HUMAN_NOTE_ROOTS,
     KNOWLEDGE_ROOT,
     NoteIndex,
+    TEMPLATES_ROOT,
     by_key,
     by_stem,
     link_key,
+    markdown_paths,
     resolve_link,
     vault_notes,
 )
@@ -64,6 +73,30 @@ SESSION_START_REQUIRED_SECTIONS = {
 REQUIRED_NOTE_FIELDS = ("title", "created", "updated", "tags")
 # Roots whose wikilinks are validated; daily joined in tur 2 (spec 3f).
 LINK_ROOTS = frozenset({*HUMAN_NOTE_ROOTS, KNOWLEDGE_ROOT, DAILY_ROOT})
+
+
+def _native_path_key(value: str) -> str:
+    return value.casefold() if os.name == "nt" else value
+
+
+def _source_relative_base_key(source_parent: PurePosixPath, target: str) -> str | None:
+    parts = target.split("/")
+    if parts and parts[0] == ".":
+        parts = parts[1:]
+    elif not parts or parts[0] != "..":
+        return None
+    parent = source_parent
+    while parts and parts[0] == "..":
+        if parent == PurePosixPath("."):
+            return None
+        parent = parent.parent
+        parts.pop(0)
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return None
+    key = (parent / PurePosixPath(*parts)).as_posix()
+    return None if key == ".." or key.startswith("../") else key
+
+
 ALLOWED_ROOT_FILES = {
     ".beyin-version",
     ".gitattributes",
@@ -96,9 +129,19 @@ class Context:
     now: float = 0.0
 
     @cached_property
+    def corpus_paths(self) -> tuple[Path, ...]:
+        return tuple(
+            markdown_paths(
+                self.vault.resolve(),
+                excluded_root_dirs=frozenset({"tmp"}),
+                suffixes=frozenset({".md", ".base"}),
+            )
+        )
+
+    @cached_property
     def notes(self) -> tuple[NoteIndex, ...]:
         """The vault read once; every vault check filters this same index."""
-        return vault_notes(self.vault)
+        return vault_notes(self.vault, paths=self.corpus_paths)
 
 
 def _finite_timestamp(value: object) -> float | None:
@@ -109,6 +152,17 @@ def _finite_timestamp(value: object) -> float | None:
     except (OverflowError, ValueError):
         return None
     return timestamp if math.isfinite(timestamp) else None
+
+
+def _receipt_error(value: object) -> str:
+    return (
+        "runtime-error-recorded"
+        if isinstance(value, str) and value
+        else "error-class-invalid"
+    )
+
+
+_HASH64 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _exists(vault: Path, paths: list[str]) -> tuple[bool, str]:
@@ -467,17 +521,35 @@ def _hook_health_check(ctx: Context) -> Check | list[Check]:
                 )
             if not isinstance(health, dict):
                 return Check("Hook sağlığı", "FAIL", f"health object değil: {path.name}")
+            expected_session_key = path.stem.removeprefix("hook-health-")
+            session_key = health.get("session_key")
+            if (
+                type(health.get("schema_version")) is not int
+                or health["schema_version"] != 2
+                or health.get("component") != "hook"
+                or not isinstance(session_key, str)
+                or (
+                    session_key != "global"
+                    and _HASH64.fullmatch(session_key) is None
+                )
+                or session_key != expected_session_key
+            ):
+                return Check("Hook sağlığı", "FAIL", f"health receipt alanları geçersiz: {path.name}")
             generation = health.get("generation")
-            if not isinstance(generation, int) or generation < 1:
+            if type(generation) is not int or generation < 1:
                 return Check("Hook sağlığı", "FAIL", f"generation eksik: {path.name}")
+            if type(health.get("ts")) is not int or _finite_timestamp(health.get("ts")) is None:
+                return Check("Hook sağlığı", "FAIL", f"timestamp geçersiz: {path.name}")
             generations += generation
             status = health.get("status")
             if not isinstance(status, str) or status not in {"ok", "error"}:
                 return Check("Hook sağlığı", "FAIL", f"status geçersiz: {path.name}")
             if status == "error":
                 error = health.get("error")
-                error_text = str(error or "error-class-missing")
-                timestamp = _finite_timestamp(health.get("ts", 0))
+                if not isinstance(error, str) or not error:
+                    return Check("Hook sağlığı", "FAIL", f"hata sınıfı eksik: {path.name}")
+                error_text = _receipt_error(error)
+                timestamp = _finite_timestamp(health.get("ts"))
                 if timestamp is None:
                     failures.append(f"{error_text} (invalid timestamp)")
                 elif ctx.now - timestamp > HOOK_RUNTIME_MAX_AGE_SECONDS:
@@ -507,8 +579,6 @@ def _hook_health_check(ctx: Context) -> Check | list[Check]:
         if not isinstance(health, dict):
             return Check("Hook sağlığı", "FAIL", "health object değil")
         status = health.get("status")
-        if status == "ok":
-            return Check("Hook sağlığı", "OK", "temiz")
         error = health.get("error")
     except (OSError, UnicodeError, KeyError, TypeError, json.JSONDecodeError):
         return Check("Hook sağlığı", "FAIL", "health kaydı okunamadı")
@@ -516,9 +586,29 @@ def _hook_health_check(ctx: Context) -> Check | list[Check]:
         not isinstance(status, str) or status not in {"ok", "error"}
     ):
         return Check("Hook sağlığı", "FAIL", "status geçersiz")
+    if status in {"ok", "error"}:
+        session_key = health.get("session_key")
+        generation = health.get("generation")
+        if (
+            type(health.get("schema_version")) is not int
+            or health["schema_version"] != 2
+            or health.get("component") != "hook"
+            or not isinstance(session_key, str)
+            or (
+                session_key != "global"
+                and _HASH64.fullmatch(session_key) is None
+            )
+            or type(generation) is not int
+            or generation < 1
+            or type(health.get("ts")) is not int
+            or _finite_timestamp(health.get("ts")) is None
+        ):
+            return Check("Hook sağlığı", "FAIL", "health receipt alanları geçersiz")
+    if status == "ok":
+        return Check("Hook sağlığı", "OK", "temiz")
     if not isinstance(error, str) or not error:
         return Check("Hook sağlığı", "FAIL", "hata sınıfı eksik")
-    return Check("Hook sağlığı", "FAIL", error)
+    return Check("Hook sağlığı", "FAIL", _receipt_error(error))
 
 
 def _brain_health_check(ctx: Context) -> Check:
@@ -646,7 +736,7 @@ def _flush_inflight_check(ctx: Context) -> Check:
     invalid: list[str] = []
     valid_statuses = {"inflight", "prepared", "ok", "fail"}
     for path in sorted(ctx.state_dir.glob("flush-*.json")):
-        if path.name.startswith(("flush-coverage-", "flush-batch-")):
+        if path.name.startswith(("flush-coverage-", "flush-batch-", "flush-index-")):
             continue
         try:
             receipt = json.loads(path.read_text(encoding="utf-8"))
@@ -660,11 +750,127 @@ def _flush_inflight_check(ctx: Context) -> Check:
         if not isinstance(status, str) or status not in valid_statuses:
             invalid.append(path.name)
             continue
-        if status != "inflight":
-            continue
         timestamp = _finite_timestamp(receipt.get("ts"))
-        if timestamp is None:
+        session_key = receipt.get("session_key")
+        expected_session_key = path.stem.removeprefix("flush-")
+        generation = receipt.get("generation")
+        receipts = receipt.get("receipts")
+        if (
+            type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != 2
+            or not isinstance(session_key, str)
+            or _HASH64.fullmatch(session_key) is None
+            or session_key != expected_session_key
+            or type(receipt.get("ts")) is not int
+            or timestamp is None
+            or type(generation) is not int
+            or generation < 1
+            or not isinstance(receipts, dict)
+        ):
             invalid.append(path.name)
+            continue
+        entries_invalid = False
+        for key, item in receipts.items():
+            if (
+                not isinstance(key, str)
+                or _HASH64.fullmatch(key) is None
+                or not isinstance(item, dict)
+                or item.get("idempotency_key") != key
+                or item.get("status") not in {"prepared", "ok"}
+                or type(item.get("ts")) is not int
+                or _finite_timestamp(item.get("ts")) is None
+                or type(item.get("generation")) is not int
+                or item["generation"] < 1
+                or any(
+                    not isinstance(item.get(field), str)
+                    or _HASH64.fullmatch(item[field]) is None
+                    for field in ("transcript_digest", "summary_digest")
+                )
+            ):
+                entries_invalid = True
+                break
+        if entries_invalid:
+            invalid.append(path.name)
+            continue
+        reason = receipt.get("reason")
+        if "reason" in receipt and reason not in {
+            "turnend",
+            "precompact",
+            "sessionend",
+        }:
+            invalid.append(path.name)
+            continue
+        identity_fields = ("idempotency_key", "transcript_digest", "summary_digest")
+        identity_present = [field in receipt for field in identity_fields]
+
+        def identity_matches_nested() -> bool:
+            idempotency_key = receipt.get("idempotency_key")
+            item = receipts.get(idempotency_key)
+            if not isinstance(item, dict):
+                return False
+            if any(
+                item.get(field) != receipt.get(field)
+                for field in identity_fields
+            ):
+                return False
+            if item.get("status") != status:
+                return False
+            if item.get("ts") != receipt.get("ts"):
+                return False
+            if item.get("generation") != receipt.get("generation"):
+                return False
+            for field in (
+                "reason",
+                "detail",
+                "daily_file",
+                "event_iso",
+                "batch_start",
+                "batch_end",
+            ):
+                if field in receipt and item.get(field) != receipt.get(field):
+                    return False
+            return True
+
+        if status == "inflight":
+            if (
+                reason not in {"turnend", "precompact", "sessionend"}
+                or type(receipt.get("transcript_digest")) is not str
+                or _HASH64.fullmatch(receipt["transcript_digest"]) is None
+                or "idempotency_key" in receipt
+                or "summary_digest" in receipt
+            ):
+                invalid.append(path.name)
+                continue
+        elif status == "fail":
+            if (
+                not isinstance(receipt.get("detail"), str)
+                or not receipt["detail"]
+                or any(identity_present)
+                or "reason" in receipt
+            ):
+                invalid.append(path.name)
+                continue
+        elif status == "prepared" or any(identity_present):
+            if (
+                not all(identity_present)
+                or reason not in {"turnend", "precompact", "sessionend"}
+                or any(
+                    not isinstance(receipt.get(field), str)
+                    or _HASH64.fullmatch(receipt[field]) is None
+                    for field in identity_fields
+                )
+                or not identity_matches_nested()
+            ):
+                invalid.append(path.name)
+                continue
+        elif status == "ok" and receipt.get("detail") not in {
+            "memory-excluded",
+            "below-minimum-turns",
+            "flush-bos",
+        }:
+            invalid.append(path.name)
+            continue
+        if status != "inflight":
             continue
         age = max(0, int(now - timestamp))
         if age > FLUSH_INFLIGHT_MAX_AGE_SECONDS:
@@ -911,7 +1117,29 @@ def _worker_delayed_job_check(ctx: Context) -> Check:
             "failed",
         }:
             return Check("Worker gecikmiş iş", "FAIL", "supervisor status geçersiz")
+        if (
+            type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != SUPERVISOR_SCHEMA_VERSION
+            or isinstance(receipt.get("generation"), bool)
+            or not isinstance(receipt.get("generation"), int)
+            or receipt["generation"] < 1
+            or not isinstance(receipt.get("launch_token"), str)
+            or isinstance(receipt.get("owner_pid"), bool)
+            or not isinstance(receipt.get("owner_pid"), int)
+            or receipt["owner_pid"] < 0
+            or _finite_timestamp(receipt.get("lease_until")) is None
+            or _finite_timestamp(receipt.get("updated_ts")) is None
+        ):
+            return Check("Worker gecikmiş iş", "FAIL", "supervisor receipt alanları geçersiz")
         supervisor = status
+        if ready_pending and supervisor == "running":
+            lease_until = _finite_timestamp(receipt["lease_until"])
+            if lease_until is None or not _process_owner_is_active(receipt):
+                return Check(
+                    "Worker gecikmiş iş",
+                    "FAIL",
+                    "running supervisor ownership geçersiz",
+                )
     evidence = f"ready-pending={ready_pending}; supervisor={supervisor}"
     if ready_pending and supervisor == "idle":
         return Check("Worker gecikmiş iş", "WARN", evidence)
@@ -1223,7 +1451,7 @@ def _vault_retrieval_check(ctx: Context) -> Check:
             return Check("Vault retrieval", "FAIL", "health kaydı okunamadı")
         if not isinstance(error, str) or not error:
             return Check("Vault retrieval", "FAIL", "hata sınıfı eksik")
-        return Check("Vault retrieval", "FAIL", error)
+        return Check("Vault retrieval", "FAIL", _receipt_error(error))
 
     try:
         # Sayım okuyucudur: doctor korpus cache'ini yazmaz.
@@ -1247,7 +1475,10 @@ def _vault_retrieval_check(ctx: Context) -> Check:
                 "WARN",
                 f"{entry_count} not; runtime timestamp invalid",
             )
-        observed_cwd = Path(receipt["cwd"]).resolve()
+        cwd = receipt.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            return Check("Vault retrieval", "FAIL", "runtime cwd geçersiz")
+        observed_cwd = Path(cwd).resolve()
     except (
         OSError,
         UnicodeError,
@@ -1265,27 +1496,26 @@ def _vault_retrieval_check(ctx: Context) -> Check:
         "error",
     }:
         return Check("Vault retrieval", "FAIL", "runtime outcome geçersiz")
-    numeric_fields = ("entries", "hits", "emitted", "chars", "budget")
+    numeric_fields = ("entries", "hits", "emitted", "chars", "budget", "duration_ms")
+    if any(field not in receipt for field in numeric_fields) or "paths" not in receipt:
+        return Check("Vault retrieval", "FAIL", "runtime receipt metriği eksik")
     metrics = {field: receipt[field] for field in numeric_fields if field in receipt}
     if any(
         isinstance(value, bool) or not isinstance(value, int) or value < 0
         for value in metrics.values()
     ):
         return Check("Vault retrieval", "FAIL", "runtime receipt metriği geçersiz")
-    paths_present = "paths" in receipt
-    paths: list[str] = []
-    if paths_present:
-        paths_value = receipt.get("paths")
-        if not isinstance(paths_value, list) or not all(
-            isinstance(path, str) and path for path in paths_value
-        ):
-            return Check("Vault retrieval", "FAIL", "runtime receipt yolları geçersiz")
-        paths = [path for path in paths_value if isinstance(path, str)]
-        if len(set(paths)) != len(paths):
-            return Check("Vault retrieval", "FAIL", "runtime receipt yolları geçersiz")
-    if paths_present and "emitted" in metrics and len(paths) != metrics["emitted"]:
+    paths_value = receipt.get("paths")
+    if not isinstance(paths_value, list) or not all(
+        isinstance(path, str) and path for path in paths_value
+    ):
+        return Check("Vault retrieval", "FAIL", "runtime receipt yolları geçersiz")
+    paths = [path for path in paths_value if isinstance(path, str)]
+    if len(set(paths)) != len(paths):
+        return Check("Vault retrieval", "FAIL", "runtime receipt yolları geçersiz")
+    if len(paths) != metrics["emitted"]:
         return Check("Vault retrieval", "FAIL", "runtime receipt sayımları tutarsız")
-    if paths_present and outcome != "emitted" and paths:
+    if outcome != "emitted" and paths:
         return Check("Vault retrieval", "FAIL", "runtime receipt sayımları tutarsız")
     if (
         "entries" in metrics
@@ -1302,8 +1532,6 @@ def _vault_retrieval_check(ctx: Context) -> Check:
     ):
         return Check("Vault retrieval", "FAIL", "runtime receipt sayımları tutarsız")
     if outcome == "emitted":
-        if any(field not in metrics for field in numeric_fields) or not paths_present:
-            return Check("Vault retrieval", "FAIL", "runtime receipt metriği eksik")
         if metrics["emitted"] < 1 or metrics["chars"] < 1:
             return Check("Vault retrieval", "FAIL", "runtime receipt metriği tutarsız")
     else:
@@ -1382,34 +1610,6 @@ def _tag_taxonomy_check(ctx: Context) -> Check:
     )
 
 
-def _tansu_semantic_metadata_check(ctx: Context) -> Check:
-    vault = ctx.vault
-    semantic_map = (
-        vault
-        / "🏰 300-Projects"
-        / "Tansu X Veri Havuzu"
-        / "tansu-semantik-kullanim-haritasi.md"
-    )
-    if not semantic_map.is_file():
-        return Check("Tansu semantik metadata", "OK", "kapsam dışı")
-    try:
-        audit = audit_tansu_semantic_manifest(vault)
-    except (OSError, UnicodeError, ValueError) as exc:
-        return Check(
-            "Tansu semantik metadata",
-            "FAIL",
-            f"denetlenemedi: {exc}",
-        )
-    evidence = f"{audit.matched}/{audit.total} manifest eşleşiyor"
-    if audit.mismatches:
-        return Check(
-            "Tansu semantik metadata",
-            "FAIL",
-            f"{evidence}; ilk {audit.mismatches[0]}",
-        )
-    return Check("Tansu semantik metadata", "OK", evidence)
-
-
 def _profile_maintenance_check(ctx: Context) -> Check:
     try:
         with memory_read(ctx.vault) as memory:
@@ -1466,6 +1666,23 @@ def _vault_link_check(ctx: Context) -> Check:
 
     keyed = by_key(notes)
     broken: list[str] = []
+    base_keys: set[str] = set()
+    base_names: dict[str, list[str]] = {}
+    vault_root = ctx.vault.resolve()
+    for base_path in (
+        path for path in ctx.corpus_paths if path.suffix.casefold() == ".base"
+    ):
+        key = base_path.relative_to(vault_root).as_posix()
+        try:
+            base_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            return Check(
+                "Vault bağlantıları",
+                "FAIL",
+                f"okunamadı: {base_path.name} ({exc.__class__.__name__})",
+            )
+        base_keys.add(_native_path_key(key))
+        base_names.setdefault(_native_path_key(base_path.name), []).append(key)
     for source in files:
         if source.error:
             return Check(
@@ -1476,6 +1693,42 @@ def _vault_link_check(ctx: Context) -> Check:
         for match in WIKILINK.finditer(source.text):
             target = wikilink_target(match.group(1))
             if not target:
+                continue
+            base_target = PurePosixPath(target)
+            if base_target.suffix.casefold() == ".base":
+                source_relative_key = _source_relative_base_key(
+                    source.relative.parent, target
+                )
+                explicit_relative = target.startswith("./") or target.startswith("../")
+                if explicit_relative:
+                    if (
+                        not ntpath.isabs(target)
+                        and source_relative_key is not None
+                        and _native_path_key(source_relative_key) in base_keys
+                    ):
+                        continue
+                elif (
+                    not ntpath.isabs(target)
+                    and not any(part in {"", "."} for part in target.split("/"))
+                    and (
+                        _native_path_key(PurePosixPath(target).as_posix()) in base_keys
+                        or (
+                            _native_path_key(
+                                (source.relative.parent / base_target).as_posix()
+                            )
+                            in base_keys
+                        )
+                        or (
+                            len(base_target.parts) == 1
+                            and len(
+                                base_names.get(_native_path_key(base_target.name), ())
+                            )
+                            == 1
+                        )
+                    )
+                ):
+                    continue
+                broken.append(f"{source.key} -> {target}")
                 continue
             if resolve_link(target, keyed, stems) is None:
                 broken.append(f"{source.key} -> {target}")
@@ -1581,7 +1834,11 @@ def _metadata_schema_check(ctx: Context) -> Check:
         if missing:
             offenders.append(f"{note.key}: {','.join(missing)}")
         title = fields.get("title", "")
-        if isinstance(title, str) and title:
+        if (
+            isinstance(title, str)
+            and title
+            and not (note.root == TEMPLATES_ROOT and title.strip() == "{{title}}")
+        ):
             titles.setdefault(title, []).append(note.key)
     duplicate_titles = {title: keys for title, keys in titles.items() if len(keys) > 1}
     if duplicate_titles:
@@ -1622,7 +1879,6 @@ CHECKS: tuple[tuple[str, Callable[[Context], Check | list[Check]]], ...] = (
     ("İş yükü", _thread_workload_check),
     ("Vault retrieval", _vault_retrieval_check),
     ("Etiket sözlüğü", _tag_taxonomy_check),
-    ("Tansu semantik metadata", _tansu_semantic_metadata_check),
     ("SessionStart bağlam bütçesi", _session_context_budget_check),
     ("Profil bakımı", _profile_maintenance_check),
     ("Vault bağlantıları", _vault_link_check),
