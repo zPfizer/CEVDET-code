@@ -19,7 +19,7 @@ from user_evidence import filter_evidence, USER_LINK, proof_for_link
 
 MAX_EVENT_CHARS = 65_536
 SUPPRESSION_SCHEMA = 1
-PERSISTENT_TURNS_VERSION = "persistent-turns-v1"
+PERSISTENT_TURNS_VERSION = "persistent-turns-v2"
 _COMPANION_SOURCE_ALIASES = {
     '🔮 850-Companion/Sources/Last-Session.md': '🔮 850-Companion/Last-Session.md',
     '🔮 850-Companion/Sources/Journal.md': '🔮 850-Companion/Journal.md',
@@ -52,6 +52,7 @@ PERSONAL_CREDENTIAL = re.compile(
     r"(?:\s*[:=]\s*|\s+)(?:şu\s+|bu\s+)?\S[^\r\n]*"
 )
 CONTROL_TRAILING = re.compile(r"[\s.!?]+\Z")
+CONTROL_SEPARATOR = re.compile(r"[\s.,:;!?…\u2012\u2013\u2014\-]+")
 FORGET_WITH_TARGET = re.compile(
     r"(?is)^\s*(?:şunu|bu\s+bilgiyi)?\s*unut\s*[:：]\s*(.+?)\s*[.!?]*\s*$"
 )
@@ -79,6 +80,10 @@ QUOTED_CONTENT = re.compile(
     r'`[^`\n]*`|"[^"\n]*"|“[^”]*”|‘[^’]*’|«[^»]*»'
 )
 DO_NOT_SAVE = r'(?:(?:bunu|bu bilgiyi|bu ayrıntıyı)\s+)?(?:kaydetme|saklama|hafızana alma|hafızanda tutma|kaydetmeni istemiyorum)'
+STANDALONE_DO_NOT_SAVE = (
+    r'(?:lütfen\s+)?' + DO_NOT_SAVE
+    + r'(?:\s+lütfen)?'
+)
 READ_ONLY_REQUEST = re.compile(
     r"\b(?:salt[ -]?okunur|read[ -]?only|sadece\s+incele|"
     r"hiçbir\s+dosyayı\s+değiştirme|dosyaları\s+değiştirme|"
@@ -357,6 +362,7 @@ def memory_directive(text: str) -> MemoryDirective:
     raw = text.strip()
     unquoted = _unquoted_request(text)
     folded = unicodedata.normalize("NFKC", unquoted).casefold().replace("i\u0307", "i")
+    raw_folded = unicodedata.normalize("NFKC", raw).casefold().replace("i\u0307", "i")
     if re.search(r'\b(?:bu (?:konuşmada|sohbette|oturumda|sohbet aramızda)|aramızda) kalsın\b', folded):
         return MemoryDirective("session-only")
     if contains_secret(raw):
@@ -364,10 +370,8 @@ def memory_directive(text: str) -> MemoryDirective:
     if re.search(r"\bbenim\s+hakkımda\s+ne\s+biliyorsun\b", folded):
         return MemoryDirective("what-known")
     if re.search(r'\b' + DO_NOT_SAVE + r'\b', folded):
-        standalone = re.fullmatch(
-            r'(?:lütfen\s+)?' + DO_NOT_SAVE,
-            CONTROL_TRAILING.sub("", folded),
-        )
+        standalone_text = CONTROL_SEPARATOR.sub(" ", raw_folded).strip()
+        standalone = re.fullmatch(STANDALONE_DO_NOT_SAVE, standalone_text)
         return MemoryDirective("do-not-save", "" if standalone else raw)
     if re.search(r"\b(?:unut(?:ur\s+musun)?|hafızandan\s+(?:çıkar|sil)|hatırlamanı\s+istemiyorum)\b", folded):
         match = FORGET_WITH_TARGET.match(raw) or FORGET_SUFFIX.match(raw)

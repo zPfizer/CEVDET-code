@@ -17,6 +17,8 @@ class MemoryDirectiveTests(unittest.TestCase):
         ordinary = [
             'Makalede “bu konuşmada kalsın” yazıyor. Bunu değerlendir.',
             'Yazar "bunu kaydetme" diyor; bu görüşü araştır.',
+            'Yazar "bunu kaydetme, lütfen" diyor; bu görüşü araştır.',
+            'Yazar "bunu kaydetme! Lütfen." diyor; bu görüşü araştır.',
             'Alıntı: `Şunu unut: Ankara`',
             '> Bunu unut.\nBu cümleyi açıkla.',
             '```text\nBu konuşmada kalsın.\n```\nMetni özetle.',
@@ -31,8 +33,22 @@ class MemoryDirectiveTests(unittest.TestCase):
                 self.assertEqual(memory_ledger.persistent_turns([('user', text)]), [('user', text)])
         target = 'Şunu unut: "Levent Ankara’da yaşıyor"'
         self.assertEqual(memory_ledger.memory_directive(target).kind, 'forget')
-        self.assertEqual(memory_ledger.memory_directive('"Geçici bilgi". Bunu kaydetme.').kind,
-                         'do-not-save')
+        for quoted_target in (
+            '"Geçici bilgi". Bunu kaydetme.',
+            "'Geçici bilgi'. Bunu kaydetme.",
+            '```text\nGeçici bilgi\n```\nBunu kaydetme.',
+        ):
+            with self.subTest(quoted_target=quoted_target):
+                self.assertEqual(memory_ledger.memory_directive(quoted_target).kind, 'do-not-save')
+                self.assertEqual(memory_ledger.memory_directive(quoted_target).target, quoted_target)
+                self.assertEqual(
+                    memory_ledger.persistent_turns([
+                        ('user', 'Eski karar.'),
+                        ('assistant', 'Eski yanıt.'),
+                        ('user', quoted_target),
+                    ]),
+                    [('user', 'Eski karar.'), ('assistant', 'Eski yanıt.')],
+                )
 
     def test_natural_memory_controls_are_deterministic(self) -> None:
         cases = {
@@ -43,6 +59,21 @@ class MemoryDirectiveTests(unittest.TestCase):
                 "Levent Ankara'da yaşıyor",
             ),
             "Bunu kaydetme.": ("do-not-save", ""),
+            "Bunu kaydetme, lütfen.": ("do-not-save", ""),
+            "Lütfen, bunu kaydetme!": ("do-not-save", ""),
+            "Bunu kaydetme! Lütfen.": ("do-not-save", ""),
+            "Bunu kaydetme? Lütfen…": ("do-not-save", ""),
+            "Bunu kaydetme - lütfen.": ("do-not-save", ""),
+            "Bunu kaydetme—lütfen.": ("do-not-save", ""),
+            "—Bunu kaydetme.": ("do-not-save", ""),
+            "Bunu kaydetme, lütfen bunu ayrıca açıkla.": (
+                "do-not-save",
+                "Bunu kaydetme, lütfen bunu ayrıca açıkla.",
+            ),
+            "Bunu kaydetme! Lütfen bunu ayrıca açıkla.": (
+                "do-not-save",
+                "Bunu kaydetme! Lütfen bunu ayrıca açıkla.",
+            ),
             "Bu konuşmada kalsın.": ("session-only", ""),
             "Bu sohbet aramızda kalsın.": ("session-only", ""),
             "Bu oturumda kalsın.": ("session-only", ""),
@@ -241,7 +272,7 @@ class TranscriptPrivacyTests(unittest.TestCase):
             ("assistant", "Not ettim."),
             ("user", "Geçici ayrıntı."),
             ("assistant", "Anladım."),
-            ("user", "Bunu kaydetme."),
+            ("user", "Bunu kaydetme! Lütfen."),
             ("assistant", "Kaydetmeyeceğim."),
             ("user", "Kalıcı karar devam ediyor."),
         ]
