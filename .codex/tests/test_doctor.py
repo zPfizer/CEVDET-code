@@ -1345,6 +1345,24 @@ class DoctorRegistryTests(unittest.TestCase):
         names = [name for name, _function in doctor.CHECKS]
         self.assertEqual(len(names), len(set(names)), "T05_REGISTRY_DUPLICATE_NAME")
 
+    def test_doctor_is_independent_of_retired_tansu_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            semantic_map = (
+                vault
+                / "🏰 300-Projects"
+                / "Tansu X Veri Havuzu"
+                / "tansu-semantik-kullanim-haritasi.md"
+            )
+            semantic_map.parent.mkdir(parents=True)
+            semantic_map.write_text("# harita\n", encoding="utf-8")
+
+            checks = doctor.run_checks(vault, project_root=vault)
+
+        names = {check.name for check in checks}
+        self.assertNotIn("Tansu semantik metadata", names)
+        self.assertFalse(any("tansu" in name.casefold() for name in names))
+
     def test_only_runs_a_single_named_check(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
