@@ -263,7 +263,6 @@ class DoctorTests(unittest.TestCase):
         for owner_pid, lease_until in (
             (0, 200),
             (999_999_999, 200),
-            (os.getpid(), 99),
         ):
             with self.subTest(owner_pid=owner_pid, lease_until=lease_until), tempfile.TemporaryDirectory() as temporary:
                 state = Path(temporary)
@@ -295,7 +294,7 @@ class DoctorTests(unittest.TestCase):
                 self.assertEqual(check.status, "FAIL")
                 self.assertIn("ownership", check.evidence)
 
-    def test_doctor_accepts_ready_pending_job_with_live_running_supervisor(self) -> None:
+    def test_doctor_accepts_ready_pending_job_with_live_owner_after_lease_expiry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             pending = state / "worker-jobs" / "pending"
@@ -312,7 +311,7 @@ class DoctorTests(unittest.TestCase):
                         "generation": 1,
                         "launch_token": "",
                         "owner_pid": os.getpid(),
-                        "lease_until": 200,
+                        "lease_until": 99,
                         "updated_ts": 100,
                     }
                 ),

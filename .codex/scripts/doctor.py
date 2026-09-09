@@ -1097,7 +1097,7 @@ def _worker_delayed_job_check(ctx: Context) -> Check:
         supervisor = status
         if ready_pending and supervisor == "running":
             lease_until = _finite_timestamp(receipt["lease_until"])
-            if lease_until is None or lease_until <= now or not _process_owner_is_active(receipt):
+            if lease_until is None or not _process_owner_is_active(receipt):
                 return Check(
                     "Worker gecikmiş iş",
                     "FAIL",
