@@ -124,9 +124,19 @@ class Context:
     now: float = 0.0
 
     @cached_property
+    def corpus_paths(self) -> tuple[Path, ...]:
+        return tuple(
+            markdown_paths(
+                self.vault.resolve(),
+                excluded_root_dirs=frozenset({"tmp"}),
+                suffixes=frozenset({".md", ".base"}),
+            )
+        )
+
+    @cached_property
     def notes(self) -> tuple[NoteIndex, ...]:
         """The vault read once; every vault check filters this same index."""
-        return vault_notes(self.vault)
+        return vault_notes(self.vault, paths=self.corpus_paths)
 
 
 def _finite_timestamp(value: object) -> float | None:
@@ -1496,12 +1506,11 @@ def _vault_link_check(ctx: Context) -> Check:
     broken: list[str] = []
     base_keys: set[str] = set()
     base_names: dict[str, list[str]] = {}
-    for base_path in markdown_paths(
-        ctx.vault,
-        excluded_root_dirs=frozenset({"tmp"}),
-        suffix=".base",
+    vault_root = ctx.vault.resolve()
+    for base_path in (
+        path for path in ctx.corpus_paths if path.suffix.casefold() == ".base"
     ):
-        key = base_path.relative_to(ctx.vault).as_posix()
+        key = base_path.relative_to(vault_root).as_posix()
         try:
             base_path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:

@@ -12,7 +12,7 @@ import ntpath
 import os
 import posixpath
 import stat
-from typing import Iterator, Sequence
+from typing import Iterable, Iterator, Sequence
 
 from knowledge_schema import parse_frontmatter
 
@@ -81,11 +81,12 @@ def markdown_paths(
     root: Path,
     *,
     excluded_root_dirs: frozenset[str] = frozenset(),
-    suffix: str = ".md",
+    suffixes: frozenset[str] = frozenset({".md"}),
 ) -> Iterator[Path]:
     """Shared traversal: never descend into infrastructure or linked directories."""
     if root.is_symlink() or root.is_junction():
         return
+    accepted_suffixes = frozenset(item.casefold() for item in suffixes)
     def read_error(error: OSError) -> None:
         raise error
     for current, directories, files in os.walk(root, topdown=True, followlinks=False, onerror=read_error):
@@ -100,18 +101,29 @@ def markdown_paths(
         ]
         for name in files:
             path = current_path / name
-            if path.suffix.lower() != suffix.casefold():
+            if path.suffix.lower() not in accepted_suffixes:
                 continue
             if not stat.S_ISREG(path.lstat().st_mode):
                 continue
             yield path
 
 
-def vault_notes(vault: Path) -> tuple[NoteIndex, ...]:
+def vault_notes(
+    vault: Path,
+    *,
+    paths: Iterable[Path] | None = None,
+) -> tuple[NoteIndex, ...]:
     """Every markdown note under ``vault``, read once, in path order."""
     root = vault.resolve()
     notes: list[NoteIndex] = []
-    for path in markdown_paths(root, excluded_root_dirs=frozenset({"tmp"})):
+    paths = (
+        markdown_paths(root, excluded_root_dirs=frozenset({"tmp"}))
+        if paths is None
+        else paths
+    )
+    for path in paths:
+        if path.suffix.casefold() != ".md":
+            continue
         if path.is_relative_to(root / COMPANION_ROOT / "Sources"):
             continue
         try:

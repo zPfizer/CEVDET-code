@@ -939,6 +939,21 @@ tags: [doğrulama]
         self.assertIn("Views.base", check.evidence)
         self.assertIn("PermissionError", check.evidence)
 
+    def test_doctor_base_index_accepts_relative_vault_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            project.mkdir(parents=True)
+            (project / "Views.base").write_text("views: []\n", encoding="utf-8")
+            (project / "Dashboard.md").write_text(
+                "# Dashboard\n[[Views.base]]\n", encoding="utf-8"
+            )
+            relative_vault = Path(os.path.relpath(vault))
+
+            check = doctor._vault_link_check(doctor.Context(relative_vault))
+
+        self.assertEqual(check.status, "OK")
+
     def test_doctor_fails_when_base_file_wikilink_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

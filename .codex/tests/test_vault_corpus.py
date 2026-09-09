@@ -120,8 +120,17 @@ class VaultCorpusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
             _build_vault(vault)
+            (vault / "Views.base").write_text("views: []\n", encoding="utf-8")
 
             with mock.patch.object(
+                vault_corpus.os,
+                "walk",
+                wraps=vault_corpus.os.walk,
+            ) as walk, mock.patch.object(
+                doctor,
+                "build_vault_map",
+                return_value=(),
+            ), mock.patch.object(
                 doctor,
                 "vault_notes",
                 wraps=vault_corpus.vault_notes,
@@ -133,6 +142,7 @@ class VaultCorpusTests(unittest.TestCase):
                 checks = doctor.run_checks(vault, project_root=vault)
 
         self.assertEqual(traversal.call_count, 1)
+        self.assertEqual(walk.call_count, 1)
         for name in (
             "Vault bağlantıları",
             "Vault grafiği",
