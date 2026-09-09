@@ -835,6 +835,7 @@ tags: [doğrulama]
             note.parent.mkdir(parents=True)
             note.write_text(
                 "# Dashboard\n"
+                "[[./Tansu Kaynakları.base#Sinyal ve Strateji]]\n"
                 "[[Tansu Kaynakları.base#Sinyal ve Strateji]]\n"
                 "[[🏰 300-Projects/Tansu X Veri Havuzu/Tansu Kaynakları.base#Veri ve Kanıt]]\n",
                 encoding="utf-8",
@@ -859,18 +860,47 @@ tags: [doğrulama]
             nested.mkdir(parents=True)
             (project / "Views.base").write_text("views: []\n", encoding="utf-8")
             note = nested / "Dashboard.md"
-            note.write_text(
-                "# Dashboard\n[[../Views.base]]\n[[foo/../../Views.base]]\n",
-                encoding="utf-8",
-            )
+            note.write_text("# Dashboard\n[[../Views.base]]\n", encoding="utf-8")
 
             accepted = doctor._vault_link_check(doctor.Context(vault))
+            note.write_text("# Dashboard\n[[foo/../../Views.base]]\n", encoding="utf-8")
+            malformed = doctor._vault_link_check(doctor.Context(vault))
             note.write_text("# Dashboard\n[[../../../../outside.base]]\n", encoding="utf-8")
             rejected = doctor._vault_link_check(doctor.Context(vault))
 
         self.assertEqual(accepted.status, "OK")
+        self.assertEqual(malformed.status, "FAIL")
         self.assertEqual(rejected.status, "FAIL")
         self.assertIn("outside.base", rejected.evidence)
+
+    def test_doctor_rejects_explicit_relative_base_link_to_global_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            note = project / "Dashboard.md"
+            note.parent.mkdir(parents=True)
+            (vault / "Views.base").write_text("views: []\n", encoding="utf-8")
+            note.write_text("# Dashboard\n[[./Views.base]]\n", encoding="utf-8")
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("./Views.base", check.evidence)
+
+    def test_doctor_rejects_nonexplicit_base_path_with_literal_dot_segment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            project = vault / "🏰 300-Projects" / "Tansu X Veri Havuzu"
+            folder = project / "folder"
+            note = project / "Dashboard.md"
+            folder.mkdir(parents=True)
+            (folder / "Views.base").write_text("views: []\n", encoding="utf-8")
+            note.write_text("# Dashboard\n[[folder/./Views.base]]\n", encoding="utf-8")
+
+            check = doctor._vault_link_check(doctor.Context(vault))
+
+        self.assertEqual(check.status, "FAIL")
+        self.assertIn("folder/./Views.base", check.evidence)
 
     @unittest.skipUnless(os.name == "nt", "Windows path case contract")
     def test_doctor_matches_base_file_wikilinks_case_insensitively_on_windows(self) -> None:

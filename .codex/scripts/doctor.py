@@ -8,7 +8,6 @@ import math
 import ntpath
 import os
 from pathlib import Path, PurePosixPath
-import posixpath
 import re
 import shlex
 import shutil
@@ -73,6 +72,24 @@ LINK_ROOTS = frozenset({*HUMAN_NOTE_ROOTS, KNOWLEDGE_ROOT, DAILY_ROOT})
 
 def _native_path_key(value: str) -> str:
     return value.casefold() if os.name == "nt" else value
+
+
+def _source_relative_base_key(source_parent: PurePosixPath, target: str) -> str | None:
+    parts = target.split("/")
+    if parts and parts[0] == ".":
+        parts = parts[1:]
+    elif not parts or parts[0] != "..":
+        return None
+    parent = source_parent
+    while parts and parts[0] == "..":
+        if parent == PurePosixPath("."):
+            return None
+        parent = parent.parent
+        parts.pop(0)
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return None
+    key = (parent / PurePosixPath(*parts)).as_posix()
+    return None if key == ".." or key.startswith("../") else key
 
 
 ALLOWED_ROOT_FILES = {
@@ -1508,19 +1525,28 @@ def _vault_link_check(ctx: Context) -> Check:
                 continue
             base_target = PurePosixPath(target)
             if base_target.suffix.casefold() == ".base":
-                normalized_source_key = posixpath.normpath(
-                    (source.relative.parent / base_target).as_posix()
+                source_relative_key = _source_relative_base_key(
+                    source.relative.parent, target
                 )
-                escaped_vault = (
-                    normalized_source_key == ".."
-                    or normalized_source_key.startswith("../")
-                )
-                if (
+                explicit_relative = target.startswith("./") or target.startswith("../")
+                if explicit_relative:
+                    if (
+                        not ntpath.isabs(target)
+                        and source_relative_key is not None
+                        and _native_path_key(source_relative_key) in base_keys
+                    ):
+                        continue
+                elif (
                     not ntpath.isabs(target)
-                    and not escaped_vault
+                    and not any(part in {"", "."} for part in target.split("/"))
                     and (
-                        _native_path_key(posixpath.normpath(target)) in base_keys
-                        or _native_path_key(normalized_source_key) in base_keys
+                        _native_path_key(PurePosixPath(target).as_posix()) in base_keys
+                        or (
+                            _native_path_key(
+                                (source.relative.parent / base_target).as_posix()
+                            )
+                            in base_keys
+                        )
                         or (
                             len(base_target.parts) == 1
                             and len(
