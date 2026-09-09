@@ -117,13 +117,18 @@ _WRITE_TARGET_OBJECT = (
     r"kod(?:u|unu|ları|larını)?|değişiklik(?:i|ini|leri|lerini)?|"
     r"ayar(?:ı|ını|ları|larını)?)"
 )
+_WRITE_FILE_OBJECT = r"(?:dosya(?:yı|sını|ları|larını)?)"
+_WRITE_FILE_MEMBER = rf"dosya(?:daki|deki|sındaki|sindeki)\s+{_WRITE_TARGET_OBJECT}"
 _WRITE_FILE_TARGET = (
-    rf"(?:[\w.-]+\s+)?(?:dosya(?:yı|sını|ları|larını)?|"
-    rf"dosya(?:daki|deki|sındaki|sindeki)\s+{_WRITE_TARGET_OBJECT})"
+    rf"(?:[\w.-]+\s+)?(?:{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER})"
 )
 _WRITE_PROJECT_TARGET = rf"[\w.-]+\s+projesindeki\s+{_WRITE_TARGET_OBJECT}"
 _WRITE_MODULE_TARGET = (
     rf"[\w.-]+\s+modül(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}"
+)
+_QUOTED_PATH = (
+    r'''(?:"[^"\r\n]*\.[A-Za-z0-9_-]+"|'''
+    r'''\'[^\'\r\n]*\.[A-Za-z0-9_-]+\')'''
 )
 _WRITE_TARGET = (
     rf"(?:bunu|bunları|şunu|şunları|onu|onları|"
@@ -132,18 +137,21 @@ _WRITE_TARGET = (
     rf"{_WRITE_TARGET_OBJECT}|"
     rf"(?:[a-z]:[\\/]|\.{{1,2}}[\\/]|[\w.-]+[\\/])[\w./\\-]+"
     rf"(?:\s+{_WRITE_TARGET_OBJECT})?|"
-    rf"[\w.-]+\.[A-Za-z0-9_-]+(?:\s+{_WRITE_TARGET_OBJECT})?)"
+    rf"[\w.-]+\.[A-Za-z0-9_-]+(?:\s+{_WRITE_TARGET_OBJECT})?|"
+    rf"{_QUOTED_PATH}(?:\s+{_WRITE_TARGET_OBJECT})?)"
 )
+_TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen)\s+)*"
 TARGETED_WRITE_COMMAND = re.compile(
-    rf"^\s*(?:acaba\s+)?{_WRITE_TARGET}\s+{_WRITE_MUTATION}"
+    rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+{_WRITE_MUTATION}"
     rf"(?:\s+lütfen)?\s*[.!]*\s*$"
 )
 TARGETED_WRITE_QUESTION = re.compile(
-    rf"^\s*(?:acaba\s+)?{_WRITE_TARGET}\s+{_WRITE_QUESTION_VERB}\s+"
+    rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+"
+    rf"{_WRITE_QUESTION_VERB}\s+"
     rf"{_QUESTION_SUFFIX}(?:\s*,?\s*lütfen)?\?\s*$"
 )
 BARE_WRITE_QUESTION = re.compile(
-    rf"^\s*(?:acaba\s+)?{_WRITE_QUESTION_VERB}\s+{_QUESTION_SUFFIX}"
+    rf"^\s*{_TARGETED_WRITE_PREFIX}{_WRITE_QUESTION_VERB}\s+{_QUESTION_SUFFIX}"
     rf"(?:\s*,?\s*lütfen)?\?\s*$"
 )
 
@@ -164,6 +172,9 @@ CONDITIONAL_WRITE = re.compile(
 ACTION_QUESTION_WORD = re.compile(
     r"\b(?:ne|nasıl|neden|niçin|hangi|hangisi|kim|ne\s+zaman)\b"
 )
+_NAMED_FILE_TARGET = re.compile(
+    rf"^(?P<name>[\w.-]+)\s+(?:{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER})$"
+)
 
 
 @dataclass(frozen=True)
@@ -178,6 +189,24 @@ class MemoryPreferenceError(ValueError):
 
 class MemorySourceError(ValueError):
     pass
+
+
+def _targeted_write_matches(pattern: re.Pattern[str], folded: str) -> bool:
+    match = pattern.fullmatch(folded)
+    if match is None:
+        return False
+    named_file = _NAMED_FILE_TARGET.fullmatch(match.group("target"))
+    if named_file is None:
+        return True
+    name = named_file.group("name")
+    # A dot-qualified filename is target data; only the bare optional name can
+    # be the one-word conditional form (for example, "onaylıysa dosyayı").
+    if "." in name:
+        return True
+    return not (
+        NON_COMMITTAL_WRITE.fullmatch(name) is not None
+        or CONDITIONAL_WRITE.fullmatch(name) is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -348,10 +377,18 @@ def is_read_only_request(text: str) -> bool:
 
 
 def is_explicit_write_intent(text: str) -> bool:
-    # Quoted, read-only, conditional, and speculative text is not authorization.
-    if is_read_only_request(text) or _unquoted_request(text) != text.strip():
+    if is_read_only_request(text):
         return False
     folded = unicodedata.normalize("NFKC", text).casefold().replace("i\u0307", "i")
+    # Targeted forms have a bounded prefix and must not inspect the target token.
+    if (
+        _targeted_write_matches(TARGETED_WRITE_COMMAND, folded)
+        or _targeted_write_matches(TARGETED_WRITE_QUESTION, folded)
+    ):
+        return True
+    # Quoted data is never authorization unless the quoted target was accepted above.
+    if _unquoted_request(text) != text.strip():
+        return False
     if (
         NON_COMMITTAL_WRITE.search(folded)
         or CONDITIONAL_WRITE.search(folded)
@@ -360,8 +397,6 @@ def is_explicit_write_intent(text: str) -> bool:
         return False
     return (
         EXPLICIT_WRITE_INTENT.fullmatch(folded) is not None
-        or TARGETED_WRITE_COMMAND.fullmatch(folded) is not None
-        or TARGETED_WRITE_QUESTION.fullmatch(folded) is not None
         or BARE_WRITE_QUESTION.fullmatch(folded) is not None
     )
 

@@ -94,6 +94,11 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Atlas modülündeki hatayı düzelt.": ("correct", ""),
             "Borsa dosyasındaki hatayı düzelt.": ("correct", ""),
             "src/app.py dosyasını düzelt.": ("correct", ""),
+            "Lütfen src/app.py dosyasını düzelt.": ("correct", ""),
+            "parse.py dosyasını düzelt.": ("correct", ""),
+            '"C:\\Users\\Me\\My Project\\app.py" dosyasını düzelt.': ("correct", ""),
+            '"app.py" dosyasını düzelt.': ("correct", ""),
+            '"My File.py" dosyasını düzelt.': ("correct", ""),
             "Bunları değiştir.": ("write-intent", ""),
             "BIB projesindeki hatayı düzeltebilir misin?": ("write-intent", ""),
             "Acaba düzeltebilir misin?": ("write-intent", ""),
@@ -129,6 +134,9 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Yanıtındaki kodu düzelt.",
             "Bu cümledeki hatayı düzelt.",
             "Komut örneği olarak Atlas projesindeki hatayı düzelt.",
+            '"C:\\Users\\Me\\My Project\\app.py dosyasını düzelt."',
+            '"Bunu düzelt."',
+            '"app.py dosyasını düzelt."',
             "Yazabilirsin.",
             "Eğer uygunsa BIB projesindeki hatayı düzelt.",
             "Belki BIB projesindeki hatayı düzelt.",
@@ -156,6 +164,11 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Atlas modülündeki hatayı düzelt.",
             "Borsa dosyasındaki hatayı düzelt.",
             "src/app.py dosyasını düzelt.",
+            "Lütfen src/app.py dosyasını düzelt.",
+            "parse.py dosyasını düzelt.",
+            '"C:\\Users\\Me\\My Project\\app.py" dosyasını düzelt.',
+            '"app.py" dosyasını düzelt.',
+            '"My File.py" dosyasını düzelt.',
         ):
             with self.subTest(explicit_target=prompt):
                 self.assertTrue(memory_ledger.is_explicit_write_intent(prompt))

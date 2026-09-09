@@ -289,6 +289,11 @@ class ConversationContinuityTests(unittest.TestCase):
             'src/app.py dosyasını düzelt.',
             'Atlas modülündeki hatayı düzelt.',
             'Borsa dosyasındaki hatayı düzelt.',
+            'Lütfen src/app.py dosyasını düzelt.',
+            'parse.py dosyasını düzelt.',
+            '"C:\\Users\\Me\\My Project\\app.py" dosyasını düzelt.',
+            '"app.py" dosyasını düzelt.',
+            '"My File.py" dosyasını düzelt.',
         ):
             with self.subTest(prompt=prompt):
                 self._check_explicit_write_prompt_reopens_read_only_scope(
@@ -306,6 +311,7 @@ class ConversationContinuityTests(unittest.TestCase):
             'Onaydan sonra BIB projesindeki hatayı düzelt.',
             'Onay gelene kadar BIB projesindeki hatayı düzelt.',
             'Onay yokken BIB projesindeki hatayı düzelt.',
+            'Onaylıysa dosyayı düzelt.',
             'Onaylamadan düzeltme; sadece açıklama yap.',
         ):
             with self.subTest(prompt=prompt):
@@ -316,6 +322,9 @@ class ConversationContinuityTests(unittest.TestCase):
             'Yanıtındaki kodu düzelt.',
             'Bu cümledeki hatayı düzelt.',
             'Komut örneği olarak Atlas projesindeki hatayı düzelt.',
+            '"C:\\Users\\Me\\My Project\\app.py dosyasını düzelt."',
+            '"Bunu düzelt."',
+            '"app.py dosyasını düzelt."',
         ):
             with self.subTest(prompt=prompt):
                 self._check_write_prompt_keeps_read_only_scope(prompt)
