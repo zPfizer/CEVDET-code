@@ -23,6 +23,8 @@ from _fixtures import CODEX_DIR  # sys.path seam
 import doctor  # noqa: E402
 import codex_runner  # noqa: E402
 import compile as memory_compile  # noqa: E402
+import flush  # noqa: E402
+import hook  # noqa: E402
 import worker_supervisor as workers  # noqa: E402
 import memory_ledger  # noqa: E402
 
@@ -42,13 +44,25 @@ class DoctorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             now = doctor.HOOK_RUNTIME_MAX_AGE_SECONDS * 2
-            (state / 'hook-health-old.json').write_text(json.dumps(
-                {'generation': 1, 'status': 'error', 'error': 'ValueError', 'ts': 0}), encoding='utf-8')
+            old_session = "old-session"
+            hook.write_hook_health(
+                state,
+                {"session_id": old_session},
+                status="error",
+                error="ValueError",
+            )
+            old_path = state / f"hook-health-{hook.session_key(old_session)}.json"
+            old_receipt = json.loads(old_path.read_text(encoding="utf-8"))
+            old_receipt["ts"] = 0
+            old_path.write_text(json.dumps(old_receipt), encoding="utf-8")
             for current_error in (False, True):
                 with self.subTest(current_error=current_error):
-                    (state / 'hook-health-current.json').write_text(json.dumps(
-                        {'generation': 1, 'status': 'error' if current_error else 'ok',
-                         'error': 'RuntimeError', 'ts': now}), encoding='utf-8')
+                    hook.write_hook_health(
+                        state,
+                        {"session_id": "current-session"},
+                        status="error" if current_error else "ok",
+                        error="RuntimeError" if current_error else "",
+                    )
                     checks = {c.name: c for c in doctor.run_checks(
                         state, state_dir=state, now=now, only='Hook sağlığı')}
                     self.assertEqual(checks['Hook sağlığı'].status, 'FAIL' if current_error else 'OK')
@@ -227,9 +241,13 @@ class DoctorTests(unittest.TestCase):
             (state / "worker-supervisor.json").write_text(
                 json.dumps(
                     {
+                        "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
                         "status": "idle",
+                        "generation": 1,
+                        "launch_token": "",
                         "owner_pid": 999_999_999,
                         "lease_until": 0,
+                        "updated_ts": 100,
                     }
                 ),
                 encoding="utf-8",
@@ -240,6 +258,72 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(check.status, "WARN")
         self.assertIn("ready-pending=1", check.evidence)
         self.assertIn("supervisor=idle", check.evidence)
+
+    def test_doctor_rejects_ready_pending_job_without_live_running_supervisor(self) -> None:
+        for owner_pid, lease_until in (
+            (0, 200),
+            (999_999_999, 200),
+        ):
+            with self.subTest(owner_pid=owner_pid, lease_until=lease_until), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                pending = state / "worker-jobs" / "pending"
+                pending.mkdir(parents=True)
+                (pending / "job-ready.json").write_text(
+                    json.dumps({"status": "pending", "next_attempt_ts": 90}),
+                    encoding="utf-8",
+                )
+                (state / "worker-supervisor.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
+                            "status": "running",
+                            "generation": 1,
+                            "launch_token": "",
+                            "owner_pid": owner_pid,
+                            "lease_until": lease_until,
+                            "updated_ts": 100,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                check = doctor._worker_delayed_job_check(
+                    doctor.Context(state_dir=state, now=100)
+                )
+
+                self.assertEqual(check.status, "FAIL")
+                self.assertIn("ownership", check.evidence)
+
+    def test_doctor_accepts_ready_pending_job_with_live_owner_after_lease_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            pending = state / "worker-jobs" / "pending"
+            pending.mkdir(parents=True)
+            (pending / "job-ready.json").write_text(
+                json.dumps({"status": "pending", "next_attempt_ts": 90}),
+                encoding="utf-8",
+            )
+            (state / "worker-supervisor.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
+                        "status": "running",
+                        "generation": 1,
+                        "launch_token": "",
+                        "owner_pid": os.getpid(),
+                        "lease_until": 99,
+                        "updated_ts": 100,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            check = doctor._worker_delayed_job_check(
+                doctor.Context(state_dir=state, now=100)
+            )
+
+        self.assertEqual(check.status, "OK")
+        self.assertIn("supervisor=running", check.evidence)
 
     def test_doctor_warns_for_terminal_unrecoverable_input_dead_letter(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1103,7 +1187,7 @@ tags: [doğrulama]
 
         health = next(check for check in checks if check.name == "Hook sağlığı")
         self.assertEqual(health.status, "FAIL")
-        self.assertIn("UnicodeEncodeError", health.evidence)
+        self.assertEqual(health.evidence, "runtime-error-recorded")
 
     def test_doctor_fails_when_brain_health_contains_an_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1133,15 +1217,13 @@ tags: [doğrulama]
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             now = time.time()
-            (state / "flush-stale.json").write_text(
-                json.dumps(
-                    {
-                        "session_id": "stale-session",
-                        "ts": int(now - 301),
-                        "status": "inflight",
-                    }
-                ),
-                encoding="utf-8",
+            flush._write_flush_state(
+                state,
+                "stale-session",
+                int(now - 301),
+                "inflight",
+                reason="turnend",
+                transcript_digest="d" * 64,
             )
 
             check = doctor._flush_inflight_check(doctor.Context(state_dir=state, now=now))
@@ -1153,19 +1235,30 @@ tags: [doğrulama]
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             now = time.time()
-            for name, status, age in (
-                ("flush-fresh.json", "inflight", 10),
-                ("flush-complete.json", "ok", 600),
+            for session_id, status, age in (
+                ("fresh-session", "inflight", 10),
+                ("complete-session", "ok", 600),
             ):
-                (state / name).write_text(
-                    json.dumps(
+                flush._write_flush_state(
+                    state,
+                    session_id,
+                    int(now - age),
+                    status,
+                    reason="turnend",
+                    transcript_digest="d" * 64,
+                    **(
                         {
-                            "session_id": name,
-                            "ts": int(now - age),
-                            "status": status,
+                            "summary_digest": "e" * 64,
+                            "idempotency_key": flush._flush_idempotency_key(
+                                session_id,
+                                "turnend",
+                                "d" * 64,
+                                "e" * 64,
+                            ),
                         }
+                        if status == "ok"
+                        else {}
                     ),
-                    encoding="utf-8",
                 )
 
             check = doctor._flush_inflight_check(doctor.Context(state_dir=state, now=now))
@@ -1254,7 +1347,7 @@ tags: [doğrulama]
 
         retrieval = next(check for check in checks if check.name == "Vault retrieval")
         self.assertEqual(retrieval.status, "FAIL")
-        self.assertIn("UnicodeError", retrieval.evidence)
+        self.assertEqual(retrieval.evidence, "runtime-error-recorded")
 
     def test_doctor_warns_when_vault_retrieval_receipt_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
