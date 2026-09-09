@@ -39,8 +39,10 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                     self.assertEqual(ledger.sanitize_text(sanitized, max_chars=None)[0], sanitized)
 
     def test_unreadable_credential_container_does_not_leak_the_remaining_value(self) -> None:
-        for value in ('{\n"value": "BROKEN_SECRET"', '[' * 1100 + '"DEEP_SECRET"' + ']' * 1100,
-                      '{"safe":1}TRAILING_SECRET', '{"safe": 1}TRAILING_SECRET', '[1]TRAILING_SECRET',
+        for value in ('{\n"value": "BROKEN_SECRET"',):
+            with self.subTest(value=value[:30]), self.assertRaisesRegex(ledger.MemoryPreferenceError, '^memory-credential-container-unverifiable$'):
+                ledger.sanitize_text('keep before; token=' + value, max_chars=None)
+        for value in ('{"safe":1}TRAILING_SECRET', '{"safe": 1}TRAILING_SECRET', '[1]TRAILING_SECRET',
                       '{"safe":1},TRAILING_SECRET', '{"safe": 1};TRAILING_SECRET'):
             with self.subTest(value=value[:30]):
                 sanitized, redactions = ledger.sanitize_text('keep before; token=' + value, max_chars=None)
@@ -54,16 +56,15 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertEqual(sanitized, 'token=<REDACTED> important decision')
 
     def test_quoted_container_does_not_trust_a_delimiter_in_invalid_json(self) -> None:
-        for ending in (',TRAILING_SECRET}', '}TRAILING_SECRET', ']TRAILING_SECRET'):
-            with self.subTest(ending=ending):
-                sanitized, _ = ledger.sanitize_text('{"token":{"safe":1}' + ending + ' important decision', max_chars=None)
-                self.assertNotIn('TRAILING_SECRET', sanitized)
-                self.assertIn('important decision', sanitized)
+        for ending in (',TRAILING_SECRET}', '}TRAILING_SECRET', ']TRAILING_SECRET', ' TRAILING_SECRET}'):
+            with self.subTest(ending=ending), self.assertRaisesRegex(ledger.MemoryPreferenceError, '^memory-credential-container-unverifiable$'):
+                ledger.sanitize_text('{"token":{"safe":1}' + ending + ' important decision', max_chars=None)
 
     def test_valid_json_fragments_keep_siblings_and_surrounding_prose(self) -> None:
         payload = '{"token":{"value":"OBJECT_SECRET"},"keep":"ordinary"}'
         safe = '{"token":"<REDACTED>","keep":"ordinary"}'
-        for prefix, suffix in (('before ', '\nafter'), ('before {not-json}\n```json\n', '\n```\nafter')):
+        for prefix, suffix in (('before ', '\nafter'), ('before {not-json}\n```json\n', '\n```\nafter'),
+                               ('before ', '; after'), ('before ', '. after')):
             with self.subTest(prefix=prefix):
                 sanitized, _ = ledger.sanitize_text(prefix + payload + suffix, max_chars=None)
                 self.assertEqual(sanitized, prefix + safe + suffix)
@@ -72,10 +73,29 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         for value in ('{not-json}', '[placeholder]', "{'value': 'DICT_SECRET', 'nested': [1, '}']}",
                       "{'label': 'satır\u2028iki',\n 'value': 'UNICODE_SECRET'}",
                       "{'label': 'satır',\r\n 'value': 'UNICODE_SECRET'}",
-                      "{'value': '" + 'LONG_SECRET' * 100 + "'}"):
+                      "{'value': '" + 'LONG_SECRET' * 100 + "'}",
+                      '[' * 1100 + '"DEEP_SECRET"' + ']' * 1100):
             with self.subTest(value=value):
                 sanitized, _ = ledger.sanitize_text('token=' + value + ' important decision', max_chars=None)
                 self.assertEqual(sanitized, 'token=<REDACTED> important decision')
+
+    def test_ambiguous_attachment_is_rejected_without_model_or_note_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            original = b'{"token":{"safe":1} AMBIGUOUS_SECRET} important decision'
+            source.write_bytes(original)
+            envelope = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summarize = mock.Mock()
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                with self.assertRaisesRegex(ledger.MemoryPreferenceError, '^memory-credential-container-unverifiable$'):
+                    attachment_memory.capture_sources(
+                        [('user', envelope)], root, dt.datetime.now(dt.timezone.utc), frozenset(), summarize)
+            summarize.assert_not_called()
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(list(root.rglob('*.md')), [])
 
     def test_sanitizer_redacts_plain_quoted_and_escaped_credentials(self) -> None:
         text = (

@@ -347,7 +347,10 @@ def _json_regions(text: str) -> Iterator[tuple[int, int]]:
         except (ValueError, RecursionError):
             return
         offset = end
-        if end == len(text) or text[end].isspace():
+        boundary = end
+        while boundary < len(text) and text[boundary] in ';,.!?':
+            boundary += 1
+        if boundary == len(text) or text[boundary].isspace():
             yield opening.start(), end
 
 
@@ -386,8 +389,7 @@ def sanitize_text(
             except (ValueError, RecursionError):
                 end = _balanced_value_end(text, match.start('value'))
                 if end is None:
-                    # An unclosed/ambiguous value cannot expose its remaining payload.
-                    end = len(text)
+                    raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
             else:
                 while region is None or region[1] <= match.start():
                     region = next(regions, None)
@@ -395,6 +397,9 @@ def sanitize_text(
                         break
                 quoted_field = (region is not None and region[0] <= match.start() and end <= region[1]
                                 and match.group('key_quote') == '"' and match.group('prefix').rstrip().endswith(':'))
+            if (not quoted_field and match.group('key_quote') == '"'
+                    and match.group('prefix').rstrip().endswith(':') and text[end:].strip()):
+                raise MemoryPreferenceError('memory-credential-container-unverifiable')
             if not quoted_field:
                 while end < len(text) and not text[end].isspace():
                     end += 1
