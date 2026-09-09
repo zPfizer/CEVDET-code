@@ -77,9 +77,27 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         )
         self.assertIn("credential", redactions)
 
+    def test_decoded_json_credential_names_are_redacted(self) -> None:
+        nested = json.dumps({"api_key": "INNER_SYNTHETIC_SECRET"})
+        escaped_key = r'{"\u0061pi_key":"ESCAPED_KEY_SYNTHETIC_SECRET","keep":"ordinary"}'
+        for original, expected, secret in (
+            (
+                json.dumps({"message": nested, "keep": "ordinary"}),
+                {"message": json.dumps({"api_key": "<REDACTED>"}), "keep": "ordinary"},
+                "INNER_SYNTHETIC_SECRET",
+            ),
+            (escaped_key, {"api_key": "<REDACTED>", "keep": "ordinary"}, "ESCAPED_KEY_SYNTHETIC_SECRET"),
+        ):
+            with self.subTest(secret=secret):
+                sanitized, redactions = ledger.sanitize_text(original, max_chars=None)
+                self.assertEqual(json.loads(sanitized), expected)
+                self.assertNotIn(secret, sanitized)
+                self.assertIn("credential", redactions)
+
     def test_json_credential_like_keys_are_rejected_without_collisions(self) -> None:
-        key = "example 'token': {'a': 1}"
-        text = f'{{{json.dumps(key)}:"first",{json.dumps(key)}:"second","keep":"ordinary"}}'
+        first_key = "example 'token': {'a': 1}"
+        second_key = "example 'token': {'b': 2}"
+        text = f'{{{json.dumps(first_key)}:"first",{json.dumps(second_key)}:"second","keep":"ordinary"}}'
         with self.assertRaisesRegex(ledger.MemoryPreferenceError, '^memory-credential-container-unverifiable$'):
             ledger.sanitize_text(text, max_chars=None)
 
@@ -174,11 +192,13 @@ class Bug007JsonCredentialTests(unittest.TestCase):
             source = home / "attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt"
             source.parent.mkdir(parents=True)
             original = "example '" + json.dumps(
-                {"message": "example 'token': {'a': 1} in docs", "password": "LEAK_PROBE_SYNTHETIC",
-                 "api_key": "key-secret", "keep": "ordinary",
-                 "token": {"value": "OBJECT_SECRET", "items": ["ARRAY_SECRET"]}},
+                {"message": "example 'token': {'a': 1} in docs", "nested": json.dumps(
+                    {"api_key": "INNER_SYNTHETIC_SECRET"}
+                ), "password": "LEAK_PROBE_SYNTHETIC", "api_key": "ESCAPED_KEY_SYNTHETIC_SECRET",
+                 "keep": "ordinary", "token": {"value": "OBJECT_SECRET", "items": ["ARRAY_SECRET"]}},
                 ensure_ascii=False,
             ) + "' after"
+            original = original.replace('"api_key":', r'"\u0061pi_key":', 1)
             original_bytes = original.encode("utf-8")
             source.write_bytes(original_bytes)
             envelope = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
@@ -197,6 +217,8 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertTrue(prompts)
                 self.assertNotIn("LEAK_PROBE_SYNTHETIC", prompts[0])
                 self.assertNotIn("key-secret", prompts[0])
+                self.assertNotIn("INNER_SYNTHETIC_SECRET", prompts[0])
+                self.assertNotIn("ESCAPED_KEY_SYNTHETIC_SECRET", prompts[0])
                 self.assertNotIn("OBJECT_SECRET", prompts[0])
                 self.assertNotIn("ARRAY_SECRET", prompts[0])
                 self.assertIn('"message": "<REDACTED>"', prompts[0])
@@ -204,6 +226,8 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 saved = note.read_text(encoding="utf-8")
                 self.assertNotIn("LEAK_PROBE_SYNTHETIC", saved)
                 self.assertNotIn("key-secret", saved)
+                self.assertNotIn("INNER_SYNTHETIC_SECRET", saved)
+                self.assertNotIn("ESCAPED_KEY_SYNTHETIC_SECRET", saved)
                 self.assertNotIn("OBJECT_SECRET", saved)
                 self.assertNotIn("ARRAY_SECRET", saved)
                 self.assertIn('"message": "<REDACTED>"', saved)

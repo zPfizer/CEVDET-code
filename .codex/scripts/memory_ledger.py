@@ -43,8 +43,10 @@ AUTHORIZATION = re.compile(
     r'''(?:"Bearer\s+(?:\\.|[^"\\\r\n])+"|'''
     r"""'Bearer\s+(?:\\.|[^'\\\r\n])+'|Bearer\s+[^\s\r\n]+)"""
 )
+CREDENTIAL_NAME = r'api[_-]?key|password|secret|token'
+CREDENTIAL_NAME_RE = re.compile(rf'(?i)^(?:{CREDENTIAL_NAME})$')
 CREDENTIAL = re.compile(
-    r'''(?im)(?P<prefix>(?P<key_quote>["']?)\b(?P<key>api[_-]?key|password|secret|token)'''
+    r'''(?im)(?P<prefix>(?P<key_quote>["']?)\b(?P<key>''' + CREDENTIAL_NAME + r''')'''
     r'''(?P=key_quote)\s*[:=]\s*)'''
     r'''(?P<value>[{\[]|"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s\r\n]+)'''
 )
@@ -360,8 +362,10 @@ def _json_regions(text: str) -> Iterator[tuple[int, int]]:
             yield opening.start(), end
 
 
-def _json_string_regions(text: str) -> Iterator[tuple[int, int, bool]]:
-    """Yield complete JSON string spans and whether each span is a value."""
+def _json_string_regions(
+    text: str,
+) -> Iterator[tuple[int, int, bool, str, int | None, int | None]]:
+    """Yield JSON string spans, decoded values, and key value spans."""
     decoder = json.JSONDecoder()
     for region_start, region_end in _json_regions(text):
         cursor = region_start
@@ -370,7 +374,7 @@ def _json_string_regions(text: str) -> Iterator[tuple[int, int, bool]]:
             if opening < 0:
                 break
             try:
-                _, end = decoder.raw_decode(text, opening)
+                value, end = decoder.raw_decode(text, opening)
             except (ValueError, RecursionError):
                 cursor = opening + 1
                 continue
@@ -380,8 +384,66 @@ def _json_string_regions(text: str) -> Iterator[tuple[int, int, bool]]:
             while tail < region_end and text[tail].isspace():
                 tail += 1
             is_value = tail >= region_end or text[tail] != ':'
-            yield opening, end, is_value
+            value_start = value_end = None
+            if not is_value:
+                value_start = tail + 1
+                while value_start < region_end and text[value_start].isspace():
+                    value_start += 1
+                try:
+                    _, value_end = decoder.raw_decode(text, value_start)
+                except (ValueError, RecursionError):
+                    cursor = tail + 1
+                    continue
+            yield opening, end, is_value, value, value_start, value_end
             cursor = tail + 1 if tail < region_end and text[tail] == ':' else tail
+
+
+def _redact_decoded_json(text: str) -> tuple[str, bool]:
+    records = list(_json_string_regions(text))
+    if not records:
+        return text, False
+    replacements: list[tuple[int, int, str]] = []
+    protected: list[tuple[int, int]] = []
+    for start, end, is_value, decoded, value_start, value_end in records:
+        if (
+            not is_value
+            and value_start is not None
+            and value_end is not None
+            and CREDENTIAL_NAME_RE.fullmatch(decoded)
+        ):
+            replacements.append((value_start, value_end, json.dumps("<REDACTED>")))
+            protected.append((value_start, value_end))
+    for start, end, is_value, decoded, _value_start, _value_end in records:
+        if not is_value or any(left <= start and end <= right for left, right in protected):
+            continue
+        leading = 0
+        while leading < len(decoded) and decoded[leading].isspace():
+            leading += 1
+        try:
+            _, nested_end = json.JSONDecoder().raw_decode(decoded, leading)
+        except (ValueError, RecursionError):
+            continue
+        while nested_end < len(decoded) and decoded[nested_end].isspace():
+            nested_end += 1
+        if nested_end != len(decoded):
+            continue
+        try:
+            nested, changed = _redact_decoded_json(decoded)
+        except RecursionError:
+            raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+        if changed:
+            replacements.append((start, end, json.dumps(nested)))
+    if not replacements:
+        return text, False
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, replacement in sorted(replacements):
+        if start < cursor:
+            continue
+        pieces.extend((text[cursor:start], replacement))
+        cursor = end
+    pieces.append(text[cursor:])
+    return ''.join(pieces), True
 
 
 _MEMORY_VIEW_IDENTIFIER = re.compile(
@@ -432,10 +494,13 @@ def sanitize_text(
             lambda match: (f'{match.group("prefix")}"Bearer <REDACTED>"' if match.group('key_quote')
                            else "Authorization: Bearer <REDACTED>"),
             "authorization")
+    text, decoded_redacted = _redact_decoded_json(text)
+    if decoded_redacted:
+        redactions.append('credential')
     regions = _json_regions(text)
     json_strings = _json_string_regions(text)
     region: tuple[int, int] | None = None
-    json_string: tuple[int, int, bool] | None = None
+    json_string: tuple[int, int, bool, str, int | None, int | None] | None = None
     pieces: list[str] = []
     cursor = 0
     while match := CREDENTIAL.search(text, cursor):
@@ -477,7 +542,7 @@ def sanitize_text(
         cursor = end
     if pieces:
         text = ''.join(pieces) + text[cursor:]
-    if pieces:
+    if pieces and 'credential' not in redactions:
         redactions.append('credential')
     replace(TOKEN_PREFIX, "<REDACTED>", "credential")
     replace(PERSONAL_CREDENTIAL, "<REDACTED>", "credential")
