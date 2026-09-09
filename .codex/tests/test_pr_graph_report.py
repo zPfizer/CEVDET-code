@@ -52,6 +52,7 @@ class PullRequestGraphReportTests(unittest.TestCase):
         rendered = report.render_markdown(payload)
 
         self.assertIn("statik aday", rendered)
+        self.assertIn("Statik adaylar (gösterilen 1 / toplam 1)", rendered)
         self.assertIn("gösterilen 5 / toplam 6", rendered)
         self.assertNotIn("Request flow 5", rendered)
         self.assertIn("Request flow", rendered)

@@ -208,7 +208,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
 
     priorities = analysis.get("review_priorities") or []
     if priorities:
-        lines.extend(("", "### Statik adaylar (" + _shown_count(analysis, "review_priorities", "changed_functions_total", 10) + ")"))
+        lines.extend(("", "### Statik adaylar (" + _shown_count(analysis, "review_priorities", "review_priorities_total", 10) + ")"))
         for row in priorities[:10]:
             if isinstance(row, dict):
                 name = row.get("qualified_name") or row.get("name") or "(adı yok)"
