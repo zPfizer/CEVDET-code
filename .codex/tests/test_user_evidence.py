@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 import unittest
 
 from _fixtures import CODEX_DIR

@@ -548,7 +548,7 @@ def _normalize_and_validate_stage(
         raise PolicyError(f"knowledge-schema:{issue}")
 
 
-def _schema_repair_allowed_paths(stage: Path, detail: str) -> set[str]:
+def _schema_repair_allowed_paths(detail: str) -> set[str]:
     allowed = {"knowledge/index.md", "knowledge/log.md"}
     relative = detail.removeprefix("knowledge-schema:").split(":", 1)[0]
     parts = relative.split("/")
@@ -598,7 +598,7 @@ def _normalize_validate_with_single_repair(
         details.extend(f"knowledge-schema:{issue}" for issue in report.issues
                        if issue.split(":", 1)[0] in changed_paths)
     details = list(dict.fromkeys(details))
-    allowed_paths = set().union(*(_schema_repair_allowed_paths(stage, item) for item in details))
+    allowed_paths = set().union(*(_schema_repair_allowed_paths(item) for item in details))
     error = (runner or _run_codex)(build_schema_repair_prompt("\n".join(details)), stage)
     if error is not None:
         return error

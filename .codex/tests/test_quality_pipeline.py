@@ -69,7 +69,7 @@ class QualityPipelineTests(unittest.TestCase):
         for anchored in (False, True):
             with self.subTest(anchored=anchored), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                record, row, note = proof_fixture(root)
+                record, _row, note = proof_fixture(root)
                 current = note.read_text(encoding='utf-8')
                 if not anchored:
                     current = current.replace('#user-' + record['id'], '')
@@ -82,7 +82,7 @@ class QualityPipelineTests(unittest.TestCase):
     def test_unchanged_proof_can_cross_a_bounded_stage_but_not_be_reactivated(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            record, row, note = proof_fixture(root)
+            _record, _row, note = proof_fixture(root)
             previous = note.read_text(encoding='utf-8')
             relative = 'knowledge/concepts/tercih-kisa.md'
             # A later compiler stage contains its new daily input, not every old day.
@@ -101,7 +101,7 @@ class QualityPipelineTests(unittest.TestCase):
     def test_retiring_a_claim_cannot_remove_its_evidence_link(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            record, row, note = proof_fixture(root)
+            record, _row, note = proof_fixture(root)
             previous = note.read_text(encoding='utf-8')
             retired = previous.replace('#user-' + record['id'], '').replace('`gecerli` `kullanici-dusuncesi`', '`gecmis` `kullanici-dusuncesi`')
             note.write_text(retired, encoding='utf-8')
@@ -112,7 +112,7 @@ class QualityPipelineTests(unittest.TestCase):
     def test_cached_knowledge_is_not_emitted_after_its_daily_proof_disappears(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            record, row, note = proof_fixture(root)
+            _record, _row, _note = proof_fixture(root)
             first = retrieval.retrieve_vault_context_detailed(root, 'Kısa yanıt tercih ediliyor')
             self.assertIn('Kısa yanıt tercih ediliyor.', first.text)
             day = root / 'daily/2026-09-06.md'
@@ -123,7 +123,7 @@ class QualityPipelineTests(unittest.TestCase):
     def test_long_claim_excerpt_keeps_its_status_without_asserting_a_clipped_decision(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            _, row, note = proof_fixture(root)
+            _, _row, note = proof_fixture(root)
             long_claim = 'Karar A uygulanacak. ' + 'ayrıntı ' * 90 + 'Henüz onaylanmadı.'
             note.write_text(concept('- `gecerli` `cevo-cikarimi` `belirsiz` 2026-09-06 [[daily/2026-09-06|Kaynak]] — ' + long_claim), encoding='utf-8')
             result = retrieval.retrieve_vault_context_detailed(root, 'Karar A uygulanacak', write_cache=False)
@@ -134,7 +134,7 @@ class QualityPipelineTests(unittest.TestCase):
     def test_an_existing_evidence_anchor_cannot_be_stripped_as_legacy(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            record, row, note = proof_fixture(root, 'Bu cevapta ayrıntılı anlat.')
+            record, _row, note = proof_fixture(root, 'Bu cevapta ayrıntılı anlat.')
             previous = note.read_text(encoding='utf-8')
             note.write_text(previous.replace('#user-' + record['id'], ''), encoding='utf-8')
             relative = 'knowledge/concepts/tercih-kisa.md'
@@ -168,7 +168,7 @@ class QualityPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = seed_profile(root)
-            record, row, note = proof_fixture(root)
+            _record, _row, _note = proof_fixture(root)
             profile = PROFILE_TEXT.replace('2026-09-05', '2026-09-06').replace('2026-09-04.', '2026-09-06.').replace('Türkçe ve kısa yanıt ver', 'Kısa yanıt tercih ediliyor.')
             path.write_text(profile, encoding='utf-8')
             self.assertEqual(profile_guard.check_profile(root), ())
@@ -179,7 +179,7 @@ class QualityPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             request = 'Bundan sonra "kısa ve net" yanıt ver.'
-            record, row, note = proof_fixture(root, request)
+            _record, _row, note = proof_fixture(root, request)
             originals = {p: p.read_bytes() for p in (note, root / 'daily/2026-09-06.md')}
             ledger.suppress_derived_memory(root / '.codex/private-memory', request)
             self.assertNotIn('Kısa yanıt tercih ediliyor.', ledger.read_memory_source(root, note))
