@@ -464,9 +464,11 @@ Değişken seçimi için ortak karar ve kanıt.
             entries = retrieval.build_vault_map(root, write_cache=False)
             hits = retrieval.search_vault(entries, "değişken seçimi", top_k=2)
 
-        self.assertFalse(
-            retrieval._is_history_query(retrieval._retrieval_terms("değişken seçimi"))
-        )
+        for query in ("değişken seçimi", "eskiz seçimi", "pastane seçimi"):
+            with self.subTest(query=query):
+                self.assertFalse(
+                    retrieval._is_history_query(retrieval._retrieval_terms(query))
+                )
         self.assertEqual(
             [hit.entry.path for hit in hits],
             [
@@ -474,6 +476,48 @@ Değişken seçimi için ortak karar ve kanıt.
                 "🏰 300-Projects/Tansu/a-archived.md",
             ],
         )
+
+    def test_inflected_history_terms_retrieve_completed_and_historical_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            packet = "🎯 100-Command-Center/hook.md"
+            concept = "knowledge/concepts/hook.md"
+            _write(
+                root,
+                packet,
+                """---
+title: Hook Contract Conformance
+type: work-packet
+status: completed
+---
+# Hook Contract Conformance
+Hook sözleşmesi tamamlanmış uygulama kaydı.
+""",
+            )
+            _write(
+                root,
+                concept,
+                """---
+schema: knowledge-v2
+title: Hook Protokolü
+---
+# Hook Protokolü
+
+## Kayıtlar
+- `gecmis` `kullanici-dusuncesi` `eski` 2026-09-01 [[daily/2026-09-01|Kaynak]] — Eski hook sözleşmesi geçmişte uygulanan kayıttır.
+- `gecmis` `kullanici-dusuncesi` `eski` 2026-09-02 [[daily/2026-09-02|Kaynak]] — Eski hook sözleşmesi geçmişten devralınan kayıttır.
+- `gecmis` `kullanici-dusuncesi` `eski` 2026-09-03 [[daily/2026-09-03|Kaynak]] — Eski hook sözleşmesi eskiden uygulanan kayıttır.
+""",
+            )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            for marker in ("geçmişte", "geçmişten", "eskiden"):
+                with self.subTest(marker=marker):
+                    query = f"{marker} hook sözleşmesi"
+                    hits = retrieval.search_vault(entries, query, top_k=3)
+                    paths = [hit.entry.path for hit in hits]
+                    self.assertIn(packet, paths)
+                    historical = next(hit for hit in hits if hit.entry.path == concept)
+                    self.assertIn("Eski hook sözleşmesi", historical.excerpt)
 
     def test_identical_copies_do_not_fill_top_three_when_an_independent_source_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -113,7 +113,7 @@ SEMANTIC_SENTINELS = {
 CURRENT_CLAIM = re.compile(r"(?i)^\s*-\s*`gecerli`\s+")
 HTML_COMMENT = re.compile(r"<!--.*?(?:-->|$)", re.DOTALL)
 HISTORY_QUERY_TERMS = frozenset({
-    "gecmis", "tarihce", "tarihsel", "eski", "onceki", "degisim", "karsilastir",
+    "gecmis", "gecmiste", "gecmisten", "tarihce", "tarihsel", "eski", "eskiden", "onceki", "degisim", "karsilastir",
     "karsilastirma", "history", "historical", "before", "past", "previous", "change", "compare",
 })
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
