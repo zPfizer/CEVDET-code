@@ -113,8 +113,8 @@ SEMANTIC_SENTINELS = {
 CURRENT_CLAIM = re.compile(r"(?i)^\s*-\s*`gecerli`\s+")
 HTML_COMMENT = re.compile(r"<!--.*?(?:-->|$)", re.DOTALL)
 HISTORY_QUERY_TERMS = frozenset({
-    "gecmis", "tarihce", "tarihsel", "eski", "onceki", "degisim", "karsilastir",
-    "karsilastirma", "history", "historical", "before", "past", "previous", "change", "compare",
+    "gecmis", "tarihce", "tarihsel", "eski", "onceki",
+    "history", "historical", "historically", "before", "past", "previous", "previously",
 })
 HISTORY_QUERY_INFLECTION_ROOTS = frozenset({"gecmis", "eski", "onceki"})
 HISTORY_QUERY_INFLECTION_SUFFIXES = frozenset({
