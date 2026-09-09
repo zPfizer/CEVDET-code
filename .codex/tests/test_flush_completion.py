@@ -12,11 +12,26 @@ from _fixtures import CODEX_DIR
 import attachment_memory
 import flush
 from knowledge_schema import parse_frontmatter
+import memory_ledger
 from memory_ledger import persistent_turns
 import worker_supervisor
 
 
+def _write_rows(path: Path, rows: list[tuple[str, str]]) -> None:
+    path.write_text(
+        '\n'.join(
+            json.dumps({'role': role, 'content': text}, ensure_ascii=False)
+            for role, text in rows
+        ) + '\n',
+        encoding='utf-8',
+    )
+
+
 class FlushCompletionTests(unittest.TestCase):
+    SUMMARY = '\n'.join(
+        f'## {section}\nKalıcı özet.' for section in flush.EXPECTED_SECTIONS
+    )
+
     def test_incomplete_tail_publishes_prefix_then_retries_completed_tail_once(self):
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -294,6 +309,8 @@ class FlushCompletionTests(unittest.TestCase):
             self.assertNotEqual(migrated_batch['digest'], legacy_digest(60))
             self.assertEqual(migrated_coverage['schema_version'], flush.transcript_index.COVERAGE_SCHEMA_VERSION)
             self.assertEqual(migrated_coverage['count'], 30)
+            self.assertEqual(migrated_coverage['policy_version'], flush.transcript_index.POLICY_VERSION)
+            self.assertEqual(migrated_batch['policy_version'], flush.transcript_index.POLICY_VERSION)
 
             with mock.patch.object(flush, 'run_codex') as retry_model, \
                  mock.patch.object(flush, 'maybe_trigger_compile'), \
@@ -303,6 +320,261 @@ class FlushCompletionTests(unittest.TestCase):
             self.assertEqual(second, 0)
             self.assertEqual(json.loads(coverage_path.read_text(encoding='utf-8'))['count'], 60)
             self.assertFalse(batch_path.exists())
+
+    def test_policy_migration_preserves_unchanged_covered_prefix(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / '.state'
+            transcript = root / 'rollout.jsonl'
+            _write_rows(transcript, [('user', 'Unchanged prefix')])
+            payload = {'session_id': 'policy-prefix', 'transcript_path': str(transcript)}
+            args = argparse.Namespace(hook_input=root / 'unused', reason='turnend')
+            event = dt.datetime(2026, 9, 8, 12, tzinfo=dt.timezone.utc)
+            with (
+                mock.patch.object(flush.transcript_index, 'POLICY_VERSION', 'persistent-turns-v1'),
+                mock.patch.object(flush, 'run_codex', return_value=(self.SUMMARY, None)),
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+            ):
+                self.assertEqual(flush.flush_once(args, event, root, state, hook_input=payload), 0)
+            coverage_path = state / f'flush-coverage-{flush._session_key(payload["session_id"])}.json'
+            old_coverage = coverage_path.read_bytes()
+            daily_path = root / 'daily/2026-09-08.md'
+            old_daily = daily_path.read_bytes()
+
+            with (
+                mock.patch.object(flush.transcript_index, 'POLICY_VERSION', 'persistent-turns-v2'),
+                mock.patch.object(flush, 'run_codex') as model,
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+            ):
+                result = flush.flush_once(args, event, root, state, hook_input=payload)
+            migrated = json.loads(coverage_path.read_text(encoding='utf-8'))
+            new_coverage = coverage_path.read_bytes()
+            new_daily = daily_path.read_bytes()
+
+        self.assertEqual(result, 0)
+        model.assert_not_called()
+        self.assertEqual(migrated['count'], 1)
+        self.assertEqual(migrated['policy_version'], 'persistent-turns-v2')
+        self.assertNotEqual(new_coverage, old_coverage)
+        self.assertEqual(new_daily, old_daily)
+
+    def test_orphan_prepared_receipt_blocks_before_batch_capture_or_model(self):
+        for coverage_present in (False, True):
+            with self.subTest(coverage_present=coverage_present), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                state = root / '.state'
+                transcript = root / 'rollout.jsonl'
+                _write_rows(transcript, [('user', 'Yeni retained turn')])
+                payload = {'session_id': 'orphan-prepared', 'transcript_path': str(transcript)}
+                args = argparse.Namespace(hook_input=root / 'unused', reason='turnend')
+                event = dt.datetime(2026, 9, 8, 12, tzinfo=dt.timezone.utc)
+                with mock.patch.object(flush.transcript_index, 'POLICY_VERSION', 'persistent-turns-v1'):
+                    idempotency_key = 'a' * 64
+                    summary_path = flush._prepared_summary_path(state, idempotency_key)
+                    flush.atomic_write_text(summary_path, self.SUMMARY)
+                    flush._write_flush_state(
+                        state,
+                        payload['session_id'],
+                        event.timestamp(),
+                        'prepared',
+                        'ready-to-append',
+                        reason='turnend',
+                        transcript_digest='old-policy-digest',
+                        summary_digest=hashlib.sha256(self.SUMMARY.encode()).hexdigest(),
+                        idempotency_key=idempotency_key,
+                        batch_start=0,
+                        batch_end=1,
+                    )
+                session_path = flush._session_state_path(state, payload['session_id'])
+                session = json.loads(session_path.read_text(encoding='utf-8'))
+                old_receipt = session['receipts'][idempotency_key].copy()
+                old_summary = summary_path.read_bytes()
+                coverage_path = state / f'flush-coverage-{flush._session_key(payload["session_id"])}.json'
+                if coverage_present:
+                    with mock.patch.object(flush.transcript_index, 'POLICY_VERSION', 'persistent-turns-v2'):
+                        index = flush.transcript_index.open_or_update(
+                            state,
+                            payload['session_id'],
+                            transcript,
+                            hashes=frozenset(),
+                            parser=flush._message_parts_for_index,
+                            text_from_content=flush._text_from_content,
+                            max_line_bytes=flush.MAX_TRANSCRIPT_LINE_BYTES,
+                        )
+                    coverage_path.write_text(json.dumps({
+                        'schema_version': flush.transcript_index.COVERAGE_SCHEMA_VERSION,
+                        'count': 1,
+                        'digest': index.coverage_digest(1),
+                        'policy_version': 'persistent-turns-v2',
+                    }), encoding='utf-8')
+                old_coverage = coverage_path.read_bytes() if coverage_path.exists() else None
+
+                with (
+                    mock.patch.object(flush.transcript_index, 'POLICY_VERSION', 'persistent-turns-v2'),
+                    mock.patch.object(flush, 'run_codex') as model,
+                    mock.patch.object(flush, 'append_daily') as append_daily,
+                    mock.patch.object(flush.attachment_memory, 'capture_sources') as capture_sources,
+                    mock.patch.object(flush, 'maybe_trigger_compile'),
+                ):
+                    result = flush.flush_once(args, event, root, state, hook_input=payload)
+                after_session = json.loads(session_path.read_text(encoding='utf-8'))
+                new_summary = summary_path.read_bytes()
+                new_coverage = coverage_path.read_bytes() if coverage_path.exists() else None
+
+                self.assertEqual(result, 1)
+                model.assert_not_called()
+                append_daily.assert_not_called()
+                capture_sources.assert_not_called()
+                self.assertEqual(after_session['receipts'][idempotency_key], old_receipt)
+                self.assertEqual(new_summary, old_summary)
+                self.assertEqual(new_coverage, old_coverage)
+
+    def test_policy_migration_blocks_changed_prefix_without_rewriting_completed_state(self):
+        courtesy = 'Bunu kaydetme - lütfen.'
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / '.state'
+            transcript = root / 'rollout.jsonl'
+            _write_rows(transcript, [
+                ('user', 'Eski karar'),
+                ('assistant', 'Eski yanıt'),
+                ('user', courtesy),
+            ])
+            payload = {'session_id': 'policy-changed', 'transcript_path': str(transcript)}
+            args = argparse.Namespace(hook_input=root / 'unused', reason='turnend')
+            event = dt.datetime(2026, 9, 8, 12, tzinfo=dt.timezone.utc)
+            actual_directive = memory_ledger.memory_directive
+
+            def legacy_directive(text):
+                if text == courtesy:
+                    return memory_ledger.MemoryDirective('do-not-save', text)
+                return actual_directive(text)
+
+            with (
+                mock.patch.object(flush.transcript_index, 'POLICY_VERSION', 'persistent-turns-v1'),
+                mock.patch.object(memory_ledger, 'memory_directive', side_effect=legacy_directive),
+                mock.patch.object(flush, 'run_codex', return_value=(self.SUMMARY, None)),
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+            ):
+                self.assertEqual(flush.flush_once(args, event, root, state, hook_input=payload), 0)
+            coverage_path = state / f'flush-coverage-{flush._session_key(payload["session_id"])}.json'
+            old_coverage = coverage_path.read_bytes()
+            daily_path = root / 'daily/2026-09-08.md'
+            old_daily = daily_path.read_bytes()
+
+            with (
+                mock.patch.object(flush.transcript_index, 'POLICY_VERSION', 'persistent-turns-v2'),
+                mock.patch.object(flush, 'run_codex') as model,
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+            ):
+                result = flush.flush_once(args, event, root, state, hook_input=payload)
+            health = json.loads((state / 'health.json').read_text(encoding='utf-8'))
+            new_coverage = coverage_path.read_bytes()
+            new_daily = daily_path.read_bytes()
+
+        self.assertEqual(result, 1)
+        model.assert_not_called()
+        self.assertEqual(new_coverage, old_coverage)
+        self.assertEqual(new_daily, old_daily)
+        self.assertEqual(health['error'], flush.POLICY_MIGRATION_REQUIRED)
+
+    def test_unknown_coverage_policy_blocks_before_model_or_daily_write(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / '.state'
+            transcript = root / 'rollout.jsonl'
+            _write_rows(transcript, [('user', 'Bilinen karar')])
+            payload = {'session_id': 'unknown-policy', 'transcript_path': str(transcript)}
+            args = argparse.Namespace(hook_input=root / 'unused', reason='turnend')
+            event = dt.datetime(2026, 9, 8, 12, tzinfo=dt.timezone.utc)
+            with (
+                mock.patch.object(flush, 'run_codex', return_value=(self.SUMMARY, None)),
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+            ):
+                self.assertEqual(flush.flush_once(args, event, root, state, hook_input=payload), 0)
+            coverage_path = state / f'flush-coverage-{flush._session_key(payload["session_id"])}.json'
+            coverage = json.loads(coverage_path.read_text(encoding='utf-8'))
+            coverage['policy_version'] = 'future-policy'
+            coverage_path.write_text(json.dumps(coverage), encoding='utf-8')
+            old_coverage = coverage_path.read_bytes()
+            daily_path = root / 'daily/2026-09-08.md'
+            old_daily = daily_path.read_bytes()
+
+            with (
+                mock.patch.object(flush, 'run_codex') as model,
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+            ):
+                result = flush.flush_once(args, event, root, state, hook_input=payload)
+            health = json.loads((state / 'health.json').read_text(encoding='utf-8'))
+            new_coverage = coverage_path.read_bytes()
+            new_daily = daily_path.read_bytes()
+
+        self.assertEqual(result, 1)
+        model.assert_not_called()
+        self.assertEqual(new_coverage, old_coverage)
+        self.assertEqual(new_daily, old_daily)
+        self.assertEqual(health['error'], flush.POLICY_MIGRATION_REQUIRED)
+
+    def test_prepared_receipt_and_batch_block_policy_replay_without_coverage(self):
+        courtesy = 'Bunu kaydetme - lütfen.'
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / '.state'
+            transcript = root / 'rollout.jsonl'
+            _write_rows(transcript, [
+                ('user', 'Eski karar'),
+                ('assistant', 'Eski yanıt'),
+                ('user', courtesy),
+                ('user', 'Yeni karar'),
+            ])
+            payload = {'session_id': 'prepared-policy', 'transcript_path': str(transcript)}
+            args = argparse.Namespace(hook_input=root / 'unused', reason='turnend')
+            event = dt.datetime(2026, 9, 8, 12, tzinfo=dt.timezone.utc)
+            actual_directive = memory_ledger.memory_directive
+
+            def legacy_directive(text):
+                if text == courtesy:
+                    return memory_ledger.MemoryDirective('do-not-save', text)
+                return actual_directive(text)
+
+            with (
+                mock.patch.object(flush.transcript_index, 'POLICY_VERSION', 'persistent-turns-v1'),
+                mock.patch.object(memory_ledger, 'memory_directive', side_effect=legacy_directive),
+                mock.patch.object(flush, 'run_codex', return_value=(self.SUMMARY, None)),
+                mock.patch.object(flush, 'append_daily', side_effect=OSError('append interrupted')),
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+            ):
+                self.assertEqual(flush.flush_once(args, event, root, state, hook_input=payload), 1)
+            session_path = flush._session_state_path(state, payload['session_id'])
+            session = json.loads(session_path.read_text(encoding='utf-8'))
+            prepared = next(
+                receipt for receipt in session['receipts'].values()
+                if receipt.get('status') == 'prepared'
+            )
+            summary_path = flush._prepared_summary_path(state, prepared['idempotency_key'])
+            batch_path = state / f'flush-batch-{flush._session_key(payload["session_id"])}.json'
+            old_receipt = prepared.copy()
+            old_summary = summary_path.read_bytes()
+            old_batch = batch_path.read_bytes()
+            self.assertFalse((state / f'flush-coverage-{flush._session_key(payload["session_id"])}.json').exists())
+
+            with (
+                mock.patch.object(flush.transcript_index, 'POLICY_VERSION', 'persistent-turns-v2'),
+                mock.patch.object(flush, 'run_codex') as model,
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+            ):
+                result = flush.flush_once(args, event, root, state, hook_input=payload)
+            after_session = json.loads(session_path.read_text(encoding='utf-8'))
+            after_receipt = after_session['receipts'][prepared['idempotency_key']]
+            new_summary = summary_path.read_bytes()
+            new_batch = batch_path.read_bytes()
+
+        self.assertEqual(result, 1)
+        model.assert_not_called()
+        self.assertEqual(after_receipt, old_receipt)
+        self.assertEqual(new_summary, old_summary)
+        self.assertEqual(new_batch, old_batch)
+        self.assertFalse(list(root.glob('daily/*.md')))
 
     def test_attachment_summary_rechecks_transcript_before_writing_note(self):
         with tempfile.TemporaryDirectory() as temporary:

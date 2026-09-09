@@ -61,6 +61,8 @@ MAX_TURNS = 30
 MAX_TRANSCRIPT_CHARS = 15_000
 MAX_TRANSCRIPT_BYTES = 4 * 1024 * 1024
 MAX_TRANSCRIPT_LINE_BYTES = 1 * 1024 * 1024
+LEGACY_POLICY_VERSION = "persistent-turns-v1"
+POLICY_MIGRATION_REQUIRED = "flush-policy-migration-required"
 
 EXPECTED_SECTIONS = (
     "Bağlam",
@@ -583,6 +585,7 @@ def _write_flush_state(
         "ts": int(now_epoch),
         "status": status,
         "generation": generation,
+        "policy_version": transcript_index.POLICY_VERSION,
     }
     if detail:
         latest["detail"] = detail
@@ -822,6 +825,8 @@ def flush_once(
         all_chunks = index.chunks
         incomplete_tail = index.counters['partial_lines'] > 0
         coverage_path = state_dir / f'flush-coverage-{_session_key(session_id)}.json'
+        batch_path = state_dir / f'flush-batch-{_session_key(session_id)}.json'
+        initial_batch_exists = batch_path.is_file()
         coverage = _load_json_object(coverage_path, {})
         count = coverage.get('count', 0)
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
@@ -866,7 +871,45 @@ def flush_once(
                 json.dumps(values, ensure_ascii=False).encode('utf-8')
             ).hexdigest()
 
-        if coverage_path.is_file() and coverage.get('schema_version', 1) == 1:
+        current_policy = transcript_index.POLICY_VERSION
+        coverage_update: dict[str, Any] | None = None
+
+        def fail_policy_migration() -> int:
+            _record_flush_failure(
+                state_dir,
+                session_id,
+                now_epoch,
+                POLICY_MIGRATION_REQUIRED,
+            )
+            return 1
+
+        initial_session_state = _load_json_object(
+            _session_state_path(state_dir, session_id),
+            {},
+        )
+        initial_receipts = initial_session_state.get('receipts')
+        if (
+            not initial_batch_exists
+            and isinstance(initial_receipts, dict)
+            and any(
+                isinstance(receipt, dict)
+                and receipt.get('status') == 'prepared'
+                and receipt.get('policy_version') != current_policy
+                for receipt in initial_receipts.values()
+            )
+        ):
+            return fail_policy_migration()
+
+        def policy_digest(limit: int, policy: str) -> str | None:
+            if limit < 0 or limit > len(all_chunks):
+                return None
+            try:
+                return index.coverage_digest(limit, policy_version=policy)
+            except ValueError:
+                return None
+
+        coverage_schema = coverage.get('schema_version', 1)
+        if coverage_path.is_file() and coverage_schema == 1:
             try:
                 valid_legacy = (
                     isinstance(coverage.get('digest'), str)
@@ -875,19 +918,48 @@ def flush_once(
             except (OSError, ValueError) as exc:
                 _record_flush_failure(state_dir, session_id, now_epoch, str(exc))
                 return 1
-            migrated_count = count if valid_legacy else 0
-            coverage = dict(coverage)
-            coverage.update({
+            if not valid_legacy:
+                return fail_policy_migration()
+            coverage_update = dict(coverage)
+            coverage_update.update({
                 'schema_version': transcript_index.COVERAGE_SCHEMA_VERSION,
-                'count': migrated_count,
-                'digest': index.coverage_digest(migrated_count),
+                'count': count,
+                'digest': index.coverage_digest(count),
+                'policy_version': current_policy,
             })
-            try:
-                atomic_write_json(coverage_path, coverage)
-            except OSError:
-                _record_flush_failure(state_dir, session_id, now_epoch, 'flush-coverage-migration-write-failed')
-                return 1
-            count = migrated_count
+        elif coverage_path.is_file() and coverage_schema != transcript_index.COVERAGE_SCHEMA_VERSION:
+            return fail_policy_migration()
+        elif coverage_path.is_file():
+            stored_policy = coverage.get('policy_version')
+            stored_digest = coverage.get('digest')
+            current_digest = policy_digest(count, current_policy)
+            if stored_policy == current_policy:
+                pass
+            elif (
+                stored_policy is None
+                and isinstance(stored_digest, str)
+                and current_digest is not None
+                and stored_digest == current_digest
+            ):
+                coverage_update = dict(coverage)
+                coverage_update['policy_version'] = current_policy
+            elif stored_policy not in {None, LEGACY_POLICY_VERSION}:
+                return fail_policy_migration()
+            elif isinstance(stored_digest, str) and stored_digest == policy_digest(
+                count,
+                stored_policy or LEGACY_POLICY_VERSION,
+            ):
+                coverage_update = dict(coverage)
+                coverage_update.update({
+                    'schema_version': transcript_index.COVERAGE_SCHEMA_VERSION,
+                    'digest': current_digest,
+                    'policy_version': current_policy,
+                })
+            else:
+                return fail_policy_migration()
+        if coverage_update is not None:
+            coverage = coverage_update
+            count = coverage['count']
         def fingerprint(value: int) -> str:
             return index.coverage_digest(value)
 
@@ -903,9 +975,46 @@ def flush_once(
             bounded_refs.append(reference)
             size += cost
         end = start + len(bounded_refs)
-        batch_path = state_dir / f'flush-batch-{_session_key(session_id)}.json'
         batch = _load_json_object(batch_path, {})
         batch_end = batch.get('end', 0)
+        batch_update: dict[str, Any] | None = None
+        if batch_path.is_file() and batch:
+            batch_policy = batch.get('policy_version')
+            if batch_policy not in {None, current_policy, LEGACY_POLICY_VERSION}:
+                return fail_policy_migration()
+            if batch_policy != current_policy:
+                batch_start = batch.get('start')
+                valid_range = (
+                    isinstance(batch_start, int)
+                    and not isinstance(batch_start, bool)
+                    and isinstance(batch_end, int)
+                    and not isinstance(batch_end, bool)
+                    and 0 <= batch_start < batch_end <= len(all_chunks)
+                )
+                if not valid_range:
+                    return fail_policy_migration()
+                current_batch_digest = fingerprint(batch_end)
+                if batch.get('digest') == current_batch_digest:
+                    batch_update = dict(batch)
+                    batch_update['policy_version'] = current_policy
+                else:
+                    legacy_batch_digest = (
+                        legacy_fingerprint(batch_end)
+                        if coverage_path.is_file() and coverage_schema == 1
+                        else policy_digest(
+                            batch_end,
+                            batch_policy or LEGACY_POLICY_VERSION,
+                        )
+                    )
+                    if batch.get('digest') != legacy_batch_digest:
+                        return fail_policy_migration()
+                    batch_update = dict(batch)
+                    batch_update.update({
+                        'digest': current_batch_digest,
+                        'policy_version': current_policy,
+                    })
+        if batch_update is not None:
+            batch = batch_update
         legacy_batch = False
         if (
             batch_path.is_file()
@@ -934,10 +1043,19 @@ def flush_once(
                 and batch.get('digest') == fingerprint(batch_end)):
             end = batch_end
             bounded_refs = list(all_chunks[start:end])
+        batch_payload_to_write: dict[str, Any] | None = None
         if bounded_refs:
             batch_payload = dict(batch)
-            batch_payload.update({'start': start, 'end': end, 'digest': fingerprint(end)})
-            atomic_write_json(batch_path, batch_payload)
+            batch_payload.update({
+                'start': start,
+                'end': end,
+                'digest': fingerprint(end),
+                'policy_version': current_policy,
+            })
+            if batch_update is None:
+                atomic_write_json(batch_path, batch_payload)
+            else:
+                batch_payload_to_write = batch_payload
         def complete_coverage() -> None:
             try:
                 with memory_write_guard(state_dir, session_id):
@@ -947,6 +1065,7 @@ def flush_once(
                             'schema_version': transcript_index.COVERAGE_SCHEMA_VERSION,
                             'count': end,
                             'digest': fingerprint(end),
+                            'policy_version': current_policy,
                         },
                     )
                     batch_path.unlink(missing_ok=True)
@@ -1152,6 +1271,44 @@ def flush_once(
             batch_start=start,
             batch_end=end,
         )
+        if not coverage_path.is_file() and not batch_path.is_file():
+            receipts = session_state.get("receipts")
+            if (
+                isinstance(receipts, dict)
+                and any(
+                    isinstance(receipt, dict)
+                    and receipt.get("status") == "prepared"
+                    for receipt in receipts.values()
+                )
+                and prepared is None
+            ):
+                return fail_policy_migration()
+        if coverage_update is not None:
+            try:
+                atomic_write_json(coverage_path, coverage_update)
+            except OSError:
+                _record_flush_failure(
+                    state_dir,
+                    session_id,
+                    now_epoch,
+                    'flush-coverage-migration-write-failed',
+                )
+                return 1
+        if batch_update is not None:
+            try:
+                atomic_write_json(
+                    batch_path,
+                    batch_payload_to_write or batch_update,
+                )
+            except OSError:
+                _record_flush_failure(
+                    state_dir,
+                    session_id,
+                    now_epoch,
+                    'flush-batch-migration-write-failed',
+                )
+                return 1
+            batch = batch_update
         if prepared is not None:
             idempotency_key = prepared.get("idempotency_key")
             prepared_digest = prepared.get("summary_digest")
