@@ -98,6 +98,7 @@ Zamanı eski, başka köke veya başka oturuma ait kanıtı güncel kabul yerine
 | Sonraki oturum | Yeni oturum önceki bilgiye konuşma geçmişinden değil, okunan kalıcı kaynaktan cevap verir; kaynak ve anlam eşleşir. |
 | Tekrarlı olay | Aynı içerik için Stop, PreCompact ve SessionEnd tek kayıt üretir; coverage boş yere tekrar özetletmez. |
 | Kaydetmeme | “Bunu kaydetme, lütfen” gibi ifade ilgili katkıyı ve onu tekrarlayan yanıtı model girdisi/kayıt dışında bırakır; ilgisiz katkı korunur. |
+| Sır süzme | Gerçek kimlik bilgisi kullanmadan, tanınan bir sır biçiminde benzersiz sentetik canary kullanıcı tarafından gerçek App oturumuna girilir. Gerçek hook olaylarından sonra canary arka plan özetleyici/derleyici model girdilerinde, kalıcı kuyruk payload'larında, günlük/Companion/knowledge kayıtlarında ve filtreli görünümlerde bulunmaz. Asıl kullanıcı girdisinin bulunduğu ham transcript bu türev kontrollerinden ayrı tutulur. |
 | Geç gelen oturuma özel tutma | Önce bir kayıt yayımlanır; sonra kullanıcı “bu konuşmada kalsın” der. Ajan mevcut `suppress_derived_memory` yoluyla geçmiş karşılıkları dışlar; kaynakları silmeden yeni oturum okuması ve derleme girdisinde dışlama doğrulanır. Yalnız session marker varlığı başarı değildir. |
 | İncelemeden uygulamaya | Audit sonrası eylem isteyen soru doğru kapsamı açar. Olumsuzluk, alıntı ve aynı mesajdaki açık salt okunur sınır bunu açmaz. |
 | Proje ve dış işlem | Açık istek ilgili depoda yürütülebilir; proje kodu Vault notlarına yazılmaz. Dış işlem yalnız açık kullanıcı yetkisiyle yapılır. |
