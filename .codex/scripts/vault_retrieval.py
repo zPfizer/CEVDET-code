@@ -4,6 +4,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from datetime import date
 import hashlib
 import json
 import math
@@ -35,6 +36,7 @@ MAX_CANDIDATES = 3
 MAX_CONTEXT_CHARS = 2_600
 MAX_EXCERPT_CHARS = 460
 CACHE_VERSION = 17
+CURRENT_YEAR = date.today().year
 CACHE_RELATIVE_PATH = Path(".codex/scripts/.state/vault-retrieval-cache.json")
 SOURCE_READ_ATTEMPTS = 3
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
@@ -1200,7 +1202,10 @@ def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
         return True
     return (
         "before" in history_terms
-        and any(re.fullmatch(r"\d{4}", term) for term in query_terms)
+        and any(
+            re.fullmatch(r"\d{4}", term) and int(term) <= CURRENT_YEAR
+            for term in query_terms
+        )
     ) or (
         any(re.fullmatch(r"\d{4}", term) for term in query_terms)
         and _is_personal_query(query_terms)

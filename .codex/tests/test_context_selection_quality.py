@@ -550,6 +550,7 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             entries = retrieval.build_vault_map(root, write_cache=False)
             for query in (
                 "before deployment show hook checklist",
+                "before 9999 deployment show hook checklist",
                 "how to lint changed files",
                 "show changed files",
                 "changed",
