@@ -17,6 +17,32 @@ import intake_contract
 import memory_ledger
 
 
+class PromptMemorySnapshotTests(unittest.TestCase):
+    def test_profile_and_warning_share_the_checked_preference_snapshot(self) -> None:
+        for before, after in ((frozenset(), frozenset()),
+                              (frozenset({'hidden'}), frozenset({'hidden'})),
+                              (frozenset(), frozenset({'hidden'})),
+                              (frozenset({'hidden'}), frozenset())):
+            with self.subTest(before=before, after=after), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                with (
+                    mock.patch.object(memory_ledger, 'load_suppressed_hashes',
+                                      side_effect=[before, after]) as preferences,
+                    mock.patch.object(hook, '_profile_card', return_value='synthetic-profile'),
+                ):
+                    result = hook.handle_user_prompt(
+                        {'session_id': 'snapshot-test', 'prompt': ''},
+                        root / '.state', vault_root=root,
+                    )
+                self.assertEqual(preferences.call_count, 2)
+                if before != after:
+                    self.assertIn('[Hafıza Tercihi Sorunu]', result)
+                    self.assertNotIn('synthetic-profile', result)
+                else:
+                    self.assertIn('synthetic-profile', result)
+                    self.assertEqual(hook.MEMORY_READ_RULE in result, bool(before))
+
+
 class RetrievalRaceTests(unittest.TestCase):
     def _note(self, root: Path, name: str, body: str) -> Path:
         path = root / "🧠 500-Knowledge" / name
@@ -258,7 +284,7 @@ class RetrievalRaceTests(unittest.TestCase):
             state.mkdir(parents=True)
             with (
                 mock.patch.object(
-                    hook,
+                    memory_ledger,
                     "load_suppressed_hashes",
                     return_value=frozenset({"0" * 64}),
                 ),

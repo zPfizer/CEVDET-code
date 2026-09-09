@@ -82,7 +82,6 @@ KNOWLEDGE_INDEX_CONTEXT_TARGET_CHARS = SESSION_SECTION_TARGET_CHARS["Bilgi İnde
 from file_lock import locked  # noqa: E402
 from companion_memory import has_pending_reflection, request_reflection  # noqa: E402
 from memory_ledger import (  # noqa: E402
-    load_suppressed_hashes,
     MemoryDirective,
     MemoryRead,
     MemoryPreferenceError,
@@ -628,15 +627,11 @@ def handle_user_prompt(
             profile = _profile_card(vault_root / PROFILE_RELATIVE, vault_root, memory)
             if profile:
                 context.append('[Hafıza: Profil]\n' + profile)
+            if memory.active:
+                context.append(MEMORY_READ_RULE)
     except (OSError, UnicodeError, ValueError):
         return ('[Hafıza Tercihi Sorunu] Profil ve hafıza tercihleri denetlenemedi. '
                 'Ham notlara veya eski önbelleğe geçme; kişisel bilgi yanıtlamadan sorunu bildir.')
-    try:
-        if load_suppressed_hashes(vault_root / '.codex/private-memory'):
-            context.append(MEMORY_READ_RULE)
-    except MemoryPreferenceError:
-        return ('[Hafıza Tercihi Sorunu] Unutma tercihleri okunamadı. '
-                + MEMORY_READ_RULE + ' Tercihler onarılmadan hafızadan kişisel bilgi yanıtlama.')
     if read_only_requested or read_only_scope:
         context.append(
             "[Hafıza] Salt okunur kapsam açık: otomatik hafıza kaydı, profil onarımı "
