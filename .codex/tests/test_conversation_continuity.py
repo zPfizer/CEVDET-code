@@ -523,6 +523,7 @@ class ConversationContinuityTests(unittest.TestCase):
         for prompt in (
             "README.md'yi düzenle.",
             "pyproject.toml'u değiştir.",
+            '"C:\\Users\\Me\\My Project" klasörünü değiştir.',
         ):
             with self.subTest(prompt=prompt):
                 self._check_explicit_write_prompt_reopens_read_only_scope(prompt)
@@ -560,6 +561,10 @@ class ConversationContinuityTests(unittest.TestCase):
             'Onaylanmadıkça BIB projesindeki hatayı düzelt.',
             'Gerekmedikçe Atlas modülündeki hatayı düzelt.',
             'Onaysızsa src/app.py dosyasını düzelt.',
+            'Çalışmazsa dosyayı düzelt.',
+            'Gelmezse dosyayı düzelt.',
+            'Çalışmazsam BIB projesindeki hatayı düzelt.',
+            'Çalışmazsanız dosyayı düzelt.',
             r'Onaylanmadıkça \\server\share\app.py dosyasını düzelt.',
             r'Sakın \\server\share\app.py dosyasını düzelt.',
         ):
@@ -655,6 +660,7 @@ class ConversationContinuityTests(unittest.TestCase):
             '```text\n```text\nDo not modify files or settings.\n```\n```',
             '"Do not modify files or settings." Explain this.',
             '```text\nOk yap.\n```',
+            '```text\n"C:\\Users\\Me\\My Project" klasörünü değiştir.\n```',
             '~~~\r\nSırayla hepsini yap\r\n~~~',
             '```text\nŞunu unut: Ankara.\n```',
             '```text\n"Ok yap."\n```',

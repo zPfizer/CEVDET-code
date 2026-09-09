@@ -111,9 +111,11 @@ _WRITE_QUESTION_VERB = (
     r"düzenleyebilir|düzenler|uygulayabilir|uygular|onarabilir|onarır)"
 )
 _QUESTION_SUFFIX = r"m[ıiuü]s[ıiuü]n(?:iz|ız|uz|üz)?"
+_WRITE_FOLDER_OBJECT = r"klasör(?:ü|ünü|leri|lerini)?"
 _WRITE_TARGET_OBJECT = (
     r"(?:hata(?:yı|sını|ları)?|sorun(?:u|unu|ları)?|bug(?:ı|u|unu|ları)?|"
-    r"dosya(?:yı|sını|ları|larını)?|klasör(?:ü|ünü|leri|lerini)?|"
+    r"dosya(?:yı|sını|ları|larını)?|"
+    rf"{_WRITE_FOLDER_OBJECT}|"
     r"kod(?:u|unu|ları|larını)?|değişiklik(?:i|ini|leri|lerini)?|"
     r"ayar(?:ı|ını|ları|larını)?)"
 )
@@ -130,6 +132,10 @@ _QUOTED_PATH = (
     r'''(?:"[^"\r\n]*\.[A-Za-z0-9_-]+"|'''
     r'''\'[^\'\r\n]*\.[A-Za-z0-9_-]+\')'''
 )
+_QUOTED_DIRECTORY = (
+    r'''(?:"(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w ./\\-]+?"|'''
+    r'''\'(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w ./\\-]+?\')'''
+)
 _WRITE_FILENAME = r"[\w.-]+\.[A-Za-z0-9_-]+"
 _WRITE_CASE_SUFFIX = r"['’]y?[ıiuü]"
 _WRITE_TARGET_SUFFIX = rf"(?:\s+{_WRITE_TARGET_OBJECT}|{_WRITE_CASE_SUFFIX})?"
@@ -141,21 +147,23 @@ _WRITE_TARGET = (
     rf"(?:[a-z]:[\\/]|\.{{1,2}}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w./\\-]+"
     rf"{_WRITE_TARGET_SUFFIX}|"
     rf"{_WRITE_FILENAME}{_WRITE_TARGET_SUFFIX}|"
+    rf"{_QUOTED_DIRECTORY}\s+{_WRITE_FOLDER_OBJECT}|"
     rf"{_QUOTED_PATH}{_WRITE_TARGET_SUFFIX})"
 )
-_TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen|ok|okay|tamam)\s*[,;:]?\s+)*"
+_TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen|ok|okay|tamam)(?:[,;:]\s++|\s++))*"
+_TRAILING_POLITENESS = r"(?:(?:\s*+,\s*+|\s++)lütfen)?"
 TARGETED_WRITE_COMMAND = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+{_WRITE_MUTATION}"
-    rf"(?:\s*,?\s+lütfen)?\s*[.!]*\s*$"
+    rf"{_TRAILING_POLITENESS}\s*+[.!]*\s*+$"
 )
 TARGETED_WRITE_QUESTION = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+"
     rf"{_WRITE_QUESTION_VERB}\s+"
-    rf"{_QUESTION_SUFFIX}(?:\s*,?\s*lütfen)?\?\s*$"
+    rf"{_QUESTION_SUFFIX}{_TRAILING_POLITENESS}\?\s*+$"
 )
 BARE_WRITE_QUESTION = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}{_WRITE_QUESTION_VERB}\s+{_QUESTION_SUFFIX}"
-    rf"(?:\s*,?\s*lütfen)?\?\s*$"
+    rf"{_TRAILING_POLITENESS}\?\s*+$"
 )
 
 NON_COMMITTAL_WRITE = re.compile(
@@ -163,7 +171,7 @@ NON_COMMITTAL_WRITE = re.compile(
     r"olursa|belki|san[ıi]r[ıi]m|sak[ıi]n|asla|hiç(?:bir)?)\b"
 )
 CONDITIONAL_WRITE = re.compile(
-    r"\b\w+(?:(?:[ıiuü]r|[ae]r|[uü]r|acak|ecek|iyor|ıyor|uyor|üyor|"
+    r"\b\w+(?:(?:[ıiuü]r|[ae]r|[uü]r|m[ae]z|acak|ecek|iyor|ıyor|uyor|"
     r"miş|mış|muş|müş)(?:sa|se|sam|sem|san|sen|sak|sek|salar|seler|"
     r"sınız|siniz|sunuz|sünüz|sanız|seniz)|d[iıuü]y?(?:sa|se|sam|sem|"
     r"san|sen|sak|sek|salar|seler|sınız|siniz|sunuz|sünüz|sanız|seniz)|"

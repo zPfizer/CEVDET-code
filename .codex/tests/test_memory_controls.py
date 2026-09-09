@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -13,6 +15,23 @@ import vault_retrieval  # noqa: E402
 
 
 class MemoryDirectiveTests(unittest.TestCase):
+    def test_long_write_intent_whitespace_is_bounded(self) -> None:
+        script = (
+            "import sys; sys.path.insert(0, '.codex/scripts'); "
+            "import memory_ledger as ledger; "
+            "assert not ledger.is_explicit_write_intent('Lütfen' + ' ' * 12000 + '?'); "
+            "assert not ledger.is_explicit_write_intent('src/app.py dosyasını düzelt' + ' ' * 12000 + '?'); "
+            "assert ledger.is_explicit_write_intent('src/app.py dosyasını düzelt, ' + ' ' * 12000 + 'lütfen.')"
+        )
+        subprocess.run(
+            [sys.executable, "-X", "utf8", "-c", script],
+            cwd=CODEX_DIR.parent,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
     def test_quoted_controls_are_content_but_outer_controls_still_apply(self) -> None:
         ordinary = [
             'Makalede “bu konuşmada kalsın” yazıyor. Bunu değerlendir.',
@@ -147,6 +166,10 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Onaylanmadıkça BIB projesindeki hatayı düzelt.",
             "Gerekmedikçe Atlas modülündeki hatayı düzelt.",
             "Onaysızsa src/app.py dosyasını düzelt.",
+            "Çalışmazsa dosyayı düzelt.",
+            "Gelmezse dosyayı düzelt.",
+            "Çalışmazsam BIB projesindeki hatayı düzelt.",
+            "Çalışmazsanız dosyayı düzelt.",
             r'Onaylanmadıkça \\server\share\app.py dosyasını düzelt.',
             r'Sakın \\server\share\app.py dosyasını düzelt.',
             "Onaylıysa... dosyayı düzelt.",
@@ -157,6 +180,7 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Komut örneği olarak Atlas projesindeki hatayı düzelt.",
             '"C:\\Users\\Me\\My Project\\app.py dosyasını düzelt."',
             '"README.md\'yi düzenle."',
+            '```text\n"C:\\Users\\Me\\My Project" klasörünü değiştir.\n```',
             '"Bunu düzelt."',
             '"app.py dosyasını düzelt."',
             "Yazabilirsin.",
@@ -201,6 +225,7 @@ class MemoryDirectiveTests(unittest.TestCase):
             "README.md'yi düzenle.",
             "pyproject.toml'u değiştir.",
             "src/app.py'yi düzelt.",
+            '"C:\\Users\\Me\\My Project" klasörünü değiştir.',
             '"C:\\Users\\Me\\My Project\\app.py"\'yi düzelt.',
             '"C:\\Users\\Me\\My Project\\app.py" dosyasını düzelt.',
             '"app.py" dosyasını düzelt.',
