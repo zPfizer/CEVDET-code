@@ -274,7 +274,7 @@ class WorkerHandoffTests(unittest.TestCase):
                             "delivery_schema_version": 1,
                             "session_id": "pending-newer",
                             "transcript_path": str(transcript),
-                            "reason": "turnend",
+                            "reason": "precompact" if path == older else "turnend",
                             "event_iso": event_iso,
                         }
                     ),
@@ -300,8 +300,147 @@ class WorkerHandoffTests(unittest.TestCase):
 
         self.assertEqual(job["payload"]["hook_input"], str(newer))
         self.assertEqual(job["payload"]["event_iso"], "2026-09-09T12:05:00+03:00")
+        self.assertEqual(job["payload"]["reason"], "precompact")
         self.assertTrue(newer_exists)
         self.assertFalse(older_exists)
+
+    def test_failed_superseded_cleanup_is_persisted_and_not_readmitted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            transcript = state / "source.jsonl"
+            transcript.write_text("{}", encoding="utf-8")
+            older = state / "hookin-older.json"
+            newer = state / "hookin-newer.json"
+            for path, event_iso in (
+                (older, "2026-09-09T12:00:00+03:00"),
+                (newer, "2026-09-09T12:05:00+03:00"),
+            ):
+                path.write_text(
+                    json.dumps(
+                        {
+                            "delivery_schema_version": 1,
+                            "session_id": "superseded",
+                            "transcript_path": str(transcript),
+                            "reason": "turnend",
+                            "event_iso": event_iso,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            workers.enqueue_job(
+                state,
+                "flush",
+                {
+                    "hook_input": str(newer),
+                    "reason": "turnend",
+                    "event_iso": "2026-09-09T12:05:00+03:00",
+                },
+                start_supervisor=False,
+                now=100,
+            )
+            real_unlink = Path.unlink
+
+            def fail_older(path: Path, *args: object, **kwargs: object):
+                if path == older:
+                    raise OSError("sharing violation")
+                return real_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "unlink", autospec=True, side_effect=fail_older):
+                self.assertEqual(workers.recover_orphan_hook_inputs(state, now=101), 1)
+            pending = list((state / "worker-jobs" / "pending").glob("*.json"))
+            job = json.loads(pending[0].read_text(encoding="utf-8"))
+            self.assertEqual(job["payload"]["hook_input"], str(newer))
+            self.assertEqual(job["payload"]["superseded_hook_inputs"], [str(older)])
+            self.assertEqual(workers.recover_orphan_hook_inputs(state, now=102), 0)
+
+    def test_external_reference_keeps_shared_superseded_transport(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            transcript = state / "source.jsonl"
+            transcript.write_text("{}", encoding="utf-8")
+            older = state / "hookin-shared-older.json"
+            newer = state / "hookin-shared-newer.json"
+            for path, event_iso in (
+                (older, "2026-09-09T12:00:00+03:00"),
+                (newer, "2026-09-09T12:05:00+03:00"),
+            ):
+                path.write_text(
+                    json.dumps(
+                        {
+                            "delivery_schema_version": 1,
+                            "session_id": "shared",
+                            "transcript_path": str(transcript),
+                            "reason": "turnend",
+                            "event_iso": event_iso,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            external = workers.enqueue_job(
+                state,
+                "maintenance",
+                {},
+                start_supervisor=False,
+                now=100,
+            )
+            external_running, external_job = workers._claim_next_job(state, now=100)
+            workers._finish_job(
+                state,
+                external_running,
+                external_job,
+                status="dead-letter",
+                error="external",
+                now=100,
+            )
+            external_dead = state / "worker-jobs" / "dead-letter" / external.name
+            external_record = json.loads(external_dead.read_text(encoding="utf-8"))
+            external_record["kind"] = "flush"
+            external_record["payload"] = {
+                "hook_input": str(older),
+                "reason": "turnend",
+                "event_iso": "2026-09-09T12:00:00+03:00",
+            }
+            workers.atomic_write_json(external_dead, external_record)
+            pending = workers.enqueue_job(
+                state,
+                "flush",
+                {
+                    "hook_input": str(newer),
+                    "reason": "turnend",
+                    "event_iso": "2026-09-09T12:05:00+03:00",
+                },
+                start_supervisor=False,
+                now=100,
+            )
+
+            with workers.locked(state / "worker-queue"):
+                retained = workers._coalesce_pending_flush_locked(
+                    state,
+                    external_record["payload"],
+                    now=101,
+                )
+            saved = json.loads(pending.read_text(encoding="utf-8"))
+            older_exists = older.exists()
+            retained_running, retained_job = workers._claim_next_job(state, now=102)
+            workers._finish_job(
+                state,
+                retained_running,
+                retained_job,
+                status="succeeded",
+                now=102,
+            )
+            succeeded = state / "worker-jobs" / "succeeded" / retained_running.name
+            succeeded_record = json.loads(succeeded.read_text(encoding="utf-8"))
+            older_after_success = older.exists()
+            newer_after_success = newer.exists()
+
+        self.assertEqual(retained, pending)
+        self.assertTrue(older_exists)
+        self.assertEqual(saved["payload"]["hook_input"], str(newer))
+        self.assertEqual(saved["payload"]["superseded_hook_inputs"], [str(older)])
+        self.assertTrue(older_after_success)
+        self.assertFalse(newer_after_success)
+        self.assertTrue(succeeded_record["hook_input_cleanup_pending"])
 
     def test_replay_lookup_does_not_quarantine_recoverable_success_transition(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -562,6 +701,44 @@ class WorkerHandoffTests(unittest.TestCase):
             self.assertTrue(saved["hook_input_cleanup_pending"])
             self.assertTrue(transport.exists())
             workers.prune_succeeded_jobs(state, now=10**12)
+            self.assertFalse(transport.exists())
+            self.assertFalse(receipt.exists())
+
+    def test_cleanup_pin_clears_and_prunes_after_reference_lookup_recovers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            transcript = state / "source.jsonl"
+            transcript.write_text("{}", encoding="utf-8")
+            with mock.patch.object(workers, "ensure_supervisor"):
+                workers.enqueue_flush(
+                    state,
+                    {"session_id": "lookup-recovery", "transcript_path": str(transcript)},
+                    "turnend",
+                    vault_root=state,
+                )
+            running, job = workers._claim_next_job(state, now=100)
+            transport = Path(job["payload"]["hook_input"])
+            real_unlink = Path.unlink
+
+            def fail_transport(path: Path, *args: object, **kwargs: object):
+                if path == transport:
+                    raise OSError("busy")
+                return real_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "unlink", autospec=True, side_effect=fail_transport):
+                workers._finish_job(state, running, job, status="succeeded", now=100)
+            receipt = state / "worker-jobs" / "succeeded" / running.name
+            with mock.patch.object(
+                workers,
+                "_referenced_hook_inputs_locked",
+                return_value=None,
+            ):
+                workers.prune_succeeded_jobs(state, now=10**12)
+            self.assertTrue(json.loads(receipt.read_text(encoding="utf-8"))["hook_input_cleanup_pending"])
+
+            with mock.patch.object(workers, "MAX_SUCCEEDED_RECEIPTS", 0):
+                workers.prune_succeeded_jobs(state, now=10**12)
+
             self.assertFalse(transport.exists())
             self.assertFalse(receipt.exists())
 

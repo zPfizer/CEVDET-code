@@ -309,6 +309,29 @@ def _hook_input_reference(payload: object) -> Path | None:
         return None
 
 
+def _hook_input_references(payload: object) -> set[Path] | None:
+    if not isinstance(payload, dict):
+        return set()
+    references: set[Path] = set()
+    hook_input = payload.get("hook_input")
+    if hook_input is not None:
+        reference = _hook_input_reference(payload)
+        if reference is None:
+            return None
+        references.add(reference)
+    superseded = payload.get("superseded_hook_inputs", [])
+    if not isinstance(superseded, list):
+        return None
+    for value in superseded:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            references.add(Path(value).resolve(strict=False))
+        except OSError:
+            return None
+    return references
+
+
 def _find_hook_input_job_locked(
     state_dir: Path,
     payload: object,
@@ -344,7 +367,8 @@ def _find_hook_input_job_locked(
                     else None
                 )
                 if destination_state is None:
-                    if _hook_input_reference(job.get("payload")) == target:
+                    job_references = _hook_input_references(job.get("payload"))
+                    if job_references is None or target in job_references:
                         return path, "invalid"
                     continue
                 destination = _job_root(state_dir) / destination_state / path.name
@@ -353,30 +377,39 @@ def _find_hook_input_job_locked(
                 except ValueError:
                     # A real corrupt record remains for the normal quarantine
                     # path; lookup must never quarantine it as a side effect.
-                    if _hook_input_reference(job.get("payload")) == target:
+                    job_references = _hook_input_references(job.get("payload"))
+                    if job_references is None or target in job_references:
                         return path, "invalid"
                     continue
                 job_payload = job.get("payload")
-            if _hook_input_reference(job_payload) == target:
+            references = _hook_input_references(job_payload)
+            if references is not None and target in references:
                 return path, state
     return None
 
 
-def _referenced_hook_inputs_locked(state_dir: Path) -> set[Path] | None:
+def _referenced_hook_inputs_locked(
+    state_dir: Path,
+    *,
+    excluded_paths: set[Path] | None = None,
+) -> set[Path] | None:
     references: set[Path] = set()
+    excluded = excluded_paths or set()
     for state in ("pending", "claimed", "running", "dead-letter"):
         for job_path in (_job_root(state_dir) / state).glob("*.json"):
+            if job_path.resolve(strict=False) in excluded:
+                continue
             try:
                 payload = _load_job(job_path).get("payload", {})
             except ValueError:
                 return None
-            reference = _hook_input_reference(payload)
-            if reference is None:
-                if isinstance(payload, dict) and payload.get("hook_input"):
-                    return None
-                continue
-            references.add(reference)
+            job_references = _hook_input_references(payload)
+            if job_references is None:
+                return None
+            references.update(job_references)
     for tombstone in (_job_root(state_dir) / "quarantined").glob("*.json"):
+        if tombstone.resolve(strict=False) in excluded:
+            continue
         try:
             tombstone_value = _load_job(tombstone)
             payload_path = tombstone.with_name(str(tombstone_value["payload_file"]))
@@ -384,12 +417,10 @@ def _referenced_hook_inputs_locked(state_dir: Path) -> set[Path] | None:
             payload = original.get("payload") if isinstance(original, dict) else None
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError, KeyError):
             return None
-        reference = _hook_input_reference(payload)
-        if reference is None:
-            if isinstance(payload, dict) and payload.get("hook_input"):
-                return None
-            continue
-        references.add(reference)
+        job_references = _hook_input_references(payload)
+        if job_references is None:
+            return None
+        references.update(job_references)
     return references
 
 
@@ -400,12 +431,10 @@ def _succeeded_hook_inputs_locked(state_dir: Path) -> set[Path] | None:
             payload = _load_job(job_path).get("payload", {})
         except ValueError:
             return None
-        reference = _hook_input_reference(payload)
-        if reference is None:
-            if isinstance(payload, dict) and payload.get("hook_input"):
-                return None
-            continue
-        references.add(reference)
+        job_references = _hook_input_references(payload)
+        if job_references is None:
+            return None
+        references.update(job_references)
     return references
 
 
@@ -620,6 +649,11 @@ def _merge_flush_payload(
     current: dict[str, Any], incoming: dict[str, Any]
 ) -> dict[str, Any]:
     merged = dict(current)
+    superseded: set[str] = set()
+    for source in (current, incoming):
+        values = source.get("superseded_hook_inputs", [])
+        if isinstance(values, list):
+            superseded.update(value for value in values if isinstance(value, str) and value)
     current_reason = current.get("reason")
     incoming_reason = incoming.get("reason")
     current_priority = FLUSH_REASON_PRIORITY.get(str(current_reason), -1)
@@ -631,19 +665,21 @@ def _merge_flush_payload(
         or (incoming_priority == current_priority and incoming_event >= current_event)
     )
     if incoming_reason_wins:
-        for field in ("reason", "event_iso"):
-            if field in incoming:
-                merged[field] = incoming[field]
-    incoming_metadata_wins = (
-        incoming_priority > current_priority
-        or incoming_event >= current_event
-    )
+        if "reason" in incoming:
+            merged["reason"] = incoming["reason"]
+    incoming_metadata_wins = incoming_event >= current_event
+    if incoming_metadata_wins and "event_iso" in incoming:
+        merged["event_iso"] = incoming["event_iso"]
     if incoming_metadata_wins and "hook_input" in incoming:
         merged["hook_input"] = incoming["hook_input"]
     if incoming_metadata_wins:
         for field in FLUSH_CONTINUATION_FIELDS:
             if field in incoming:
                 merged[field] = incoming[field]
+    if superseded:
+        merged["superseded_hook_inputs"] = sorted(superseded)
+    else:
+        merged.pop("superseded_hook_inputs", None)
     return merged
 
 
@@ -680,14 +716,14 @@ def _coalesce_pending_flush_locked(
         return None
     matches.sort(key=lambda item: _job_sort_key(item[1], item[0]))
     retained_path, retained = matches[0]
-    old_inputs = [
-        reference
-        for path, job in matches
-        if (reference := _hook_input_reference(job.get("payload"))) is not None
-    ]
-    incoming_input = _hook_input_reference(payload)
-    if incoming_input is not None:
-        old_inputs.append(incoming_input)
+    old_inputs: list[Path] = []
+    for _path, job in matches:
+        references = _hook_input_references(job.get("payload"))
+        if references is not None:
+            old_inputs.extend(references)
+    incoming_references = _hook_input_references(payload)
+    if incoming_references is not None:
+        old_inputs.extend(incoming_references)
     merged_payload = retained.get("payload", {})
     for _path, job in matches[1:]:
         merged_payload = _merge_flush_payload(
@@ -695,27 +731,57 @@ def _coalesce_pending_flush_locked(
             job.get("payload", {}),
         )
     retained["payload"] = _merge_flush_payload(merged_payload, payload)
+    current_input = _hook_input_reference(retained["payload"])
+    initial_superseded = set(old_inputs)
+    if current_input is not None:
+        initial_superseded.discard(current_input)
+    if initial_superseded:
+        retained["payload"]["superseded_hook_inputs"] = sorted(
+            str(path) for path in initial_superseded
+        )
+    else:
+        retained["payload"].pop("superseded_hook_inputs", None)
     retained["generation"] = int(retained.get("generation", 0)) + 1
     retained["coalesced_ts"] = int(now)
     atomic_write_json(retained_path, retained)
+    excluded_paths = {retained_path.resolve(strict=False)}
     for duplicate_path, _job in matches[1:]:
         try:
             duplicate_path.unlink()
+            excluded_paths.add(duplicate_path.resolve(strict=False))
         except OSError:
             continue
-    references = _referenced_hook_inputs_locked(state_dir)
+    references = _referenced_hook_inputs_locked(
+        state_dir,
+        excluded_paths=excluded_paths,
+    )
     if references is not None:
-        current_input = _hook_input_reference(retained["payload"])
+        external_references = references
+        superseded_failures: set[Path] = set()
+        superseded_external: set[Path] = set()
         for old_input in old_inputs:
             if (
                 old_input != current_input
-                and old_input not in references
                 and _managed_hook_input(old_input, state_dir)
             ):
+                if old_input in external_references:
+                    superseded_external.add(old_input)
+                    continue
                 try:
                     old_input.unlink(missing_ok=True)
                 except OSError:
-                    continue
+                    superseded_failures.add(old_input)
+        merged_payload = dict(retained.get("payload", {}))
+        superseded_values = {
+            str(path) for path in superseded_external | superseded_failures
+        }
+        if superseded_values:
+            merged_payload["superseded_hook_inputs"] = sorted(superseded_values)
+        else:
+            merged_payload.pop("superseded_hook_inputs", None)
+        if merged_payload != retained.get("payload", {}):
+            retained["payload"] = merged_payload
+            atomic_write_json(retained_path, retained)
     return retained_path
 
 
@@ -888,7 +954,10 @@ def _recover_orphan_hook_inputs_locked(
             continue
         candidates.append((_hook_input_recovery_sort_key(payload, candidate), candidate, payload))
     candidates.sort(key=lambda item: item[0])
-    for _sort_key, candidate, payload in candidates:
+    for _sort_key, candidate, _payload in candidates:
+        payload = _hook_input_delivery_payload(state_dir, candidate)
+        if payload is None:
+            continue
         if candidate.resolve(strict=False) in completed:
             continue
         references = _referenced_hook_inputs_locked(state_dir)
@@ -1003,23 +1072,61 @@ def _cleanup_succeeded_hook_inputs_locked(state_dir: Path) -> int:
             job = _load_job(path)
         except ValueError:
             continue
-        reference = _hook_input_reference(job.get("payload"))
-        if reference is None or not _managed_hook_input(reference, state_dir):
+        payload = job.get("payload")
+        references = _hook_input_references(payload)
+        if not references:
             continue
-        try:
-            reference.unlink(missing_ok=True)
-        except OSError:
-            if job.get("hook_input_cleanup_pending") is True:
+        current = _hook_input_reference(payload)
+        external_references = _referenced_hook_inputs_locked(
+            state_dir,
+            excluded_paths={path.resolve(strict=False)},
+        )
+        if external_references is None:
+            external_references = set()
+            external_lookup_failed = True
+        else:
+            external_lookup_failed = False
+        failures: set[Path] = set()
+        for reference in references:
+            if not _managed_hook_input(reference, state_dir):
                 continue
+            if external_lookup_failed or reference in external_references:
+                failures.add(reference)
+                continue
+            try:
+                reference.unlink(missing_ok=True)
+            except OSError:
+                failures.add(reference)
+        was_pending = job.get("hook_input_cleanup_pending") is True
+        was_consumed = job.get("hook_input_consumed") is True
+        current_managed = current is not None and _managed_hook_input(current, state_dir)
+        new_pending = bool(failures or external_lookup_failed)
+        if failures or external_lookup_failed:
             job["hook_input_cleanup_pending"] = True
-            atomic_write_json(path, job)
-            continue
-        changed = "hook_input_cleanup_pending" in job or job.get("hook_input_consumed") is not True
-        job.pop("hook_input_cleanup_pending", None)
-        job["hook_input_consumed"] = True
+            if current_managed and current not in failures:
+                job["hook_input_consumed"] = True
+        else:
+            job.pop("hook_input_cleanup_pending", None)
+            if current_managed:
+                job["hook_input_consumed"] = True
+        remaining_superseded = failures - ({current} if current is not None else set())
+        updated_payload = dict(payload) if isinstance(payload, dict) else {}
+        if remaining_superseded:
+            updated_payload["superseded_hook_inputs"] = sorted(
+                str(reference) for reference in remaining_superseded
+            )
+        else:
+            updated_payload.pop("superseded_hook_inputs", None)
+        changed = (
+            updated_payload != payload
+            or was_pending != new_pending
+            or (not new_pending and current_managed and not was_consumed)
+        )
+        job["payload"] = updated_payload
         if changed:
             atomic_write_json(path, job)
-        cleaned += 1
+        if not failures:
+            cleaned += 1
     return cleaned
 
 
