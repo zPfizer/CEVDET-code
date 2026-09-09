@@ -1107,7 +1107,7 @@ tags: [doğrulama]
 
         health = next(check for check in checks if check.name == "Hook sağlığı")
         self.assertEqual(health.status, "FAIL")
-        self.assertIn("UnicodeEncodeError", health.evidence)
+        self.assertEqual(health.evidence, "runtime-error-recorded")
 
     def test_doctor_fails_when_brain_health_contains_an_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1258,7 +1258,7 @@ tags: [doğrulama]
 
         retrieval = next(check for check in checks if check.name == "Vault retrieval")
         self.assertEqual(retrieval.status, "FAIL")
-        self.assertIn("UnicodeError", retrieval.evidence)
+        self.assertEqual(retrieval.evidence, "runtime-error-recorded")
 
     def test_doctor_warns_when_vault_retrieval_receipt_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

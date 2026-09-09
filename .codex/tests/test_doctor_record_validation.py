@@ -109,7 +109,7 @@ class DoctorRecordValidationTests(unittest.TestCase):
                         "generation": 1,
                         "status": "error",
                         "ts": 100,
-                        "error": "sk-proj-example",
+                        "error": "profile-secret-password-abc",
                     }
                 ),
                 encoding="utf-8",
@@ -118,7 +118,8 @@ class DoctorRecordValidationTests(unittest.TestCase):
             check = doctor._hook_health_check(doctor.Context(state_dir=state, now=100))
 
             self.assertEqual(check.status, "FAIL")
-            self.assertNotIn("sk-proj-example", check.evidence)
+            self.assertNotIn("profile-secret-password-abc", check.evidence)
+            self.assertIn("runtime-error-recorded", check.evidence)
 
     def test_brain_health_schema_v2_rejects_non_object_component(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -180,7 +181,7 @@ class DoctorRecordValidationTests(unittest.TestCase):
             state = root / "state"
             state.mkdir()
             (state / "retrieval-health.json").write_text(
-                json.dumps({"ts": 100, "error": "password:abc"}),
+                json.dumps({"ts": 100, "error": "profile-secret-password-abc"}),
                 encoding="utf-8",
             )
             with mock.patch.object(doctor, "build_vault_map", return_value=[object()]):
@@ -189,7 +190,8 @@ class DoctorRecordValidationTests(unittest.TestCase):
                 )
 
             self.assertEqual(check.status, "FAIL")
-            self.assertNotIn("password:abc", check.evidence)
+            self.assertNotIn("profile-secret-password-abc", check.evidence)
+            self.assertEqual(check.evidence, "runtime-error-recorded")
 
     def test_retrieval_fresh_receipt_requires_known_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

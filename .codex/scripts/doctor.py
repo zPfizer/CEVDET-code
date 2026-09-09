@@ -116,16 +116,12 @@ def _finite_timestamp(value: object) -> float | None:
     return timestamp if math.isfinite(timestamp) else None
 
 
-_RECEIPT_ERROR = re.compile(
-    r"(?:(?:[A-Z][A-Za-z0-9]*(?:Error|Exception))|(?:profile-[a-z0-9-]+))"
-    r"(?:,(?:(?:[A-Z][A-Za-z0-9]*(?:Error|Exception))|(?:profile-[a-z0-9-]+)))*\Z"
-)
-
-
 def _receipt_error(value: object) -> str:
-    if isinstance(value, str) and _RECEIPT_ERROR.fullmatch(value):
-        return value
-    return "error-class-invalid"
+    return (
+        "runtime-error-recorded"
+        if isinstance(value, str) and value
+        else "error-class-invalid"
+    )
 
 
 def _exists(vault: Path, paths: list[str]) -> tuple[bool, str]:
