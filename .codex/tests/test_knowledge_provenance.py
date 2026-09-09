@@ -216,6 +216,18 @@ Bağ.
                 {'knowledge/concepts/ornek.md': original})
             self.assertEqual(path.read_text(encoding='utf-8'), once)
 
+    def test_claim_order_normalization_preserves_mixed_line_endings_and_blanks(self) -> None:
+        rows = CLAIMS.splitlines()
+        rows[1] = rows[1].replace('Bir dış', 'Bir  dış')
+        original = _concept(
+            rows[3] + '\r\n\r\n' + rows[2] + '\u2028' + rows[1] + '\r\n' + rows[0]
+        )
+
+        normalized = knowledge_schema.normalize_claim_order(original)
+
+        expected = rows[0] + '\r\n\r\n' + rows[1] + rows[2] + '\u2028\r\n' + rows[3] + '\n'
+        self.assertIn(expected, normalized)
+
     def test_changed_concept_accepts_four_claim_kinds_with_freshness_and_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
