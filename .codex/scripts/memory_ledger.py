@@ -100,15 +100,42 @@ EXPLICIT_WRITE_INTENT = re.compile(
     r"\s+(?:yap|uygula)|"
     r"(?:dosyayı|dosyaları|ayarı|ayarları|kodu)\s+(?:değiştir|düzenle|uygula)|"
     r"(?:uygulamaya|yazmaya|değişikliğe)\s+geç|"
-    r"(?:dosyaları\s+)?(?:değiştirebilirsin|düzenleyebilirsin|"
-    r"uygulayabilirsin|yazabilirsin)"
-    r"|(?:(?:[^,;:!?\r\n]+)\s+)?(?:düzelt|değiştir|düzenle|uygula|yaz|onar|yap)"
-    r"(?:\s+lütfen)?"
-    r"|(?:(?:[^,;:!?\r\n]+)\s+)?(?:düzeltebilir|düzeltir|değiştirebilir|değiştirir|"
-    r"düzenleyebilir|düzenler|uygulayabilir|uygular|yazabilir|yazar|"
-    r"onarabilir|onarır|yapabilir|yapar)"
-    r"\s+m[ıiuü]s[ıiuü]n(?:\s*,?\s*lütfen)?\?"
+    r"(?:(?:dosyaları\s+)?(?:değiştirebilirsin|düzenleyebilirsin|"
+    r"uygulayabilirsin)|dosyaları\s+yazabilirsin)"
     r")\s*[.!]*\s*$"
+)
+
+_WRITE_MUTATION = r"(?:düzelt|değiştir|düzenle|uygula|onar)"
+_WRITE_QUESTION_VERB = (
+    r"(?:düzeltebilir|düzeltir|değiştirebilir|değiştirir|"
+    r"düzenleyebilir|düzenler|uygulayabilir|uygular|onarabilir|onarır)"
+)
+_QUESTION_SUFFIX = r"m[ıiuü]s[ıiuü]n(?:iz|ız|uz|üz)?"
+_WRITE_TARGET_OBJECT = (
+    r"(?:hata(?:yı|sını|ları)?|sorun(?:u|unu|ları)?|bug(?:ı|u|unu|ları)?|"
+    r"dosya(?:yı|sını|ları|larını)?|klasör(?:ü|ünü|leri|lerini)?|"
+    r"kod(?:u|unu|ları|larını)?|değişiklik(?:i|ini|leri|lerini)?|"
+    r"ayar(?:ı|ını|ları|larını)?)"
+)
+_WRITE_TARGET = (
+    rf"(?:bunu|bunları|şunu|şunları|onu|onları|"
+    rf"(?:bu|şu|o)\s+{_WRITE_TARGET_OBJECT}|"
+    rf"(?:[\w.-]+\s+)*{_WRITE_TARGET_OBJECT}|"
+    rf"(?:[a-z]:[\\/]|\.{{1,2}}[\\/]|[\w.-]+[\\/])[\w./\\-]+"
+    rf"(?:\s+{_WRITE_TARGET_OBJECT})?|"
+    rf"[\w.-]+\.[A-Za-z0-9_-]+(?:\s+{_WRITE_TARGET_OBJECT})?)"
+)
+TARGETED_WRITE_COMMAND = re.compile(
+    rf"^\s*(?:acaba\s+)?{_WRITE_TARGET}\s+{_WRITE_MUTATION}"
+    rf"(?:\s+lütfen)?\s*[.!]*\s*$"
+)
+TARGETED_WRITE_QUESTION = re.compile(
+    rf"^\s*(?:acaba\s+)?{_WRITE_TARGET}\s+{_WRITE_QUESTION_VERB}\s+"
+    rf"{_QUESTION_SUFFIX}(?:\s*,?\s*lütfen)?\?\s*$"
+)
+BARE_WRITE_QUESTION = re.compile(
+    rf"^\s*(?:acaba\s+)?{_WRITE_QUESTION_VERB}\s+{_QUESTION_SUFFIX}"
+    rf"(?:\s*,?\s*lütfen)?\?\s*$"
 )
 
 NON_COMMITTAL_WRITE = re.compile(
@@ -120,7 +147,10 @@ CONDITIONAL_WRITE = re.compile(
     r"miş|mış|muş|müş)(?:sa|se|sam|sem|san|sen|sak|sek|salar|seler|"
     r"sınız|siniz|sunuz|sünüz|sanız|seniz)|d[iıuü]y?(?:sa|se|sam|sem|"
     r"san|sen|sak|sek|salar|seler|sınız|siniz|sunuz|sünüz|sanız|seniz)|"
-    r"(?:var|yok)(?:sa|se)|madan|meden)\b"
+    r"y(?:sa|se|sam|sem|san|sen|sak|sek|salar|seler|sınız|siniz|sunuz|"
+    r"sünüz|sanız|seniz)|(?:var|yok)(?:sa|se)|"
+    r"(?:ince|ınca|unca|ünce|diğinde|dığında|duğunda|düğünde)|madan|meden)\b|"
+    r"\b(?:takdirde|halinde|durumunda)\b"
 )
 ACTION_QUESTION_WORD = re.compile(
     r"\b(?:ne|nasıl|neden|niçin|hangi|hangisi|kim|ne\s+zaman)\b"
@@ -319,7 +349,12 @@ def is_explicit_write_intent(text: str) -> bool:
         or ACTION_QUESTION_WORD.search(folded)
     ):
         return False
-    return EXPLICIT_WRITE_INTENT.fullmatch(folded) is not None
+    return (
+        EXPLICIT_WRITE_INTENT.fullmatch(folded) is not None
+        or TARGETED_WRITE_COMMAND.fullmatch(folded) is not None
+        or TARGETED_WRITE_QUESTION.fullmatch(folded) is not None
+        or BARE_WRITE_QUESTION.fullmatch(folded) is not None
+    )
 
 
 def _sha256_text(value: str) -> str:

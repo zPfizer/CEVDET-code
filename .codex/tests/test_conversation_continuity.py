@@ -265,24 +265,52 @@ class ConversationContinuityTests(unittest.TestCase):
         self.assertEqual(results[1], (0, {'continue': True}, 0, True))
 
     def test_explicit_write_prompt_reopens_read_only_scope(self):
-        self._check_explicit_write_prompt_reopens_read_only_scope('Ok yap.')
+        for prompt in (
+            'Ok yap.',
+            'Değiştirebilirsin.',
+            'Düzenleyebilirsin.',
+            'Uygulayabilirsin.',
+        ):
+            with self.subTest(prompt=prompt):
+                self._check_explicit_write_prompt_reopens_read_only_scope(prompt)
 
     def test_natural_action_question_reopens_read_only_scope(self):
-        for prompt in ('Düzeltebilir misin?', 'Dosyaları değiştirebilir misin?'):
+        for prompt in (
+            'Düzeltebilir misin?',
+            'Dosyaları değiştirebilir misin?',
+            'Dosyaları değiştirebilir misiniz?',
+        ):
             with self.subTest(prompt=prompt):
                 self._check_explicit_write_prompt_reopens_read_only_scope(prompt)
 
     def test_targeted_fix_command_reopens_read_only_scope(self):
-        self._check_explicit_write_prompt_reopens_read_only_scope(
-            'BIB projesindeki hatayı düzelt.', expect_prompt_enqueue=True
-        )
+        for prompt in (
+            'BIB projesindeki hatayı düzelt.',
+            'src/app.py dosyasını düzelt.',
+        ):
+            with self.subTest(prompt=prompt):
+                self._check_explicit_write_prompt_reopens_read_only_scope(
+                    prompt, expect_prompt_enqueue=True
+                )
 
     def test_conditional_targeted_commands_keep_read_only_scope(self):
         for prompt in (
             'Onay verirsem BIB projesindeki hatayı düzelt.',
             'Onay verdiysem BIB projesindeki hatayı düzelt.',
             'Onayım varsa BIB projesindeki hatayı düzelt.',
+            'Onaylıysa BIB projesindeki hatayı düzelt.',
+            'Onay olduğu takdirde BIB projesindeki hatayı düzelt.',
+            'Onay gelince BIB projesindeki hatayı düzelt.',
             'Onaylamadan düzeltme; sadece açıklama yap.',
+        ):
+            with self.subTest(prompt=prompt):
+                self._check_write_prompt_keeps_read_only_scope(prompt)
+
+    def test_chat_output_requests_keep_read_only_scope(self):
+        for prompt in (
+            'Yanıtı buraya yaz.',
+            'Bana kısa bir şiir yaz.',
+            'Yazabilirsin.',
         ):
             with self.subTest(prompt=prompt):
                 self._check_write_prompt_keeps_read_only_scope(prompt)
