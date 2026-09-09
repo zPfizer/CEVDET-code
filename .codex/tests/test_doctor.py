@@ -227,9 +227,13 @@ class DoctorTests(unittest.TestCase):
             (state / "worker-supervisor.json").write_text(
                 json.dumps(
                     {
+                        "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
                         "status": "idle",
+                        "generation": 1,
+                        "launch_token": "",
                         "owner_pid": 999_999_999,
                         "lease_until": 0,
+                        "updated_ts": 100,
                     }
                 ),
                 encoding="utf-8",

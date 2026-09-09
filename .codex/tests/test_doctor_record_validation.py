@@ -43,6 +43,28 @@ class DoctorRecordValidationTests(unittest.TestCase):
             self.assertEqual(check.status, "OK")
             self.assertIn("aktif 0", check.evidence)
 
+    def test_flush_completed_receipt_requires_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            (state / "flush-x.json").write_text(
+                json.dumps({"status": "ok"}), encoding="utf-8"
+            )
+
+            check = doctor._flush_inflight_check(doctor.Context(state_dir=state, now=100))
+
+            self.assertEqual(check.status, "FAIL")
+
+    def test_flush_index_receipt_is_auxiliary_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            (state / "flush-index-x.json").write_text(
+                json.dumps({"schema_version": 1, "rows": []}), encoding="utf-8"
+            )
+
+            check = doctor._flush_inflight_check(doctor.Context(state_dir=state, now=100))
+
+            self.assertEqual(check.status, "OK")
+
     def test_hook_health_unknown_status_fails_without_echoing_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -61,6 +83,42 @@ class DoctorRecordValidationTests(unittest.TestCase):
 
             self.assertEqual(check.status, "FAIL")
             self.assertNotIn("secret-error-value", check.evidence)
+
+    def test_hook_health_ok_requires_finite_generation_and_timestamp(self) -> None:
+        for payload in (
+            {"generation": True, "status": "ok", "ts": 100},
+            {"generation": 1, "status": "ok", "ts": "bad"},
+        ):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                (state / "hook-health-scope.json").write_text(
+                    json.dumps(payload), encoding="utf-8"
+                )
+
+                check = doctor._hook_health_check(doctor.Context(state_dir=state, now=100))
+
+                self.assertEqual(check.status, "FAIL")
+                self.assertNotIn("bad", check.evidence)
+
+    def test_hook_health_error_payload_is_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            (state / "hook-health-scope.json").write_text(
+                json.dumps(
+                    {
+                        "generation": 1,
+                        "status": "error",
+                        "ts": 100,
+                        "error": "sk-proj-example",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            check = doctor._hook_health_check(doctor.Context(state_dir=state, now=100))
+
+            self.assertEqual(check.status, "FAIL")
+            self.assertNotIn("sk-proj-example", check.evidence)
 
     def test_brain_health_schema_v2_rejects_non_object_component(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -115,6 +173,23 @@ class DoctorRecordValidationTests(unittest.TestCase):
 
             self.assertEqual(check.status, "WARN")
             self.assertIn("runtime kanıtı yok", check.evidence)
+
+    def test_retrieval_health_error_payload_is_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir()
+            (state / "retrieval-health.json").write_text(
+                json.dumps({"ts": 100, "error": "password:abc"}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(doctor, "build_vault_map", return_value=[object()]):
+                check = doctor._vault_retrieval_check(
+                    doctor.Context(root, root, state, 100)
+                )
+
+            self.assertEqual(check.status, "FAIL")
+            self.assertNotIn("password:abc", check.evidence)
 
     def test_retrieval_fresh_receipt_requires_known_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -244,6 +319,7 @@ class DoctorRecordValidationTests(unittest.TestCase):
                         "chars": 0,
                         "budget": 10,
                         "paths": [],
+                        "duration_ms": 1,
                     }
                 ),
                 encoding="utf-8",
@@ -272,6 +348,7 @@ class DoctorRecordValidationTests(unittest.TestCase):
                         "chars": 0,
                         "budget": 10,
                         "paths": [],
+                        "duration_ms": 1,
                     }
                 ),
                 encoding="utf-8",
@@ -283,6 +360,22 @@ class DoctorRecordValidationTests(unittest.TestCase):
 
             self.assertEqual(check.status, "OK")
             self.assertIn("empty", check.evidence)
+
+    def test_retrieval_empty_receipt_requires_producer_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir()
+            (state / "runtime-vault-retrieval.json").write_text(
+                json.dumps({"ts": 100, "cwd": str(root), "outcome": "empty"}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(doctor, "build_vault_map", return_value=[object()]):
+                check = doctor._vault_retrieval_check(
+                    doctor.Context(root, root, state, 100)
+                )
+
+            self.assertEqual(check.status, "FAIL")
 
     def test_succeeded_worker_json_is_validated(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -314,6 +407,21 @@ class DoctorRecordValidationTests(unittest.TestCase):
             )
 
             self.assertEqual(check.status, "FAIL")
+
+    def test_supervisor_idle_receipt_requires_producer_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            (state / "worker-supervisor.json").write_text(
+                json.dumps({"status": "idle", "error": "secret-error-value"}),
+                encoding="utf-8",
+            )
+
+            check = doctor._worker_delayed_job_check(
+                doctor.Context(state_dir=state, now=100)
+            )
+
+            self.assertEqual(check.status, "FAIL")
+            self.assertNotIn("secret-error-value", check.evidence)
 
 
 if __name__ == "__main__":

@@ -19,7 +19,12 @@ from codex_runner import find_codex
 from graph_integrity import graph_notes, graph_summary
 from knowledge_schema import WIKILINK, validate_knowledge_tree, wikilink_target
 from process_control import pid_is_alive
-from worker_supervisor import STALE_HOOK_INPUT_SECONDS, inspect_worker_queue, has_unverified_process_tree
+from worker_supervisor import (
+    STALE_HOOK_INPUT_SECONDS,
+    SUPERVISOR_SCHEMA_VERSION,
+    inspect_worker_queue,
+    has_unverified_process_tree,
+)
 from tag_taxonomy import (
     TaxonomyError,
     audit_inline_tags,
@@ -109,6 +114,18 @@ def _finite_timestamp(value: object) -> float | None:
     except (OverflowError, ValueError):
         return None
     return timestamp if math.isfinite(timestamp) else None
+
+
+_RECEIPT_ERROR = re.compile(
+    r"(?:(?:[A-Z][A-Za-z0-9]*(?:Error|Exception))|(?:profile-[a-z0-9-]+))"
+    r"(?:,(?:(?:[A-Z][A-Za-z0-9]*(?:Error|Exception))|(?:profile-[a-z0-9-]+)))*\Z"
+)
+
+
+def _receipt_error(value: object) -> str:
+    if isinstance(value, str) and _RECEIPT_ERROR.fullmatch(value):
+        return value
+    return "error-class-invalid"
 
 
 def _exists(vault: Path, paths: list[str]) -> tuple[bool, str]:
@@ -468,16 +485,20 @@ def _hook_health_check(ctx: Context) -> Check | list[Check]:
             if not isinstance(health, dict):
                 return Check("Hook sağlığı", "FAIL", f"health object değil: {path.name}")
             generation = health.get("generation")
-            if not isinstance(generation, int) or generation < 1:
+            if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
                 return Check("Hook sağlığı", "FAIL", f"generation eksik: {path.name}")
+            if _finite_timestamp(health.get("ts")) is None:
+                return Check("Hook sağlığı", "FAIL", f"timestamp geçersiz: {path.name}")
             generations += generation
             status = health.get("status")
             if not isinstance(status, str) or status not in {"ok", "error"}:
                 return Check("Hook sağlığı", "FAIL", f"status geçersiz: {path.name}")
             if status == "error":
                 error = health.get("error")
-                error_text = str(error or "error-class-missing")
-                timestamp = _finite_timestamp(health.get("ts", 0))
+                if not isinstance(error, str) or not error:
+                    return Check("Hook sağlığı", "FAIL", f"hata sınıfı eksik: {path.name}")
+                error_text = _receipt_error(error)
+                timestamp = _finite_timestamp(health.get("ts"))
                 if timestamp is None:
                     failures.append(f"{error_text} (invalid timestamp)")
                 elif ctx.now - timestamp > HOOK_RUNTIME_MAX_AGE_SECONDS:
@@ -508,6 +529,14 @@ def _hook_health_check(ctx: Context) -> Check | list[Check]:
             return Check("Hook sağlığı", "FAIL", "health object değil")
         status = health.get("status")
         if status == "ok":
+            generation = health.get("generation")
+            if (
+                isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or generation < 1
+                or _finite_timestamp(health.get("ts")) is None
+            ):
+                return Check("Hook sağlığı", "FAIL", "health receipt alanları geçersiz")
             return Check("Hook sağlığı", "OK", "temiz")
         error = health.get("error")
     except (OSError, UnicodeError, KeyError, TypeError, json.JSONDecodeError):
@@ -516,9 +545,18 @@ def _hook_health_check(ctx: Context) -> Check | list[Check]:
         not isinstance(status, str) or status not in {"ok", "error"}
     ):
         return Check("Hook sağlığı", "FAIL", "status geçersiz")
+    if status == "error":
+        generation = health.get("generation")
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+            or _finite_timestamp(health.get("ts")) is None
+        ):
+            return Check("Hook sağlığı", "FAIL", "health receipt alanları geçersiz")
     if not isinstance(error, str) or not error:
         return Check("Hook sağlığı", "FAIL", "hata sınıfı eksik")
-    return Check("Hook sağlığı", "FAIL", error)
+    return Check("Hook sağlığı", "FAIL", _receipt_error(error))
 
 
 def _brain_health_check(ctx: Context) -> Check:
@@ -646,7 +684,7 @@ def _flush_inflight_check(ctx: Context) -> Check:
     invalid: list[str] = []
     valid_statuses = {"inflight", "prepared", "ok", "fail"}
     for path in sorted(ctx.state_dir.glob("flush-*.json")):
-        if path.name.startswith(("flush-coverage-", "flush-batch-")):
+        if path.name.startswith(("flush-coverage-", "flush-batch-", "flush-index-")):
             continue
         try:
             receipt = json.loads(path.read_text(encoding="utf-8"))
@@ -660,11 +698,25 @@ def _flush_inflight_check(ctx: Context) -> Check:
         if not isinstance(status, str) or status not in valid_statuses:
             invalid.append(path.name)
             continue
-        if status != "inflight":
-            continue
         timestamp = _finite_timestamp(receipt.get("ts"))
         if timestamp is None:
             invalid.append(path.name)
+            continue
+        generation = receipt.get("generation")
+        if generation is not None and (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+        ):
+            invalid.append(path.name)
+            continue
+        schema_version = receipt.get("schema_version")
+        if schema_version is not None and (
+            type(schema_version) is not int or schema_version != 2
+        ):
+            invalid.append(path.name)
+            continue
+        if status != "inflight":
             continue
         age = max(0, int(now - timestamp))
         if age > FLUSH_INFLIGHT_MAX_AGE_SECONDS:
@@ -911,6 +963,20 @@ def _worker_delayed_job_check(ctx: Context) -> Check:
             "failed",
         }:
             return Check("Worker gecikmiş iş", "FAIL", "supervisor status geçersiz")
+        if (
+            type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != SUPERVISOR_SCHEMA_VERSION
+            or isinstance(receipt.get("generation"), bool)
+            or not isinstance(receipt.get("generation"), int)
+            or receipt["generation"] < 1
+            or not isinstance(receipt.get("launch_token"), str)
+            or isinstance(receipt.get("owner_pid"), bool)
+            or not isinstance(receipt.get("owner_pid"), int)
+            or receipt["owner_pid"] < 0
+            or _finite_timestamp(receipt.get("lease_until")) is None
+            or _finite_timestamp(receipt.get("updated_ts")) is None
+        ):
+            return Check("Worker gecikmiş iş", "FAIL", "supervisor receipt alanları geçersiz")
         supervisor = status
     evidence = f"ready-pending={ready_pending}; supervisor={supervisor}"
     if ready_pending and supervisor == "idle":
@@ -1223,7 +1289,7 @@ def _vault_retrieval_check(ctx: Context) -> Check:
             return Check("Vault retrieval", "FAIL", "health kaydı okunamadı")
         if not isinstance(error, str) or not error:
             return Check("Vault retrieval", "FAIL", "hata sınıfı eksik")
-        return Check("Vault retrieval", "FAIL", error)
+        return Check("Vault retrieval", "FAIL", _receipt_error(error))
 
     try:
         # Sayım okuyucudur: doctor korpus cache'ini yazmaz.
@@ -1247,7 +1313,10 @@ def _vault_retrieval_check(ctx: Context) -> Check:
                 "WARN",
                 f"{entry_count} not; runtime timestamp invalid",
             )
-        observed_cwd = Path(receipt["cwd"]).resolve()
+        cwd = receipt.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            return Check("Vault retrieval", "FAIL", "runtime cwd geçersiz")
+        observed_cwd = Path(cwd).resolve()
     except (
         OSError,
         UnicodeError,
@@ -1265,27 +1334,26 @@ def _vault_retrieval_check(ctx: Context) -> Check:
         "error",
     }:
         return Check("Vault retrieval", "FAIL", "runtime outcome geçersiz")
-    numeric_fields = ("entries", "hits", "emitted", "chars", "budget")
+    numeric_fields = ("entries", "hits", "emitted", "chars", "budget", "duration_ms")
+    if any(field not in receipt for field in numeric_fields) or "paths" not in receipt:
+        return Check("Vault retrieval", "FAIL", "runtime receipt metriği eksik")
     metrics = {field: receipt[field] for field in numeric_fields if field in receipt}
     if any(
         isinstance(value, bool) or not isinstance(value, int) or value < 0
         for value in metrics.values()
     ):
         return Check("Vault retrieval", "FAIL", "runtime receipt metriği geçersiz")
-    paths_present = "paths" in receipt
-    paths: list[str] = []
-    if paths_present:
-        paths_value = receipt.get("paths")
-        if not isinstance(paths_value, list) or not all(
-            isinstance(path, str) and path for path in paths_value
-        ):
-            return Check("Vault retrieval", "FAIL", "runtime receipt yolları geçersiz")
-        paths = [path for path in paths_value if isinstance(path, str)]
-        if len(set(paths)) != len(paths):
-            return Check("Vault retrieval", "FAIL", "runtime receipt yolları geçersiz")
-    if paths_present and "emitted" in metrics and len(paths) != metrics["emitted"]:
+    paths_value = receipt.get("paths")
+    if not isinstance(paths_value, list) or not all(
+        isinstance(path, str) and path for path in paths_value
+    ):
+        return Check("Vault retrieval", "FAIL", "runtime receipt yolları geçersiz")
+    paths = [path for path in paths_value if isinstance(path, str)]
+    if len(set(paths)) != len(paths):
+        return Check("Vault retrieval", "FAIL", "runtime receipt yolları geçersiz")
+    if len(paths) != metrics["emitted"]:
         return Check("Vault retrieval", "FAIL", "runtime receipt sayımları tutarsız")
-    if paths_present and outcome != "emitted" and paths:
+    if outcome != "emitted" and paths:
         return Check("Vault retrieval", "FAIL", "runtime receipt sayımları tutarsız")
     if (
         "entries" in metrics
@@ -1302,8 +1370,6 @@ def _vault_retrieval_check(ctx: Context) -> Check:
     ):
         return Check("Vault retrieval", "FAIL", "runtime receipt sayımları tutarsız")
     if outcome == "emitted":
-        if any(field not in metrics for field in numeric_fields) or not paths_present:
-            return Check("Vault retrieval", "FAIL", "runtime receipt metriği eksik")
         if metrics["emitted"] < 1 or metrics["chars"] < 1:
             return Check("Vault retrieval", "FAIL", "runtime receipt metriği tutarsız")
     else:
