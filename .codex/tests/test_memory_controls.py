@@ -91,6 +91,8 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Dosyaları değiştirebilir misiniz?": ("write-intent", ""),
             "BIB projesindeki hatayı düzelt.": ("correct", ""),
             "Atlas projesindeki hatayı düzelt.": ("correct", ""),
+            "Atlas modülündeki hatayı düzelt.": ("correct", ""),
+            "Borsa dosyasındaki hatayı düzelt.": ("correct", ""),
             "src/app.py dosyasını düzelt.": ("correct", ""),
             "Bunları değiştir.": ("write-intent", ""),
             "BIB projesindeki hatayı düzeltebilir misin?": ("write-intent", ""),
@@ -124,6 +126,9 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Yanıtı buraya yaz.",
             "Bana kısa bir şiir yaz.",
             "Bana kısa bir şiiri düzelt.",
+            "Yanıtındaki kodu düzelt.",
+            "Bu cümledeki hatayı düzelt.",
+            "Komut örneği olarak Atlas projesindeki hatayı düzelt.",
             "Yazabilirsin.",
             "Eğer uygunsa BIB projesindeki hatayı düzelt.",
             "Belki BIB projesindeki hatayı düzelt.",
@@ -134,6 +139,9 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Onaylıysa BIB projesindeki hatayı düzelt.",
             "Onay olduğu takdirde BIB projesindeki hatayı düzelt.",
             "Onay gelince BIB projesindeki hatayı düzelt.",
+            "Onaydan sonra BIB projesindeki hatayı düzelt.",
+            "Onay gelene kadar BIB projesindeki hatayı düzelt.",
+            "Onay yokken BIB projesindeki hatayı düzelt.",
             "Onaylamadan düzeltme; sadece açıklama yap.",
             "Nasıl düzeltilir?",
             "BIB projesindeki hatayı nasıl düzeltebilir misin?",
@@ -144,6 +152,13 @@ class MemoryDirectiveTests(unittest.TestCase):
                 self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
 
         self.assertTrue(memory_ledger.is_explicit_write_intent("Bunu düzelt."))
+        for prompt in (
+            "Atlas modülündeki hatayı düzelt.",
+            "Borsa dosyasındaki hatayı düzelt.",
+            "src/app.py dosyasını düzelt.",
+        ):
+            with self.subTest(explicit_target=prompt):
+                self.assertTrue(memory_ledger.is_explicit_write_intent(prompt))
 
     def test_secret_value_is_non_persistent(self) -> None:
         for text in ('API anahtarım sk-ABCDEFGHIJKLMNOPQRSTUV',

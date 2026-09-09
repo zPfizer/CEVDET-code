@@ -287,6 +287,8 @@ class ConversationContinuityTests(unittest.TestCase):
         for prompt in (
             'BIB projesindeki hatayı düzelt.',
             'src/app.py dosyasını düzelt.',
+            'Atlas modülündeki hatayı düzelt.',
+            'Borsa dosyasındaki hatayı düzelt.',
         ):
             with self.subTest(prompt=prompt):
                 self._check_explicit_write_prompt_reopens_read_only_scope(
@@ -301,7 +303,19 @@ class ConversationContinuityTests(unittest.TestCase):
             'Onaylıysa BIB projesindeki hatayı düzelt.',
             'Onay olduğu takdirde BIB projesindeki hatayı düzelt.',
             'Onay gelince BIB projesindeki hatayı düzelt.',
+            'Onaydan sonra BIB projesindeki hatayı düzelt.',
+            'Onay gelene kadar BIB projesindeki hatayı düzelt.',
+            'Onay yokken BIB projesindeki hatayı düzelt.',
             'Onaylamadan düzeltme; sadece açıklama yap.',
+        ):
+            with self.subTest(prompt=prompt):
+                self._check_write_prompt_keeps_read_only_scope(prompt)
+
+    def test_unbounded_natural_language_targets_keep_read_only_scope(self):
+        for prompt in (
+            'Yanıtındaki kodu düzelt.',
+            'Bu cümledeki hatayı düzelt.',
+            'Komut örneği olarak Atlas projesindeki hatayı düzelt.',
         ):
             with self.subTest(prompt=prompt):
                 self._check_write_prompt_keeps_read_only_scope(prompt)

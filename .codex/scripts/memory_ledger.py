@@ -117,10 +117,19 @@ _WRITE_TARGET_OBJECT = (
     r"kod(?:u|unu|ları|larını)?|değişiklik(?:i|ini|leri|lerini)?|"
     r"ayar(?:ı|ını|ları|larını)?)"
 )
+_WRITE_FILE_TARGET = (
+    rf"(?:[\w.-]+\s+)?(?:dosya(?:yı|sını|ları|larını)?|"
+    rf"dosya(?:daki|deki|sındaki|sindeki)\s+{_WRITE_TARGET_OBJECT})"
+)
+_WRITE_PROJECT_TARGET = rf"[\w.-]+\s+projesindeki\s+{_WRITE_TARGET_OBJECT}"
+_WRITE_MODULE_TARGET = (
+    rf"[\w.-]+\s+modül(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}"
+)
 _WRITE_TARGET = (
     rf"(?:bunu|bunları|şunu|şunları|onu|onları|"
     rf"(?:bu|şu|o)\s+{_WRITE_TARGET_OBJECT}|"
-    rf"(?:[\w.-]+\s+)*{_WRITE_TARGET_OBJECT}|"
+    rf"{_WRITE_PROJECT_TARGET}|{_WRITE_MODULE_TARGET}|{_WRITE_FILE_TARGET}|"
+    rf"{_WRITE_TARGET_OBJECT}|"
     rf"(?:[a-z]:[\\/]|\.{{1,2}}[\\/]|[\w.-]+[\\/])[\w./\\-]+"
     rf"(?:\s+{_WRITE_TARGET_OBJECT})?|"
     rf"[\w.-]+\.[A-Za-z0-9_-]+(?:\s+{_WRITE_TARGET_OBJECT})?)"
@@ -149,8 +158,8 @@ CONDITIONAL_WRITE = re.compile(
     r"san|sen|sak|sek|salar|seler|sınız|siniz|sunuz|sünüz|sanız|seniz)|"
     r"y(?:sa|se|sam|sem|san|sen|sak|sek|salar|seler|sınız|siniz|sunuz|"
     r"sünüz|sanız|seniz)|(?:var|yok)(?:sa|se)|"
-    r"(?:ince|ınca|unca|ünce|diğinde|dığında|duğunda|düğünde)|madan|meden)\b|"
-    r"\b(?:takdirde|halinde|durumunda)\b"
+    r"(?:ince|ınca|unca|ünce|diğinde|dığında|duğunda|düğünde|ken)|madan|meden)\b|"
+    r"\b(?:takdirde|halinde|durumunda|sonra|kadar)\b"
 )
 ACTION_QUESTION_WORD = re.compile(
     r"\b(?:ne|nasıl|neden|niçin|hangi|hangisi|kim|ne\s+zaman)\b"
