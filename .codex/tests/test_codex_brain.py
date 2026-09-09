@@ -4048,8 +4048,10 @@ class HookTests(unittest.TestCase):
         self.assertIn("kısa gerekçesiyle", context)
         self.assertIn("Salt okunur veya kaydetmeme kapsamını aşma", context)
         self.assertIn("Vault dışındaki proje oturumlarını otomatik toplama", context)
-        self.assertIn("proje kodunu Vault içinden değiştirme", context)
-        self.assertIn("dış işlem, yayın veya mesaj", context)
+        self.assertIn("Açık uygulama isteğini ilgili proje deposunda yürüt", context)
+        self.assertIn("Proje kodunu Vault'un not veya hafıza alanına yazma", context)
+        self.assertIn("yalnız açık kullanıcı yetkisiyle yapılabilir", context)
+        self.assertIn("verilmiş yetkiyi tekrar sorma", context)
 
     def test_hook_runtime_receipt_excludes_prompt_and_session_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

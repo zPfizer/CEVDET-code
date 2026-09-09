@@ -572,8 +572,11 @@ def _memory_behavior_contract() -> str:
         "Yanıt biçimini kullanıcının isteğine göre seç; ilgili geçmiş yoksa şablon doldurma. "
         "Bağlantı, çelişki, risk veya fırsat önerisini yalnız ilgili Vault dayanağı varsa "
         "kısa gerekçesiyle ver. Salt okunur veya kaydetmeme kapsamını aşma.\n"
-        "Vault dışındaki proje oturumlarını otomatik toplama; proje kodunu Vault içinden "
-        "değiştirme; kullanıcı adına dış işlem, yayın veya mesaj gönderme."
+        "Vault dışındaki proje oturumlarını otomatik toplama. Açık uygulama isteğini "
+        "ilgili proje deposunda yürüt; konuşmanın Vault'ta başlaması buna engel değildir. "
+        "Proje kodunu Vault'un not veya hafıza alanına yazma. Kullanıcı adına dış işlem, "
+        "yayın veya mesaj gönderme yalnız açık kullanıcı yetkisiyle yapılabilir; "
+        "verilmiş yetkiyi tekrar sorma."
     )
 
 
