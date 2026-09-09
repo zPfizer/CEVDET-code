@@ -141,6 +141,15 @@ HISTORY_QUERY_INFLECTION_SUFFIXES = {
     )
     for stem_type in ("vowel", "consonant")
 }
+HISTORY_QUERY_INFLECTION_RELATIVE_SUFFIXES = {
+    stem_type: frozenset(
+        suffix + relative
+        for suffix in suffixes
+        if suffix.endswith(("te", "de", "nde"))
+        for relative in ("ki", "kiler")
+    )
+    for stem_type, suffixes in HISTORY_QUERY_INFLECTION_SUFFIXES.items()
+}
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
@@ -1170,12 +1179,13 @@ def _is_personal_query(query_terms: frozenset[str]) -> bool:
 def _is_history_query(query_terms: frozenset[str]) -> bool:
     history_terms = query_terms & HISTORY_QUERY_TERMS
     has_inflected_history = any(
-        term.startswith(root)
-        and term[len(root):] in HISTORY_QUERY_INFLECTION_SUFFIXES[
-            "vowel" if root[-1] in HISTORY_QUERY_INFLECTION_VOWELS else "consonant"
-        ]
+        term.startswith(root) and (
+            term[len(root):] in HISTORY_QUERY_INFLECTION_SUFFIXES[stem_type]
+            or term[len(root):] in HISTORY_QUERY_INFLECTION_RELATIVE_SUFFIXES[stem_type]
+        )
         for term in query_terms
         for root in HISTORY_QUERY_INFLECTION_ROOTS
+        for stem_type in ("vowel" if root[-1] in HISTORY_QUERY_INFLECTION_VOWELS else "consonant",)
     )
     if has_inflected_history or history_terms - {"before"}:
         return True
