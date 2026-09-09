@@ -41,6 +41,214 @@ class ConversationContinuityTests(unittest.TestCase):
             wake.assert_called_once_with(state, vault_root=vault)
             self.assertIn('Hafıza Devamlılığı', json.loads(output.getvalue())['hookSpecificOutput']['additionalContext'])
 
+    def test_session_start_surfaces_unresolved_terminal_flush(self):
+        import worker_supervisor
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / '.codex/scripts/.state'
+            worker_supervisor.enqueue_job(state, 'flush', {'source': 'retained'},
+                                          start_supervisor=False, now=0)
+            running, job = worker_supervisor._claim_next_job(state, now=0)
+            worker_supervisor._finish_job(
+                state, running, job, status='dead-letter',
+                terminal_reason='retry-exhausted', now=1,
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.object(hook, 'VAULT_ROOT', vault),
+                mock.patch.object(hook, 'STATE_DIR', state),
+                mock.patch.object(hook, 'build_session_context', return_value=''),
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'session_id': 'reopened'}))),
+                mock.patch.object(sys, 'stdout', output),
+            ):
+                result = hook.main(['session-start', '--strict'])
+
+            context = (
+                json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
+                if output.getvalue() else ''
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIn('sonucu doğrulanamadı', context)
+        self.assertIn('içeriği kayıp veya bilgi yok sayma', context)
+
+    def test_session_start_surfaces_current_flush_health_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / '.codex/scripts/.state'
+            state.mkdir(parents=True)
+            (state / 'health.json').write_text(json.dumps({
+                'components': {
+                    'flush:session': {
+                        'component': 'flush',
+                        'status': 'error',
+                        'error': 'codex-timeout',
+                    },
+                },
+            }), encoding='utf-8')
+            output = io.StringIO()
+            with (
+                mock.patch.object(hook, 'VAULT_ROOT', vault),
+                mock.patch.object(hook, 'STATE_DIR', state),
+                mock.patch.object(hook, 'build_session_context', return_value=''),
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'session_id': 'reopened'}))),
+                mock.patch.object(sys, 'stdout', output),
+            ):
+                result = hook.main(['session-start', '--strict'])
+
+            context = json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
+
+        self.assertEqual(result, 0)
+        self.assertIn('sonucu doğrulanamadı', context)
+
+    def test_session_start_surfaces_quarantined_capture(self):
+        import worker_supervisor
+
+        def quarantine_one(state, kind):
+            broken = worker_supervisor.enqueue_job(
+                state, kind, {}, start_supervisor=False, now=0,
+            )
+            broken.write_text('{broken', encoding='utf-8')
+            replacement = worker_supervisor.enqueue_job(
+                state, kind, {}, start_supervisor=False, now=1,
+            )
+            replacement.unlink()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / '.codex/scripts/.state'
+            quarantine_one(state, 'flush')
+            quarantine_one(state / 'maintenance', 'maintenance')
+            queue = worker_supervisor.inspect_worker_queue(state)
+            maintenance = worker_supervisor.inspect_worker_queue(state / 'maintenance')
+            output = io.StringIO()
+            with (
+                mock.patch.object(hook, 'VAULT_ROOT', vault),
+                mock.patch.object(hook, 'STATE_DIR', state),
+                mock.patch.object(hook, 'build_session_context', return_value=''),
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'session_id': 'reopened'}))),
+                mock.patch.object(sys, 'stdout', output),
+            ):
+                result = hook.main(['session-start', '--strict'])
+
+            context = json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
+
+        self.assertEqual(queue['counts']['quarantined'], 1)
+        self.assertEqual(maintenance['counts']['quarantined'], 1)
+        self.assertEqual(queue['terminal']['unresolved'], 1)
+        self.assertEqual(maintenance['terminal']['unresolved'], 1)
+        self.assertEqual(result, 0)
+        self.assertIn('sonucu doğrulanamadı', context)
+        self.assertIn('içeriği kayıp veya bilgi yok sayma', context)
+
+    def test_session_start_keeps_verified_recovered_terminal_flush_quiet(self):
+        import worker_supervisor
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / '.codex/scripts/.state'
+            worker_supervisor.enqueue_job(state, 'flush', {'source': 'same'},
+                                          start_supervisor=False, now=0)
+            succeeded_path, succeeded = worker_supervisor._claim_next_job(state, now=0)
+            worker_supervisor._finish_job(state, succeeded_path, succeeded,
+                                          status='succeeded', now=1)
+            worker_supervisor.enqueue_job(state, 'flush', {'source': 'same'},
+                                          start_supervisor=False, now=1)
+            dead_path, dead = worker_supervisor._claim_next_job(state, now=1)
+            worker_supervisor._finish_job(
+                state, dead_path, dead, status='dead-letter',
+                terminal_reason='recovered-by-successor', now=2,
+            )
+            dead_path = state / 'worker-jobs/dead-letter' / dead_path.name
+            dead_record = json.loads(dead_path.read_text(encoding='utf-8'))
+            dead_record['recovery_job_id'] = succeeded['job_id']
+            worker_supervisor.atomic_write_json(dead_path, dead_record)
+            inspection = worker_supervisor.inspect_worker_queue(state)
+            output = io.StringIO()
+            with (
+                mock.patch.object(hook, 'VAULT_ROOT', vault),
+                mock.patch.object(hook, 'STATE_DIR', state),
+                mock.patch.object(hook, 'build_session_context', return_value=''),
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'session_id': 'reopened'}))),
+                mock.patch.object(sys, 'stdout', output),
+            ):
+                result = hook.main(['session-start', '--strict'])
+
+            context = (
+                json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
+                if output.getvalue() else ''
+            )
+
+        self.assertEqual(inspection['terminal'], {'recovered': 1, 'unresolved': 0})
+        self.assertEqual(result, 0)
+        self.assertNotIn('sonucu doğrulanamadı', context)
+
+    def test_session_start_uses_current_maintenance_health_without_stale_warning(self):
+        import worker_supervisor
+        from state_store import clear_health
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / '.codex/scripts/.state'
+            maintenance = state / 'maintenance'
+            worker_supervisor.enqueue_job(maintenance, 'maintenance', {},
+                                          start_supervisor=False, now=0)
+            running, job = worker_supervisor._claim_next_job(maintenance, now=0)
+            worker_supervisor._finish_job(
+                maintenance, running, job, status='dead-letter',
+                error='LockUnavailable', terminal_reason='retry-exhausted', now=1,
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.object(hook, 'VAULT_ROOT', vault),
+                mock.patch.object(hook, 'STATE_DIR', state),
+                mock.patch.object(hook, 'build_session_context', return_value=''),
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'session_id': 'reopened'}))),
+                mock.patch.object(sys, 'stdout', output),
+            ):
+                result = hook.main(['session-start', '--strict'])
+
+            context = json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
+
+            self.assertEqual(result, 0)
+            self.assertEqual(context.count('Bilgi düzenleme henüz tamamlanamadı'), 1)
+            self.assertNotIn('Önceki arka plan kayıtlarından birinin sonucu doğrulanamadı', context)
+
+            worker_supervisor.enqueue_maintenance(
+                state, vault_root=vault, start_supervisor=False,
+            )
+            later_running, later_job = worker_supervisor._claim_next_job(maintenance, now=2)
+            worker_supervisor._finish_job(
+                maintenance, later_running, later_job, status='succeeded', now=3,
+            )
+            clear_health(state, component='compile')
+            self.assertEqual(
+                worker_supervisor.inspect_worker_queue(maintenance)['counts']['dead-letter'], 1,
+            )
+
+            later_output = io.StringIO()
+            with (
+                mock.patch.object(hook, 'VAULT_ROOT', vault),
+                mock.patch.object(hook, 'STATE_DIR', state),
+                mock.patch.object(hook, 'build_session_context', return_value=''),
+                mock.patch.object(flush, 'maybe_trigger_compile'),
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'session_id': 'reopened-again'}))),
+                mock.patch.object(sys, 'stdout', later_output),
+            ):
+                later_result = hook.main(['session-start', '--strict'])
+
+            later_context = (
+                json.loads(later_output.getvalue())['hookSpecificOutput']['additionalContext']
+                if later_output.getvalue() else ''
+            )
+
+        self.assertEqual(later_result, 0)
+        self.assertNotIn('Bilgi düzenleme henüz tamamlanamadı', later_context)
+        self.assertNotIn('Önceki arka plan kayıtlarından birinin sonucu doğrulanamadı', later_context)
+
     def test_session_start_preserves_read_only_scope_without_waking_memory_workers(self):
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

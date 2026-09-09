@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import subprocess
 import sys
 import tempfile
@@ -121,6 +122,41 @@ class GraphIntegrityTests(unittest.TestCase):
 
         self.assertEqual(daily_with_graph_link(text, "2026-09-08", "\n"), text)
 
+    def test_escaped_opening_wikilink_is_not_an_existing_daily_link(self) -> None:
+        text = (
+            "# Günlük Log: 2026-09-08\n"
+            "\\[[knowledge/index|Bilgi Tabanı]]\n"
+        )
+
+        updated = daily_with_graph_link(text, "2026-09-08", "\n")
+
+        self.assertEqual(updated.count(DAILY_GRAPH_LINK), 2)
+        self.assertIn(
+            f"# Günlük Log: 2026-09-08\n\n{DAILY_GRAPH_LINK}\n",
+            updated,
+        )
+
+    def test_double_backslash_opening_wikilink_remains_real(self) -> None:
+        text = (
+            "# Günlük Log: 2026-09-08\n"
+            "\\\\[[knowledge/index|Bilgi Tabanı]]\n"
+        )
+
+        self.assertEqual(daily_with_graph_link(text, "2026-09-08", "\n"), text)
+
+    def test_graph_summary_ignores_escaped_opening_wikilinks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "A.md").write_text(
+                "# A\n\\[[B]]\n", encoding="utf-8"
+            )
+            (root / "B.md").write_text("# B\n", encoding="utf-8")
+
+            total, isolated = graph_summary(vault_notes(root))
+
+        self.assertEqual(total, 2)
+        self.assertEqual(isolated, ["A.md", "B.md"])
+
     def test_daily_graph_link_ignores_literal_links_in_fences_and_inline_code(self) -> None:
         for fence in ("```text", "~~~text"):
             with self.subTest(fence=fence):
@@ -199,6 +235,78 @@ class GraphIntegrityTests(unittest.TestCase):
             updated,
         )
         self.assertEqual(updated.count("[[knowledge/concepts/alpha|Alfa]]"), 2)
+
+    def test_connection_normalizer_does_not_accept_escaped_opening_wikilinks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            concepts = root / "knowledge" / "concepts"
+            connection = root / "knowledge" / "connections" / "alpha--beta.md"
+            concepts.mkdir(parents=True)
+            connection.parent.mkdir()
+            for slug, title in (("alpha", "Alpha"), ("beta", "Beta")):
+                (concepts / f"{slug}.md").write_text(
+                    f"---\ntitle: {title}\n---\n", encoding="utf-8"
+                )
+            original = (
+                "---\nconnects: [alpha, beta]\n---\n"
+                "## Bağlantı\n\n"
+                "\\[[knowledge/concepts/alpha|Alpha]]\n\n"
+                "## Ana Fikir\n\nBağ.\n"
+            )
+            connection.write_text(original, encoding="utf-8")
+
+            self.assertEqual(normalize_connection_links(root), 1)
+            updated = connection.read_text(encoding="utf-8")
+
+        self.assertIn("\\[[knowledge/concepts/alpha|Alpha]]", updated)
+        self.assertIn(
+            "[[knowledge/concepts/alpha|Alpha]] ↔ [[knowledge/concepts/beta|Beta]]",
+            updated,
+        )
+
+    def test_connection_normalizer_rejects_linked_connections_before_external_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = base / "vault"
+            concepts = root / "knowledge" / "concepts"
+            connections = root / "knowledge" / "connections"
+            outside = base / "outside"
+            concepts.mkdir(parents=True)
+            outside.mkdir()
+            outside_file = outside / "alpha--beta.md"
+            sentinel = b"OUTSIDE\r\n"
+            outside_file.write_bytes(sentinel)
+            try:
+                if os.name == "nt":
+                    result = subprocess.run(
+                        ["cmd", "/c", "mklink", "/J", str(connections), str(outside)],
+                        capture_output=True,
+                        text=True,
+                    )
+                    if result.returncode:
+                        self.skipTest(
+                            f"junction unavailable: {result.stdout} {result.stderr}"
+                        )
+                else:
+                    connections.symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"linked directory unavailable: {exc}")
+
+            try:
+                with self.assertRaisesRegex(
+                    GraphPolicyError,
+                    r"source-symlink:knowledge[\\/]connections",
+                ):
+                    normalize_connection_links(root)
+                self.assertEqual(outside_file.read_bytes(), sentinel)
+            finally:
+                try:
+                    if connections.is_symlink() or getattr(
+                        connections, "is_junction", lambda: False
+                    )():
+                        connections.unlink()
+                except OSError:
+                    pass
 
     def test_connection_normalizer_rejects_literal_only_heading_without_partial_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

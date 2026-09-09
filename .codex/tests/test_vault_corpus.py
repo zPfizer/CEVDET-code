@@ -90,6 +90,23 @@ class VaultCorpusTests(unittest.TestCase):
             )
             self.assertEqual(ignored.stdout, b"tmp/audit/Copy.md\0")
 
+    def test_code_review_graph_vendor_markdown_is_not_a_note_but_human_vendor_note_is(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            relatives = (
+                ".code-review-graph/venv/Lib/site-packages/beartype/README.md",
+                "🧠 500-Knowledge/vendor/Human.md",
+            )
+            for relative in relatives:
+                path = vault / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(NOTE.format(title=path.stem, body="Note"), encoding="utf-8")
+
+            self.assertEqual(
+                [note.key for note in vault_corpus.vault_notes(vault)],
+                [relatives[1]],
+            )
+
     def test_retrieval_corpus_admits_inbox_and_command_center(self) -> None:
         # 2026-09-05: kullanıcı bütün notların aranabilir olmasını istedi.
         self.assertIn("🎯 100-Command-Center", vault_corpus.RETRIEVAL_CONTENT_ROOTS)
@@ -120,8 +137,17 @@ class VaultCorpusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
             _build_vault(vault)
+            (vault / "Views.base").write_text("views: []\n", encoding="utf-8")
 
             with mock.patch.object(
+                vault_corpus.os,
+                "walk",
+                wraps=vault_corpus.os.walk,
+            ) as walk, mock.patch.object(
+                doctor,
+                "build_vault_map",
+                return_value=(),
+            ), mock.patch.object(
                 doctor,
                 "vault_notes",
                 wraps=vault_corpus.vault_notes,
@@ -133,6 +159,7 @@ class VaultCorpusTests(unittest.TestCase):
                 checks = doctor.run_checks(vault, project_root=vault)
 
         self.assertEqual(traversal.call_count, 1)
+        self.assertEqual(walk.call_count, 1)
         for name in (
             "Vault bağlantıları",
             "Vault grafiği",
