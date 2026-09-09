@@ -61,6 +61,29 @@ yalnız kaynak main'i kopyalamak bunları geri alabilirdi. Belge PR'ı `#15`
 runtime aktarım listesine girmez. Her sonraki teslimde bu durum yeniden okunur;
 bu not herhangi bir hedefin güncel uygulama durumunun kalıcı otoritesi değildir.
 
+### Hazırlık PR'ları ve ortak değişiklikler
+
+| PR | Hazırlanan sonuç |
+| --- | --- |
+| #20 | Hook yetki metninin mevcut konuşma ve hedefle sınırlanması |
+| #21 | Yirmi sentetik arama sorgusu ve sıralamaya giren rakip kaynaklar |
+| #22 | Çözülememiş terminal kayıtların sonraki oturumda görünmesi |
+| #23 | Doğal kaydetmeme ifadeleri ve alıntılı hedeflerin korunması |
+| #24 | Bu teslim ve gerçek App kabul planı |
+| #25 | Salt okunur incelemeden açık uygulama isteğine geçiş |
+| #26 | Kaynak bağlantılarını koruyan yazmasız, filtrelenmiş okuma |
+| #27 | Hook süre sınırı, kalıcı teslim ve kuyruk kurtarma |
+
+Bu PR'ların son head, CI ve inceleme durumları teslim anında yeniden okunur.
+Birleştirmede #22'nin `terminal` bilgisi ile #27'nin `orphan_hook_inputs`
+bilgisi hem kuyruk sonucunda hem digest'te korunur; hook terminal uyarısı ve
+kurtarma tetiklemesi birlikte kalır. #25'in koşullu enqueue testleri #27'nin
+`deadline` argümanıyla birlikte doğrulanır. #23, #25 ve #26'nın ortak
+`memory_ledger.py` değişiklikleri birbirini düşürmemelidir.
+
+Yalnız bu sekiz PR'ı birleştiren test, önceki #6–19 paketlerinin birlikte
+çalıştığını veya hedef Vault'un güncellendiğini kanıtlamaz.
+
 ## Gerçek App kabulü
 
 Etkinleştirme yetkisinden sonra, olayın zamanı ve oturum kimliği ile runtime
