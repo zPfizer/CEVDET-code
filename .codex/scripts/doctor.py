@@ -124,6 +124,9 @@ def _receipt_error(value: object) -> str:
     )
 
 
+_HASH64 = re.compile(r"[0-9a-f]{64}\Z")
+
+
 def _exists(vault: Path, paths: list[str]) -> tuple[bool, str]:
     missing = [relative for relative in paths if not (vault / relative).exists()]
     return not missing, "tamam" if not missing else "eksik: " + ", ".join(missing)
@@ -480,10 +483,24 @@ def _hook_health_check(ctx: Context) -> Check | list[Check]:
                 )
             if not isinstance(health, dict):
                 return Check("Hook sağlığı", "FAIL", f"health object değil: {path.name}")
+            expected_session_key = path.stem.removeprefix("hook-health-")
+            session_key = health.get("session_key")
+            if (
+                type(health.get("schema_version")) is not int
+                or health["schema_version"] != 2
+                or health.get("component") != "hook"
+                or not isinstance(session_key, str)
+                or (
+                    session_key != "global"
+                    and _HASH64.fullmatch(session_key) is None
+                )
+                or session_key != expected_session_key
+            ):
+                return Check("Hook sağlığı", "FAIL", f"health receipt alanları geçersiz: {path.name}")
             generation = health.get("generation")
-            if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            if type(generation) is not int or generation < 1:
                 return Check("Hook sağlığı", "FAIL", f"generation eksik: {path.name}")
-            if _finite_timestamp(health.get("ts")) is None:
+            if type(health.get("ts")) is not int or _finite_timestamp(health.get("ts")) is None:
                 return Check("Hook sağlığı", "FAIL", f"timestamp geçersiz: {path.name}")
             generations += generation
             status = health.get("status")
@@ -524,16 +541,6 @@ def _hook_health_check(ctx: Context) -> Check | list[Check]:
         if not isinstance(health, dict):
             return Check("Hook sağlığı", "FAIL", "health object değil")
         status = health.get("status")
-        if status == "ok":
-            generation = health.get("generation")
-            if (
-                isinstance(generation, bool)
-                or not isinstance(generation, int)
-                or generation < 1
-                or _finite_timestamp(health.get("ts")) is None
-            ):
-                return Check("Hook sağlığı", "FAIL", "health receipt alanları geçersiz")
-            return Check("Hook sağlığı", "OK", "temiz")
         error = health.get("error")
     except (OSError, UnicodeError, KeyError, TypeError, json.JSONDecodeError):
         return Check("Hook sağlığı", "FAIL", "health kaydı okunamadı")
@@ -541,15 +548,26 @@ def _hook_health_check(ctx: Context) -> Check | list[Check]:
         not isinstance(status, str) or status not in {"ok", "error"}
     ):
         return Check("Hook sağlığı", "FAIL", "status geçersiz")
-    if status == "error":
+    if status in {"ok", "error"}:
+        session_key = health.get("session_key")
         generation = health.get("generation")
         if (
-            isinstance(generation, bool)
-            or not isinstance(generation, int)
+            type(health.get("schema_version")) is not int
+            or health["schema_version"] != 2
+            or health.get("component") != "hook"
+            or not isinstance(session_key, str)
+            or (
+                session_key != "global"
+                and _HASH64.fullmatch(session_key) is None
+            )
+            or type(generation) is not int
             or generation < 1
+            or type(health.get("ts")) is not int
             or _finite_timestamp(health.get("ts")) is None
         ):
             return Check("Hook sağlığı", "FAIL", "health receipt alanları geçersiz")
+    if status == "ok":
+        return Check("Hook sağlığı", "OK", "temiz")
     if not isinstance(error, str) or not error:
         return Check("Hook sağlığı", "FAIL", "hata sınıfı eksik")
     return Check("Hook sağlığı", "FAIL", _receipt_error(error))
@@ -695,20 +713,33 @@ def _flush_inflight_check(ctx: Context) -> Check:
             invalid.append(path.name)
             continue
         timestamp = _finite_timestamp(receipt.get("ts"))
-        if timestamp is None:
-            invalid.append(path.name)
-            continue
+        session_key = receipt.get("session_key")
+        expected_session_key = path.stem.removeprefix("flush-")
         generation = receipt.get("generation")
-        if generation is not None and (
-            isinstance(generation, bool)
-            or not isinstance(generation, int)
+        receipts = receipt.get("receipts")
+        if (
+            type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != 2
+            or not isinstance(session_key, str)
+            or _HASH64.fullmatch(session_key) is None
+            or session_key != expected_session_key
+            or type(receipt.get("ts")) is not int
+            or timestamp is None
+            or type(generation) is not int
             or generation < 1
+            or not isinstance(receipts, dict)
         ):
             invalid.append(path.name)
             continue
-        schema_version = receipt.get("schema_version")
-        if schema_version is not None and (
-            type(schema_version) is not int or schema_version != 2
+        if any(
+            not isinstance(item, dict)
+            or type(item.get("ts")) is not int
+            or _finite_timestamp(item.get("ts")) is None
+            or not isinstance(item.get("status"), str)
+            or item["status"] not in valid_statuses
+            or type(item.get("generation")) is not int
+            or item["generation"] < 1
+            for item in receipts.values()
         ):
             invalid.append(path.name)
             continue

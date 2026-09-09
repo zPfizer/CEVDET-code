@@ -9,6 +9,8 @@ from unittest import mock
 import _fixtures  # noqa: F401  (sys.path seam; before project modules)
 
 import doctor  # noqa: E402
+import flush  # noqa: E402
+import hook  # noqa: E402
 import worker_supervisor  # noqa: E402
 
 
@@ -34,9 +36,7 @@ class DoctorRecordValidationTests(unittest.TestCase):
                 json.dumps({"start": 0, "end": 1, "digest": digest}),
                 encoding="utf-8",
             )
-            (state / f"flush-{'d' * 64}.json").write_text(
-                json.dumps({"status": "ok", "ts": 100}), encoding="utf-8"
-            )
+            flush._write_flush_state(state, "valid-session", 100, "ok")
 
             check = doctor._flush_inflight_check(doctor.Context(state_dir=state, now=100))
 
@@ -53,6 +53,114 @@ class DoctorRecordValidationTests(unittest.TestCase):
             check = doctor._flush_inflight_check(doctor.Context(state_dir=state, now=100))
 
             self.assertEqual(check.status, "FAIL")
+
+    def test_flush_valid_writer_receipt_requires_each_top_level_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            flush._write_flush_state(
+                state,
+                "valid-session",
+                100,
+                "ok",
+                idempotency_key="a" * 64,
+            )
+            path = flush._session_state_path(state, "valid-session")
+            valid = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                doctor._flush_inflight_check(doctor.Context(state_dir=state, now=100)).status,
+                "OK",
+            )
+
+            for field in (
+                "session_key",
+                "ts",
+                "status",
+                "generation",
+                "schema_version",
+                "receipts",
+            ):
+                with self.subTest(field=field):
+                    malformed = dict(valid)
+                    malformed.pop(field)
+                    path.write_text(json.dumps(malformed), encoding="utf-8")
+                    self.assertEqual(
+                        doctor._flush_inflight_check(
+                            doctor.Context(state_dir=state, now=100)
+                        ).status,
+                        "FAIL",
+                    )
+
+            for field, value in (
+                ("session_key", "0" * 64),
+                ("ts", "bad"),
+                ("generation", True),
+                ("schema_version", 1),
+                ("receipts", {"a" * 64: []}),
+            ):
+                with self.subTest(field=field, value=value):
+                    malformed = dict(valid)
+                    malformed[field] = value
+                    path.write_text(json.dumps(malformed), encoding="utf-8")
+                    self.assertEqual(
+                        doctor._flush_inflight_check(
+                            doctor.Context(state_dir=state, now=100)
+                        ).status,
+                        "FAIL",
+                    )
+
+    def test_hook_valid_writer_receipt_requires_each_scoped_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            hook.write_hook_health(
+                state,
+                {"session_id": "valid-session"},
+                status="ok",
+            )
+            path = next(state.glob("hook-health-*.json"))
+            valid = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                doctor._hook_health_check(
+                    doctor.Context(state_dir=state, now=valid["ts"])
+                ).status,
+                "OK",
+            )
+
+            for field in (
+                "schema_version",
+                "ts",
+                "component",
+                "session_key",
+                "generation",
+                "status",
+            ):
+                with self.subTest(field=field):
+                    malformed = dict(valid)
+                    malformed.pop(field)
+                    path.write_text(json.dumps(malformed), encoding="utf-8")
+                    self.assertEqual(
+                        doctor._hook_health_check(
+                            doctor.Context(state_dir=state, now=valid["ts"])
+                        ).status,
+                        "FAIL",
+                    )
+
+            for field, value in (
+                ("schema_version", 1),
+                ("ts", "bad"),
+                ("component", "other"),
+                ("session_key", "0" * 64),
+                ("generation", True),
+            ):
+                with self.subTest(field=field, value=value):
+                    malformed = dict(valid)
+                    malformed[field] = value
+                    path.write_text(json.dumps(malformed), encoding="utf-8")
+                    self.assertEqual(
+                        doctor._hook_health_check(
+                            doctor.Context(state_dir=state, now=valid["ts"])
+                        ).status,
+                        "FAIL",
+                    )
 
     def test_flush_index_receipt_is_auxiliary_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -103,19 +211,17 @@ class DoctorRecordValidationTests(unittest.TestCase):
     def test_hook_health_error_payload_is_redacted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
-            (state / "hook-health-scope.json").write_text(
-                json.dumps(
-                    {
-                        "generation": 1,
-                        "status": "error",
-                        "ts": 100,
-                        "error": "profile-secret-password-abc",
-                    }
-                ),
-                encoding="utf-8",
+            hook.write_hook_health(
+                state,
+                {"session_id": "redaction-session"},
+                status="error",
+                error="profile-secret-password-abc",
             )
+            receipt = json.loads(next(state.glob("hook-health-*.json")).read_text())
 
-            check = doctor._hook_health_check(doctor.Context(state_dir=state, now=100))
+            check = doctor._hook_health_check(
+                doctor.Context(state_dir=state, now=receipt["ts"])
+            )
 
             self.assertEqual(check.status, "FAIL")
             self.assertNotIn("profile-secret-password-abc", check.evidence)

@@ -23,6 +23,8 @@ from _fixtures import CODEX_DIR  # sys.path seam
 import doctor  # noqa: E402
 import codex_runner  # noqa: E402
 import compile as memory_compile  # noqa: E402
+import flush  # noqa: E402
+import hook  # noqa: E402
 import worker_supervisor as workers  # noqa: E402
 import memory_ledger  # noqa: E402
 
@@ -42,13 +44,25 @@ class DoctorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             now = doctor.HOOK_RUNTIME_MAX_AGE_SECONDS * 2
-            (state / 'hook-health-old.json').write_text(json.dumps(
-                {'generation': 1, 'status': 'error', 'error': 'ValueError', 'ts': 0}), encoding='utf-8')
+            old_session = "old-session"
+            hook.write_hook_health(
+                state,
+                {"session_id": old_session},
+                status="error",
+                error="ValueError",
+            )
+            old_path = state / f"hook-health-{hook.session_key(old_session)}.json"
+            old_receipt = json.loads(old_path.read_text(encoding="utf-8"))
+            old_receipt["ts"] = 0
+            old_path.write_text(json.dumps(old_receipt), encoding="utf-8")
             for current_error in (False, True):
                 with self.subTest(current_error=current_error):
-                    (state / 'hook-health-current.json').write_text(json.dumps(
-                        {'generation': 1, 'status': 'error' if current_error else 'ok',
-                         'error': 'RuntimeError', 'ts': now}), encoding='utf-8')
+                    hook.write_hook_health(
+                        state,
+                        {"session_id": "current-session"},
+                        status="error" if current_error else "ok",
+                        error="RuntimeError" if current_error else "",
+                    )
                     checks = {c.name: c for c in doctor.run_checks(
                         state, state_dir=state, now=now, only='Hook sağlığı')}
                     self.assertEqual(checks['Hook sağlığı'].status, 'FAIL' if current_error else 'OK')
@@ -1137,15 +1151,11 @@ tags: [doğrulama]
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             now = time.time()
-            (state / "flush-stale.json").write_text(
-                json.dumps(
-                    {
-                        "session_id": "stale-session",
-                        "ts": int(now - 301),
-                        "status": "inflight",
-                    }
-                ),
-                encoding="utf-8",
+            flush._write_flush_state(
+                state,
+                "stale-session",
+                int(now - 301),
+                "inflight",
             )
 
             check = doctor._flush_inflight_check(doctor.Context(state_dir=state, now=now))
@@ -1157,19 +1167,15 @@ tags: [doğrulama]
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             now = time.time()
-            for name, status, age in (
-                ("flush-fresh.json", "inflight", 10),
-                ("flush-complete.json", "ok", 600),
+            for session_id, status, age in (
+                ("fresh-session", "inflight", 10),
+                ("complete-session", "ok", 600),
             ):
-                (state / name).write_text(
-                    json.dumps(
-                        {
-                            "session_id": name,
-                            "ts": int(now - age),
-                            "status": status,
-                        }
-                    ),
-                    encoding="utf-8",
+                flush._write_flush_state(
+                    state,
+                    session_id,
+                    int(now - age),
+                    status,
                 )
 
             check = doctor._flush_inflight_check(doctor.Context(state_dir=state, now=now))
