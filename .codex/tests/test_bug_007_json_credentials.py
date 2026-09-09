@@ -56,7 +56,8 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertEqual(sanitized, 'token=<REDACTED> important decision')
 
     def test_quoted_container_does_not_trust_a_delimiter_in_invalid_json(self) -> None:
-        for ending in (',TRAILING_SECRET}', '}TRAILING_SECRET', ']TRAILING_SECRET', ' TRAILING_SECRET}'):
+        for ending in (',TRAILING_SECRET}', '}TRAILING_SECRET', ']TRAILING_SECRET', ' TRAILING_SECRET}',
+                       "}'TRAILING_SECRET", '}"TRAILING_SECRET'):
             with self.subTest(ending=ending), self.assertRaisesRegex(ledger.MemoryPreferenceError, '^memory-credential-container-unverifiable$'):
                 ledger.sanitize_text('{"token":{"safe":1}' + ending + ' important decision', max_chars=None)
 
@@ -65,7 +66,8 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         safe = '{"token":"<REDACTED>","keep":"ordinary"}'
         for prefix, suffix in (('before ', '\nafter'), ('before {not-json}\n```json\n', '\n```\nafter'),
                                ('before ', '; after'), ('before ', '. after'),
-                               ('inline `', '` after'), ('before (', ') after')):
+                               ('inline `', '` after'), ('before (', ') after'),
+                               ("example '", "' after"), ('example "', '" after')):
             with self.subTest(prefix=prefix):
                 sanitized, _ = ledger.sanitize_text(prefix + payload + suffix, max_chars=None)
                 self.assertEqual(sanitized, prefix + safe + suffix)
@@ -149,11 +151,11 @@ class Bug007JsonCredentialTests(unittest.TestCase):
             home = root / "home"
             source = home / "attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt"
             source.parent.mkdir(parents=True)
-            original = json.dumps(
+            original = "example '" + json.dumps(
                 {"password": "LEAK_PROBE_SYNTHETIC", "api_key": "key-secret", "keep": "ordinary",
                  "token": {"value": "OBJECT_SECRET", "items": ["ARRAY_SECRET"]}},
                 ensure_ascii=False,
-            )
+            ) + "' after"
             original_bytes = original.encode("utf-8")
             source.write_bytes(original_bytes)
             envelope = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
