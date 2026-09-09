@@ -185,3 +185,4 @@
 !/.codex/tests/test_concurrency_publication_retry.py
 !/.codex/tests/test_concurrency_compile_cleanup.py
 !/docs/agents/concurrency-integration-20260909.md
+!/docs/agents/live-memory-acceptance.md
