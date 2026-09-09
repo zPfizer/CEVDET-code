@@ -24,6 +24,27 @@ MARKERS = {
 
 
 class Bug007JsonCredentialTests(unittest.TestCase):
+    def test_structured_credentials_hide_whole_value_and_keep_siblings(self) -> None:
+        for value in ({"value": "OBJECT_SECRET", "nested": ["ARRAY_SECRET", {"text": "} ]", "authorization": "Bearer HEADER_SECRET"}]},
+                      ["ARRAY_SECRET", {"value": "OBJECT_SECRET"}]):
+            for indent in (None, 2):
+                with self.subTest(value=value, indent=indent):
+                    original = json.dumps({"token": value, "keep": "ordinary", "password": "NEXT_SECRET"}, indent=indent,
+                                          separators=(',', ':') if indent is None else None)
+                    sanitized, redactions = ledger.sanitize_text(original, max_chars=None)
+                    for marker in ("OBJECT_SECRET", "ARRAY_SECRET", "NEXT_SECRET", "HEADER_SECRET"):
+                        self.assertNotIn(marker, sanitized)
+                    self.assertEqual(json.loads(sanitized), {"token": "<REDACTED>", "keep": "ordinary", "password": "<REDACTED>"})
+                    self.assertIn("credential", redactions)
+                    self.assertEqual(ledger.sanitize_text(sanitized, max_chars=None)[0], sanitized)
+
+    def test_unreadable_credential_container_does_not_leak_the_remaining_value(self) -> None:
+        for value in ('{\n"value": "BROKEN_SECRET"', '[' * 1100 + '"DEEP_SECRET"' + ']' * 1100):
+            with self.subTest(value=value[:30]):
+                sanitized, redactions = ledger.sanitize_text('keep before; token=' + value, max_chars=None)
+                self.assertEqual(sanitized, 'keep before; token=<REDACTED>')
+                self.assertEqual(redactions, ("credential",))
+
     def test_sanitizer_redacts_plain_quoted_and_escaped_credentials(self) -> None:
         text = (
             'plain password=plain-secret; '
@@ -45,7 +66,8 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         text = (
             'Authorization: Bearer plain-auth; '
             '"authorization": "Bearer json-auth"; '
-            "'authorization': 'Bearer dict-auth'"
+            "'authorization': 'Bearer dict-auth'; "
+            '"authorization": "Bearer FIRST_SECRET token=SECOND_SECRET"'
         )
 
         sanitized, redactions = ledger.sanitize_text(text)
@@ -53,6 +75,8 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         self.assertNotIn("plain-auth", sanitized)
         self.assertNotIn("json-auth", sanitized)
         self.assertNotIn("dict-auth", sanitized)
+        self.assertNotIn("FIRST_SECRET", sanitized)
+        self.assertNotIn("SECOND_SECRET", sanitized)
         self.assertIn("authorization", redactions)
 
     def test_quoted_json_credential_is_secret_and_does_not_persist(self) -> None:
@@ -73,7 +97,8 @@ class Bug007JsonCredentialTests(unittest.TestCase):
             source = home / "attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt"
             source.parent.mkdir(parents=True)
             original = json.dumps(
-                {"password": "LEAK_PROBE_SYNTHETIC", "api_key": "key-secret", "keep": "ordinary"},
+                {"password": "LEAK_PROBE_SYNTHETIC", "api_key": "key-secret", "keep": "ordinary",
+                 "token": {"value": "OBJECT_SECRET", "items": ["ARRAY_SECRET"]}},
                 ensure_ascii=False,
             )
             original_bytes = original.encode("utf-8")
@@ -94,10 +119,14 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertTrue(prompts)
                 self.assertNotIn("LEAK_PROBE_SYNTHETIC", prompts[0])
                 self.assertNotIn("key-secret", prompts[0])
+                self.assertNotIn("OBJECT_SECRET", prompts[0])
+                self.assertNotIn("ARRAY_SECRET", prompts[0])
                 note = root / (result[0][0] + ".md")
                 saved = note.read_text(encoding="utf-8")
                 self.assertNotIn("LEAK_PROBE_SYNTHETIC", saved)
                 self.assertNotIn("key-secret", saved)
+                self.assertNotIn("OBJECT_SECRET", saved)
+                self.assertNotIn("ARRAY_SECRET", saved)
                 self.assertIn('"keep": "ordinary"', saved)
                 self.assertEqual(source.read_bytes(), original_bytes)
 

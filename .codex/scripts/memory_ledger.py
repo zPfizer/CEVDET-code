@@ -37,14 +37,14 @@ PRIVATE_KEY = re.compile(
     re.DOTALL,
 )
 AUTHORIZATION = re.compile(
-    r'''(?im)(?P<key_quote>["']?)\bauthorization(?P=key_quote)\s*:\s*'''
+    r'''(?im)(?P<prefix>(?P<key_quote>["']?)\bauthorization(?P=key_quote)\s*:\s*)'''
     r'''(?:"Bearer\s+(?:\\.|[^"\\\r\n])+"|'''
     r"""'Bearer\s+(?:\\.|[^'\\\r\n])+'|Bearer\s+[^\s\r\n]+)"""
 )
 CREDENTIAL = re.compile(
-    r'''(?im)(?P<key_quote>["']?)\b(?P<key>api[_-]?key|password|secret|token)'''
-    r'''(?P=key_quote)\s*[:=]\s*'''
-    r'''(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s\r\n]+)'''
+    r'''(?im)(?P<prefix>(?P<key_quote>["']?)\b(?P<key>api[_-]?key|password|secret|token)'''
+    r'''(?P=key_quote)\s*[:=]\s*)'''
+    r'''(?P<value>"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s\r\n]+)'''
 )
 TOKEN_PREFIX = re.compile(r"\b(?:sk|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
 PERSONAL_CREDENTIAL = re.compile(
@@ -319,8 +319,28 @@ def sanitize_text(
             redactions.append(category)
 
     replace(PRIVATE_KEY, "<REDACTED>", "private-key")
-    replace(AUTHORIZATION, "Authorization: Bearer <REDACTED>", "authorization")
-    replace(CREDENTIAL, lambda match: f"{match.group('key')}=<REDACTED>", "credential")
+    replace(AUTHORIZATION,
+            lambda match: (f'{match.group("prefix")}"Bearer <REDACTED>"' if match.group('key_quote')
+                           else "Authorization: Bearer <REDACTED>"),
+            "authorization")
+    pieces: list[str] = []
+    cursor = 0
+    while match := CREDENTIAL.search(text, cursor):
+        end = match.end()
+        if text[match.start('value')] in '{[':
+            try:
+                _, end = json.JSONDecoder().raw_decode(text, match.start('value'))
+            except (ValueError, RecursionError):
+                # Unknown container boundaries must not expose the remaining payload.
+                end = len(text)
+        replacement = (f'{match.group("prefix")}"<REDACTED>"' if match.group('key_quote')
+                       else f"{match.group('key')}=<REDACTED>")
+        pieces.extend((text[cursor:match.start()], replacement))
+        cursor = end
+    if pieces:
+        text = ''.join(pieces) + text[cursor:]
+    if pieces:
+        redactions.append('credential')
     replace(TOKEN_PREFIX, "<REDACTED>", "credential")
     replace(PERSONAL_CREDENTIAL, "<REDACTED>", "credential")
 
