@@ -79,6 +79,7 @@ class Bug007JsonCredentialTests(unittest.TestCase):
 
     def test_decoded_json_credential_names_are_redacted(self) -> None:
         nested = json.dumps({"api_key": "INNER_SYNTHETIC_SECRET"})
+        fragment = "example " + json.dumps({"api_key": "PROSE_JSON_SYNTHETIC_SECRET"}) + " in docs"
         escaped_key = r'{"\u0061pi_key":"ESCAPED_KEY_SYNTHETIC_SECRET","keep":"ordinary"}'
         for original, expected, secret in (
             (
@@ -86,12 +87,29 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 {"message": json.dumps({"api_key": "<REDACTED>"}), "keep": "ordinary"},
                 "INNER_SYNTHETIC_SECRET",
             ),
+            (
+                json.dumps({"message": fragment, "keep": "ordinary"}),
+                {"message": "example " + json.dumps({"api_key": "<REDACTED>"}) + " in docs", "keep": "ordinary"},
+                "PROSE_JSON_SYNTHETIC_SECRET",
+            ),
             (escaped_key, {"api_key": "<REDACTED>", "keep": "ordinary"}, "ESCAPED_KEY_SYNTHETIC_SECRET"),
         ):
             with self.subTest(secret=secret):
                 sanitized, redactions = ledger.sanitize_text(original, max_chars=None)
                 self.assertEqual(json.loads(sanitized), expected)
                 self.assertNotIn(secret, sanitized)
+                self.assertIn("credential", redactions)
+
+    def test_malformed_decoded_json_credentials_are_not_leaked(self) -> None:
+        for inner, secret in (
+            ('{"api_key":"MALFORMED_INNER_SECRET"', "MALFORMED_INNER_SECRET"),
+            (r'{"\u0061pi_key":"ESCAPED_MALFORMED_SECRET"', "ESCAPED_MALFORMED_SECRET"),
+        ):
+            with self.subTest(secret=secret):
+                original = json.dumps({"message": inner, "keep": "ordinary"})
+                sanitized, redactions = ledger.sanitize_text(original, max_chars=None)
+                self.assertNotIn(secret, sanitized)
+                self.assertEqual(json.loads(sanitized)["keep"], "ordinary")
                 self.assertIn("credential", redactions)
 
     def test_json_credential_like_keys_are_rejected_without_collisions(self) -> None:
@@ -194,7 +212,8 @@ class Bug007JsonCredentialTests(unittest.TestCase):
             original = "example '" + json.dumps(
                 {"message": "example 'token': {'a': 1} in docs", "nested": json.dumps(
                     {"api_key": "INNER_SYNTHETIC_SECRET"}
-                ), "password": "LEAK_PROBE_SYNTHETIC", "api_key": "ESCAPED_KEY_SYNTHETIC_SECRET",
+                ), "fragment": "example " + json.dumps({"api_key": "PROSE_JSON_SYNTHETIC_SECRET"}) + " in docs",
+                 "password": "LEAK_PROBE_SYNTHETIC", "api_key": "ESCAPED_KEY_SYNTHETIC_SECRET",
                  "keep": "ordinary", "token": {"value": "OBJECT_SECRET", "items": ["ARRAY_SECRET"]}},
                 ensure_ascii=False,
             ) + "' after"
@@ -218,6 +237,7 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertNotIn("LEAK_PROBE_SYNTHETIC", prompts[0])
                 self.assertNotIn("key-secret", prompts[0])
                 self.assertNotIn("INNER_SYNTHETIC_SECRET", prompts[0])
+                self.assertNotIn("PROSE_JSON_SYNTHETIC_SECRET", prompts[0])
                 self.assertNotIn("ESCAPED_KEY_SYNTHETIC_SECRET", prompts[0])
                 self.assertNotIn("OBJECT_SECRET", prompts[0])
                 self.assertNotIn("ARRAY_SECRET", prompts[0])
@@ -227,6 +247,7 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertNotIn("LEAK_PROBE_SYNTHETIC", saved)
                 self.assertNotIn("key-secret", saved)
                 self.assertNotIn("INNER_SYNTHETIC_SECRET", saved)
+                self.assertNotIn("PROSE_JSON_SYNTHETIC_SECRET", saved)
                 self.assertNotIn("ESCAPED_KEY_SYNTHETIC_SECRET", saved)
                 self.assertNotIn("OBJECT_SECRET", saved)
                 self.assertNotIn("ARRAY_SECRET", saved)

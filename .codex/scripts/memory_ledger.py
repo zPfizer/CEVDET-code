@@ -398,34 +398,41 @@ def _json_string_regions(
             cursor = tail + 1 if tail < region_end and text[tail] == ':' else tail
 
 
-def _redact_decoded_json(text: str) -> tuple[str, bool]:
-    records = list(_json_string_regions(text))
-    if not records:
-        return text, False
-    replacements: list[tuple[int, int, str]] = []
-    protected: list[tuple[int, int]] = []
-    for start, end, is_value, decoded, value_start, value_end in records:
-        if (
-            not is_value
-            and value_start is not None
-            and value_end is not None
-            and CREDENTIAL_NAME_RE.fullmatch(decoded)
-        ):
-            replacements.append((value_start, value_end, json.dumps("<REDACTED>")))
-            protected.append((value_start, value_end))
-    for start, end, is_value, decoded, _value_start, _value_end in records:
-        if not is_value or any(left <= start and end <= right for left, right in protected):
-            continue
-        leading = 0
-        while leading < len(decoded) and decoded[leading].isspace():
-            leading += 1
+def _decoded_credential_key(text: str) -> bool:
+    decoder = json.JSONDecoder()
+    cursor = 0
+    while cursor < len(text):
+        opening = text.find('"', cursor)
+        if opening < 0:
+            return False
         try:
-            _, nested_end = json.JSONDecoder().raw_decode(decoded, leading)
+            value, end = decoder.raw_decode(text, opening)
         except (ValueError, RecursionError):
+            cursor = opening + 1
             continue
-        while nested_end < len(decoded) and decoded[nested_end].isspace():
-            nested_end += 1
-        if nested_end != len(decoded):
+        tail = end
+        while tail < len(text) and text[tail].isspace():
+            tail += 1
+        if tail < len(text) and text[tail] == ':' and CREDENTIAL_NAME_RE.fullmatch(value):
+            return True
+        cursor = end
+    return False
+
+
+def _redact_decoded_json(text: str) -> tuple[str, bool]:
+    replacements: list[tuple[int, int, str]] = []
+    skip_until = 0
+    for start, end, is_value, decoded, value_start, value_end in _json_string_regions(text):
+        if start < skip_until:
+            continue
+        if not is_value:
+            if (
+                value_start is not None
+                and value_end is not None
+                and CREDENTIAL_NAME_RE.fullmatch(decoded)
+            ):
+                replacements.append((value_start, value_end, json.dumps("<REDACTED>")))
+                skip_until = value_end
             continue
         try:
             nested, changed = _redact_decoded_json(decoded)
@@ -433,6 +440,8 @@ def _redact_decoded_json(text: str) -> tuple[str, bool]:
             raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
         if changed:
             replacements.append((start, end, json.dumps(nested)))
+        elif _decoded_credential_key(decoded) or CREDENTIAL.search(decoded):
+            replacements.append((start, end, json.dumps("<REDACTED>")))
     if not replacements:
         return text, False
     pieces: list[str] = []
