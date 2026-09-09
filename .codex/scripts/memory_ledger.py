@@ -208,6 +208,7 @@ def _targeted_write_matches(pattern: re.Pattern[str], folded: str) -> bool:
     return not (
         NON_COMMITTAL_WRITE.fullmatch(name) is not None
         or CONDITIONAL_WRITE.fullmatch(name) is not None
+        or ACTION_QUESTION_WORD.fullmatch(name) is not None
     )
 
 
