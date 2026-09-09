@@ -286,6 +286,7 @@ class ConversationContinuityTests(unittest.TestCase):
     def test_targeted_fix_command_reopens_read_only_scope(self):
         for prompt in (
             'BIB projesindeki hatayı düzelt.',
+            'Atlas projesindeki hatayı düzelt.',
             'src/app.py dosyasını düzelt.',
             'Atlas modülündeki hatayı düzelt.',
             'Borsa dosyasındaki hatayı düzelt.',
@@ -306,6 +307,8 @@ class ConversationContinuityTests(unittest.TestCase):
             'Onay verdiysem BIB projesindeki hatayı düzelt.',
             'Onayım varsa BIB projesindeki hatayı düzelt.',
             'Onaylıysa BIB projesindeki hatayı düzelt.',
+            'Onaylıysa projesindeki hatayı düzelt.',
+            'Gerekirse modüldeki hatayı düzelt.',
             'Onay olduğu takdirde BIB projesindeki hatayı düzelt.',
             'Onay gelince BIB projesindeki hatayı düzelt.',
             'Onaydan sonra BIB projesindeki hatayı düzelt.',

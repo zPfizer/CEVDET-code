@@ -172,8 +172,10 @@ CONDITIONAL_WRITE = re.compile(
 ACTION_QUESTION_WORD = re.compile(
     r"\b(?:ne|nasıl|neden|niçin|hangi|hangisi|kim|ne\s+zaman)\b"
 )
-_NAMED_FILE_TARGET = re.compile(
-    rf"^(?P<name>[\w.-]+)\s+(?:{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER})$"
+_NAMED_TARGET = re.compile(
+    rf"^(?P<name>[\w.-]+)\s+(?:projesindeki\s+{_WRITE_TARGET_OBJECT}|"
+    rf"modül(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}|"
+    rf"{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER})$"
 )
 
 
@@ -195,12 +197,12 @@ def _targeted_write_matches(pattern: re.Pattern[str], folded: str) -> bool:
     match = pattern.fullmatch(folded)
     if match is None:
         return False
-    named_file = _NAMED_FILE_TARGET.fullmatch(match.group("target"))
-    if named_file is None:
+    named_target = _NAMED_TARGET.fullmatch(match.group("target"))
+    if named_target is None:
         return True
-    name = named_file.group("name")
-    # A dot-qualified filename is target data; only the bare optional name can
-    # be the one-word conditional form (for example, "onaylıysa dosyayı").
+    name = named_target.group("name")
+    # A dot-qualified name is target data; only the bare named target can be
+    # the one-word conditional form (for example, "onaylıysa dosyayı").
     if "." in name:
         return True
     return not (

@@ -145,6 +145,8 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Onay verdiysem BIB projesindeki hatayı düzelt.",
             "Onayım varsa BIB projesindeki hatayı düzelt.",
             "Onaylıysa BIB projesindeki hatayı düzelt.",
+            "Onaylıysa projesindeki hatayı düzelt.",
+            "Gerekirse modüldeki hatayı düzelt.",
             "Onay olduğu takdirde BIB projesindeki hatayı düzelt.",
             "Onay gelince BIB projesindeki hatayı düzelt.",
             "Onaydan sonra BIB projesindeki hatayı düzelt.",
