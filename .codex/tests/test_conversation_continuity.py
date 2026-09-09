@@ -97,7 +97,7 @@ class ConversationContinuityTests(unittest.TestCase):
             transcript.write_text('\n'.join(json.dumps(record) for record in (
                 {'role': 'user', 'content': 'Önceki karar kalıcı olmamalı.'},
                 {'role': 'assistant', 'content': 'Önceki yanıt da dışarıda kalmalı.'},
-                {'role': 'user', 'content': 'Bunu kaydetme, lütfen.'},
+                {'role': 'user', 'content': 'Bunu kaydetme! Lütfen.'},
                 {'role': 'user', 'content': 'Yeni kalıcı karar.'},
             )) + '\n', encoding='utf-8')
             payload = vault / 'input.json'
@@ -122,7 +122,7 @@ class ConversationContinuityTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertNotIn('Önceki karar kalıcı olmamalı.', prompt)
         self.assertNotIn('Önceki yanıt da dışarıda kalmalı.', prompt)
-        self.assertNotIn('Bunu kaydetme, lütfen.', prompt)
+        self.assertNotIn('Bunu kaydetme! Lütfen.', prompt)
         self.assertIn('Yeni kalıcı karar.', prompt)
         self.assertIn('Yeni kalıcı karar.', daily)
 
@@ -133,7 +133,7 @@ class ConversationContinuityTests(unittest.TestCase):
             state.mkdir()
             transcript = vault / 'source.jsonl'
             transcript.write_text(json.dumps({'role': 'user', 'content':
-                '> Makaledeki örnek cümle.\nBunu kaydetme, lütfen.'}), encoding='utf-8')
+                '> Makaledeki örnek cümle.\nBunu kaydetme! Lütfen.'}), encoding='utf-8')
             payload = vault / 'input.json'
             payload.write_text(json.dumps({'session_id': 'quoted-boundary',
                 'transcript_path': str(transcript)}), encoding='utf-8')

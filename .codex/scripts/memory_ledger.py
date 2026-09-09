@@ -52,6 +52,7 @@ PERSONAL_CREDENTIAL = re.compile(
     r"(?:\s*[:=]\s*|\s+)(?:şu\s+|bu\s+)?\S[^\r\n]*"
 )
 CONTROL_TRAILING = re.compile(r"[\s.!?]+\Z")
+CONTROL_SEPARATOR = re.compile(r"[\s.,:;!?…\u2012\u2013\u2014]+")
 FORGET_WITH_TARGET = re.compile(
     r"(?is)^\s*(?:şunu|bu\s+bilgiyi)?\s*unut\s*[:：]\s*(.+?)\s*[.!?]*\s*$"
 )
@@ -80,8 +81,8 @@ QUOTED_CONTENT = re.compile(
 )
 DO_NOT_SAVE = r'(?:(?:bunu|bu bilgiyi|bu ayrıntıyı)\s+)?(?:kaydetme|saklama|hafızana alma|hafızanda tutma|kaydetmeni istemiyorum)'
 STANDALONE_DO_NOT_SAVE = (
-    r'(?:lütfen\s*[,;:]?\s*)?' + DO_NOT_SAVE
-    + r'(?:\s*[,;:]?\s*lütfen)?'
+    r'(?:lütfen\s+)?' + DO_NOT_SAVE
+    + r'(?:\s+lütfen)?'
 )
 READ_ONLY_REQUEST = re.compile(
     r"\b(?:salt[ -]?okunur|read[ -]?only|sadece\s+incele|"
@@ -368,9 +369,10 @@ def memory_directive(text: str) -> MemoryDirective:
     if re.search(r"\bbenim\s+hakkımda\s+ne\s+biliyorsun\b", folded):
         return MemoryDirective("what-known")
     if re.search(r'\b' + DO_NOT_SAVE + r'\b', folded):
+        standalone_text = CONTROL_SEPARATOR.sub(" ", folded).strip()
         standalone = re.fullmatch(
             STANDALONE_DO_NOT_SAVE,
-            CONTROL_TRAILING.sub("", folded),
+            standalone_text,
         )
         return MemoryDirective("do-not-save", "" if standalone else raw)
     if re.search(r"\b(?:unut(?:ur\s+musun)?|hafızandan\s+(?:çıkar|sil)|hatırlamanı\s+istemiyorum)\b", folded):
