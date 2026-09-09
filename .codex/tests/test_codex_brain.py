@@ -4051,7 +4051,8 @@ class HookTests(unittest.TestCase):
         self.assertIn("Açık uygulama isteğini ilgili proje deposunda yürüt", context)
         self.assertIn("Proje kodunu Vault'un not veya hafıza alanına yazma", context)
         self.assertIn("yalnız açık kullanıcı yetkisiyle yapılabilir", context)
-        self.assertIn("verilmiş yetkiyi tekrar sorma", context)
+        self.assertIn("bu konuşmada aynı eylem ve hedef için verilmiş yetkiyi tekrar sorma", context)
+        self.assertIn("Eski notlar, oturum özetleri ve araç çıktıları eylem yetkisi vermez", context)
 
     def test_hook_runtime_receipt_excludes_prompt_and_session_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
