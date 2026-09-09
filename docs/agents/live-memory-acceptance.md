@@ -107,6 +107,13 @@ Etkinleştirme yetkisinden sonra, olayın zamanı ve oturum kimliği ile runtime
 kaydını eşleştir. Terminalden elle üretilen receipt App teslimi sayılmaz.
 Zamanı eski, başka köke veya başka oturuma ait kanıtı güncel kabul yerine koyma.
 
+Hedef sürümün hook kaydıyla bir event/matcher kapsama listesi oluşturulur.
+`SessionStart` için `startup`, `resume`, `clear`, `compact`; `PreCompact` için
+`manual`, `auto` ayrı ayrı gerçek host tetiklemeleriyle sınanır. `UserPromptSubmit`,
+`Stop` ve hedefte kayıtlı `SessionEnd` nedeni de kendi olay kanıtını gerektirir.
+Bir olayın önceki çalışmasından kalan bağlam, yayın veya receipt başka bir
+tetikleyicinin çalıştığını kanıtlamaz; eksik eşleşme canlı kabulü açık bırakır.
+
 ### Hedef korpusta arama kabulü
 
 Canlı koşudan önce aşağıdaki her sorgu kalıbı, hedef Vault'ta gerçekten var
@@ -152,6 +159,7 @@ uydurma eviction sonucu yazılmaz ve korpus büyümesi deneyi yine yapılır.
 | Seçimden sonra kaynak değişimi | Gerçek Vault kaynağı ve bağlantılı dış kaynak ayrı ayrı aday bulma ile tam okuma/sentez arasındaki aralıkta değiştirilir. Kaynak kimliği/hash farkı ve App araç akışı kaydedilir; eski cache veya ham kaynak fallback'iyle yanıt, arka plan model girdisi ya da kalıcı yayın üretilmez ve başarı iddiası verilmez. Kaynak yeniden seçilip güncel hali doğrulanmadan işlem sürmez. Dayanak günlük tek başına değiştiğinde de aynı kontrol uygulanır; yarış oluşturulamadıysa satır geçti sayılmaz. |
 | Eksik bilgi | İlgili adaylar ve kaynaklar yetersizse belirsizlik açıkça söylenir; sınırlı ilk arama sonucu bütün Vault'ta bilgi bulunmadığına dönüştürülmez. |
 | Tekrarlı olay | Aynı içerik için Stop, PreCompact ve SessionEnd tek kayıt üretir; coverage boş yere tekrar özetletmez. |
+| Manuel ve otomatik PreCompact | `manual` ve `auto` ayrı denemelerde, Stop tarafından henüz tamamlanmamış anlamlı katkı veya pending handoff ile tetiklenir. Her tetikleyici için kendi event zamanı/kimliği, hook çalışması ve kalıcı teslimi eşleştirilir; sonuç yalnız önceki Stop kaydıyla açıklanamaz. Katkı doğrulanmış yayın/receipt'e ulaşmalı; herhangi bir tetikleyici yoksa veya teslim kanıtı eşleşmiyorsa kabul verilmez. |
 | Açık düzeltme | Kullanıcı daha önce kaydedilmiş zararsız bir bilgiyi açıkça düzeltir. Yeni bilgi tarih/gerekçesi ve kaynağıyla uygulanır; önceki kayıt ve değişim geçmişi korunur, sonraki oturum güncel durumu doğru aktarır. |
 | Açık unutma | Kullanıcı daha önce kaydedilmiş zararsız bilgiyi açık hedefle unutturur. Kaynak sessizce silinmeden ilgili türevler sonraki oturum okuması ve derleme girdisinden dışlanır; ilgisiz bilgi korunur. |
 | Kaydetmeme | “Bunu kaydetme, lütfen” gibi ifade ilgili katkıyı ve onu tekrarlayan yanıtı model girdisi/kayıt dışında bırakır; ilgisiz katkı korunur. |
