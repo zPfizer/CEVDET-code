@@ -26,7 +26,6 @@ from tag_taxonomy import (
     audit_vault,
     load_taxonomy,
 )
-from tansu_semantic_metadata import audit_manifest as audit_tansu_semantic_manifest
 from vault_corpus import (
     ARCHIVE_ROOT,
     DAILY_ROOT,
@@ -1382,34 +1381,6 @@ def _tag_taxonomy_check(ctx: Context) -> Check:
     )
 
 
-def _tansu_semantic_metadata_check(ctx: Context) -> Check:
-    vault = ctx.vault
-    semantic_map = (
-        vault
-        / "🏰 300-Projects"
-        / "Tansu X Veri Havuzu"
-        / "tansu-semantik-kullanim-haritasi.md"
-    )
-    if not semantic_map.is_file():
-        return Check("Tansu semantik metadata", "OK", "kapsam dışı")
-    try:
-        audit = audit_tansu_semantic_manifest(vault)
-    except (OSError, UnicodeError, ValueError) as exc:
-        return Check(
-            "Tansu semantik metadata",
-            "FAIL",
-            f"denetlenemedi: {exc}",
-        )
-    evidence = f"{audit.matched}/{audit.total} manifest eşleşiyor"
-    if audit.mismatches:
-        return Check(
-            "Tansu semantik metadata",
-            "FAIL",
-            f"{evidence}; ilk {audit.mismatches[0]}",
-        )
-    return Check("Tansu semantik metadata", "OK", evidence)
-
-
 def _profile_maintenance_check(ctx: Context) -> Check:
     try:
         with memory_read(ctx.vault) as memory:
@@ -1622,7 +1593,6 @@ CHECKS: tuple[tuple[str, Callable[[Context], Check | list[Check]]], ...] = (
     ("İş yükü", _thread_workload_check),
     ("Vault retrieval", _vault_retrieval_check),
     ("Etiket sözlüğü", _tag_taxonomy_check),
-    ("Tansu semantik metadata", _tansu_semantic_metadata_check),
     ("SessionStart bağlam bütçesi", _session_context_budget_check),
     ("Profil bakımı", _profile_maintenance_check),
     ("Vault bağlantıları", _vault_link_check),
