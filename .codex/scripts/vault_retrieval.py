@@ -167,6 +167,9 @@ HISTORY_CHANGE_QUERY = re.compile(
     r"(?:\s+\w+){0,5}\s+(?:should|must|can|will)\b)"
     r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
     r"|"
+    r"\b(?:how|why|what)\s+did\s+(?:\w+\s+){1,5}change\b"
+    r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
+    r"|"
     r"\b(?:ne|neler|nasil)\b(?:\s+\w+){0,3}?\s+\bdegisti\b"
     r")"
 )
@@ -1369,8 +1372,17 @@ def _past_date_status(query: str, query_terms: frozenset[str]) -> bool | None:
         return start <= today if "before" in query_terms else end < today
 
 
-def _has_history_context(query_terms: frozenset[str]) -> bool:
-    return bool(query_terms & HISTORY_CONTEXT_TERMS)
+def _has_history_context(query: str) -> bool:
+    if not query:
+        return False
+    context_terms = "|".join(map(re.escape, sorted(HISTORY_CONTEXT_TERMS, key=len, reverse=True)))
+    return re.search(
+        rf"(?ix)(?:"
+        rf"\b(?:past|previous)\b(?:\W+\w+){{0,2}}\W+\b(?:{context_terms})\b"
+        rf"|\b(?:{context_terms})\b(?:\W+\w+){{0,2}}\W+\b(?:past|previous)\b"
+        rf")",
+        _normalize(query),
+    ) is not None
 
 
 def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
@@ -1381,13 +1393,17 @@ def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
         for root in HISTORY_QUERY_INFLECTION_ROOTS
     )
     has_retrospective_change = bool(query and HISTORY_CHANGE_QUERY.search(_normalize(query)))
-    if has_inflected_history or has_retrospective_change or history_terms - {"before", "past"}:
+    if has_inflected_history or has_retrospective_change or history_terms - {"before", "past", "previous"}:
+        return True
+    if "previous" in history_terms and _has_history_context(query):
         return True
     past_date = _past_date_status(query, query_terms)
     if history_terms & {"before", "past"}:
         if past_date is not None:
             return past_date
-        return _has_history_context(query_terms)
+        if "before" in history_terms:
+            return False
+        return _has_history_context(query)
     return bool(
         past_date is True
         and any(re.fullmatch(r"\d{4}", term) for term in query_terms)

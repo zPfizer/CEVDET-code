@@ -574,6 +574,12 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
         cases = {
             "what changed files should we deploy?": False,
             "how has the hook contract changed?": True,
+            "how did the hook contract change?": True,
+            "why did the hook contract change?": True,
+            "previous page, show current hook checklist": False,
+            "previous records": True,
+            "previous versions": True,
+            "previous decisions": True,
             "before December 2026": False,
             "before December 2026 decisions": False,
             "before": False,
@@ -593,6 +599,8 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "before 2026-09-10": True,
             "before 31 February 2024": False,
             "before 31 February 2024 records": False,
+            "before tomorrow, review records": False,
+            "before next Monday": False,
             "compare records before 2024 with 2030 roadmap": True,
             "28 Ağustos 2024 Levent çalışma profili": True,
         }
@@ -663,6 +671,8 @@ title: Hook Protokolü
             for query in (
                 "what changed in the hook contract?",
                 "how has the hook contract changed?",
+                "how did the hook contract change?",
+                "why did the hook contract change?",
                 "hook sözleşmesinde ne değişti?",
                 "hook sözleşmesinde neler değişti?",
                 "hook sözleşmesi nasıl değişti?",
