@@ -540,6 +540,7 @@ class ConversationContinuityTests(unittest.TestCase):
             'parse.py dosyasını düzelt.',
             'ne.py dosyasını düzelt.',
             'app.v1.py dosyasını düzelt.',
+            '"Dockerfile" dosyasını düzelt.',
             'src/app.py dosyasını düzelt, lütfen.',
             "src/app.py'yi düzelt.",
             r'\\server\share\app.py dosyasını düzelt.',
@@ -565,6 +566,9 @@ class ConversationContinuityTests(unittest.TestCase):
             "src klasörü değiştir.",
             ".gitignore dosyasını düzenle.",
             ".env dosyasını değiştir.",
+            "src/app.py dosyasını düzeltin.",
+            "Lütfen dosyayı değiştiriniz.",
+            '"LICENSE" dosyasını düzenle.',
         ):
             with self.subTest(prompt=prompt):
                 self._check_explicit_write_prompt_reopens_read_only_scope(prompt)
@@ -608,6 +612,13 @@ class ConversationContinuityTests(unittest.TestCase):
             'Çalışmazsanız dosyayı düzelt.',
             'Yoksa dosyayı düzelt.',
             'Varsa dosyayı düzelt.',
+            'Onaylansa dosyayı düzelt.',
+            'Gelse dosyayı düzelt.',
+            'Onaylanmasa dosyayı düzelt.',
+            'Onaylansam dosyayı düzelt.',
+            'Onaylanmasam dosyayı düzelt.',
+            'Galiba dosyayı düzelt.',
+            'Muhtemelen dosyayı düzelt.',
             'Onay yoksa dosyayı düzelt.',
             'Onay varsa dosyayı düzelt.',
             'Yoksa BIB projesindeki hatayı düzelt.',
@@ -627,6 +638,8 @@ class ConversationContinuityTests(unittest.TestCase):
             'Bu cümledeki hatayı düzelt.',
             'Komut örneği olarak Atlas projesindeki hatayı düzelt.',
             '"C:\\Users\\Me\\My Project\\app.py dosyasını düzelt."',
+            '"Dockerfile dosyasını düzelt."',
+            '"LICENSE dosyasını düzenle."',
             '"Bunu düzelt."',
             '"app.py dosyasını düzelt."',
         ):

@@ -110,7 +110,10 @@ EXPLICIT_WRITE_INTENT = re.compile(
     r")\s*[.!]*\s*$"
 )
 
-_WRITE_MUTATION = r"(?:düzelt|değiştir|düzenle|uygula|onar)"
+_WRITE_MUTATION = (
+    r"(?:düzelt(?:in(?:iz)?)?|değiştir(?:in(?:iz)?)?|"
+    r"düzenle(?:yin(?:iz)?)?|uygula(?:yın(?:ız)?)?|onar(?:ın(?:ız)?)?)"
+)
 _WRITE_QUESTION_VERB = (
     r"(?:düzeltebilir|düzeltir|değiştirebilir|değiştirir|"
     r"düzenleyebilir|düzenler|uygulayabilir|uygular|onarabilir|onarır)"
@@ -137,6 +140,10 @@ _QUOTED_PATH = (
     r'''(?:"[^"\r\n]*\.[A-Za-z0-9_-]+"|'''
     r'''\'[^\'\r\n]*\.[A-Za-z0-9_-]+\')'''
 )
+_QUOTED_FILENAME = (
+    r'''(?:"[^"\r\n]+"|'''
+    r'''\'[^\'\r\n]+\')'''
+)
 _QUOTED_DIRECTORY = (
     r'''(?:"(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w ./\\-]+?"|'''
     r'''\'(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w ./\\-]+?\')'''
@@ -153,7 +160,8 @@ _WRITE_TARGET = (
     rf"{_WRITE_TARGET_SUFFIX}|"
     rf"{_WRITE_FILENAME}{_WRITE_TARGET_SUFFIX}|"
     rf"{_QUOTED_DIRECTORY}\s+{_WRITE_FOLDER_OBJECT}|"
-    rf"{_QUOTED_PATH}{_WRITE_TARGET_SUFFIX})"
+    rf"{_QUOTED_PATH}{_WRITE_TARGET_SUFFIX}|"
+    rf"{_QUOTED_FILENAME}\s+{_WRITE_FILE_OBJECT})"
 )
 _TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen|ok|okay|tamam)(?:[,;:]\s++|\s++))*"
 _TRAILING_POLITENESS = r"(?:(?:\s*+,\s*+|\s++)lütfen)?"
@@ -173,7 +181,12 @@ BARE_WRITE_QUESTION = re.compile(
 
 NON_COMMITTAL_WRITE = re.compile(
     r"\b(?:eğer|şayet|uygunsa|mümkünse|istersen(?:iz)?|gerekirse|"
-    r"olursa|belki|san[ıi]r[ıi]m|sak[ıi]n|asla|hiç(?:bir)?)\b"
+    r"olursa|belki|san[ıi]r[ıi]m|sak[ıi]n|asla|hiç(?:bir)?|"
+    r"galiba|muhtemelen)\b"
+)
+_CONDITIONAL_PERSON = (
+    r"(?:sa|se|sam|sem|san|sen|sak|sek|salar|seler|sınız|siniz|"
+    r"sunuz|sünüz|sanız|seniz)"
 )
 CONDITIONAL_WRITE = re.compile(
     r"\b(?:var|yok)(?:sa|se)\b|"
@@ -185,6 +198,7 @@ CONDITIONAL_WRITE = re.compile(
     r"sünüz|sanız|seniz)|"
     r"(?:ince|ınca|unca|ünce|diğinde|dığında|duğunda|düğünde|ken)|"
     r"madan|meden|madıkça|medikçe|s[ıiuü]z(?:sa|se))\b|"
+    rf"\b\w+m[ae]{_CONDITIONAL_PERSON}\b|"
     r"\b(?:takdirde|halinde|durumunda|sonra|kadar)\b"
 )
 ACTION_QUESTION_WORD = re.compile(
@@ -196,6 +210,10 @@ _NAMED_TARGET = re.compile(
     rf"{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_OBJECT})$"
 )
 _NAMED_FILENAME = re.compile(_WRITE_FILENAME)
+_SIMPLE_CONDITIONAL = re.compile(rf"\b\w+{_CONDITIONAL_PERSON}\b")
+_SIMPLE_CONDITIONAL_TARGET = re.compile(
+    rf"^(?P<name>[\w.-]+)\s+(?:dosyayı|{_WRITE_FOLDER_OBJECT})$"
+)
 
 
 @dataclass(frozen=True)
@@ -224,6 +242,12 @@ def _targeted_write_matches(pattern: re.Pattern[str], folded: str) -> bool:
     # grammar; punctuation such as an ellipsis remains prose.
     if "." in name:
         return _NAMED_FILENAME.fullmatch(name) is not None
+    simple_target = _SIMPLE_CONDITIONAL_TARGET.fullmatch(match.group("target"))
+    if (
+        simple_target is not None
+        and _SIMPLE_CONDITIONAL.fullmatch(simple_target.group("name")) is not None
+    ):
+        return False
     return not (
         NON_COMMITTAL_WRITE.fullmatch(name) is not None
         or CONDITIONAL_WRITE.fullmatch(name) is not None
@@ -414,6 +438,7 @@ def is_explicit_write_intent(text: str) -> bool:
     if (
         NON_COMMITTAL_WRITE.search(folded)
         or CONDITIONAL_WRITE.search(folded)
+        or _SIMPLE_CONDITIONAL.search(folded)
         or ACTION_QUESTION_WORD.search(folded)
     ):
         return False
