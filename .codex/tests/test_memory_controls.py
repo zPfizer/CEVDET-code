@@ -113,6 +113,11 @@ class MemoryDirectiveTests(unittest.TestCase):
             "src klasöründeki hatayı düzelt.",
             "src klasöründeki dosyayı güncelle.",
             "src klasöründeki dosyayı yazabilir misin?",
+            r"'C:\saklama.py'yi düzelt.",
+            r"'C:\unut.py'yi düzelt.",
+            r"'C:\read-only.py'yi düzelt.",
+            '"C:\\saklama.py"\'yi düzelt.',
+            '“C:\\saklama.py”\'yi düzelt.',
             r"C:\R&D\app.py dosyasını düzelt.",
             r"C:\R&D+v2\app.py dosyasını düzelt.",
             r"R&D\app.py dosyasını düzelt.",
@@ -207,6 +212,8 @@ class MemoryDirectiveTests(unittest.TestCase):
             r"src/ dosyasını düzelt.",
             r"Onaylansa C:\src\ klasörünü değiştir.",
             'Onaylansa "src" klasöründeki hatayı düzelt.',
+            '"Dockerfile"ı düzelt.',
+            '“Merhaba”yı düzenle.',
         ):
             with self.subTest(prompt=prompt):
                 self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
@@ -264,6 +271,15 @@ class MemoryDirectiveTests(unittest.TestCase):
             )
         )
         for prompt in (
+            r"'C:\saklama.py'yi düzelt. Do not modify files or settings.",
+            r"'C:\read-only.py'yi düzelt. Do not modify files or settings.",
+            '"C:\\saklama.py"\'yi düzelt. Do not modify files or settings.',
+            '“C:\\saklama.py”\'yi düzelt. Do not modify files or settings.',
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertTrue(memory_ledger.is_read_only_request(prompt))
+                self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
+        for prompt in (
             "read-only.py nedir?",
             r"src/read-only.py hakkında bilgi ver.",
             "salt-okunur.md içeriğini açıkla.",
@@ -277,6 +293,7 @@ class MemoryDirectiveTests(unittest.TestCase):
 
     def test_quoted_controls_are_content_but_outer_controls_still_apply(self) -> None:
         ordinary = [
+            "CEVDET'in profilini açıkla.",
             'Makalede “bu konuşmada kalsın” yazıyor. Bunu değerlendir.',
             'Yazar "bunu kaydetme" diyor; bu görüşü araştır.',
             'Yazar "bunu kaydetme, lütfen" diyor; bu görüşü araştır.',

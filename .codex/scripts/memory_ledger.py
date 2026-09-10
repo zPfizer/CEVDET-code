@@ -70,6 +70,8 @@ NON_PERSISTENT_DIRECTIVES = {
 }
 
 # These are quoted data, not requests. Keep the original text for target extraction.
+_QUOTED_CASE_SUFFIX = r"(?:['’]?y?[ıiuü])?"
+_QUOTED_CASE_SUFFIX_RE = re.compile(_QUOTED_CASE_SUFFIX)
 QUOTED_CONTENT = re.compile(
     r'(?ms:^[ \t]*(?P<fence>(?P<fence_char>`|~)(?P=fence_char){2,})[^\r\n]*\r?\n'
     r'(?P<fenced_body>.*?)(?:^[ \t]*(?P=fence)(?P=fence_char)*[ \t]*\r?$|\Z))|'
@@ -77,13 +79,16 @@ QUOTED_CONTENT = re.compile(
     # branch can be unwrapped as a whole-message read-only restriction.
     r'```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z)|'
     r'(?m:^[ \t]*>[^\n]*|^(?: {4}|\t)[^\n]*)|'
-    r'`[^`\n]*`|"[^"\n]*"|“[^”]*”|‘[^’]*’|«[^»]*»'
+    r'`[^`\n]*`' + _QUOTED_CASE_SUFFIX + r'|'
+    r'"[^"\n]*"' + _QUOTED_CASE_SUFFIX + r'|'
+    r'“[^”]*”' + _QUOTED_CASE_SUFFIX + r'|'
+    r'‘[^’]*’' + _QUOTED_CASE_SUFFIX + r'|'
+    r'«[^»]*»' + _QUOTED_CASE_SUFFIX
 )
 _QUOTE_PAIRS = (
     ("'", "'"), ('"', '"'), ("“", "”"), ("‘", "’"),
     ("`", "`"), ("«", "»"),
 )
-_QUOTED_CASE_SUFFIX = r"(?:['’]?y?[ıiuü])?"
 _QUOTED_DIRECTORY_PREFIX = (
     r"(?:[a-z]:[\\/]?|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]?|[\w.-]+[\\/])"
 )
@@ -545,9 +550,12 @@ def _unquoted_request(text: str) -> str:
             next_word = index + 1 < len(text) and (text[index + 1].isalnum() or text[index + 1] == '_')
             if start is None and not previous_word:
                 start = index
-            elif start is not None and not next_word:
-                output[start:index + 1] = ' ' * (index + 1 - start)
-                start = None
+            elif start is not None:
+                suffix = _QUOTED_CASE_SUFFIX_RE.match(text, index + 1)
+                end = suffix.end() if suffix is not None else index + 1
+                if end > index + 1 or not next_word:
+                    output[start:end] = ' ' * (end - start)
+                    start = None
     return ''.join(output).strip()
 
 
