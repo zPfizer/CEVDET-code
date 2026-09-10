@@ -128,8 +128,7 @@ _WRITE_QUESTION_VERB = (
     r"düzenleyebilir|düzenler|uygulayabilir|uygular|onarabilir|onarır)"
 )
 _TARGETED_WRITE_QUESTION_VERB = (
-    r"(?:düzeltebilir|düzeltir|değiştirebilir|değiştirir|"
-    r"düzenleyebilir|düzenler|uygulayabilir|uygular|onarabilir|onarır|"
+    rf"(?:{_WRITE_QUESTION_VERB}|"
     r"oluşturabilir|oluşturur|güncelleyebilir|günceller|yazabilir|yazar)"
 )
 _QUESTION_SUFFIX = r"m[ıiuü]s[ıiuü]n(?:iz|ız|uz|üz)?"
