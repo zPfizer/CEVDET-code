@@ -154,7 +154,7 @@ HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES = {
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
 CURRENT_QUERY_TERMS = frozenset({"current", "guncel", "latest", "active", "aktif"})
 CURRENT_QUERY_CUE = r"(?:current|guncel|latest|active|aktif)"
-CURRENT_HISTORY_CONNECTOR = re.compile(r"(?i)\b(?:with|versus|vs|compare|and|or|ve|to|ile)\b")
+CURRENT_HISTORY_CONNECTOR = re.compile(r"(?i)(?:[,;]|\b(?:with|versus|vs|compare|and|or|ve|to|ile)\b)")
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
     "work", "prefer", "response", "reply", "style", "profile",
@@ -256,6 +256,7 @@ HISTORY_DATE_QUESTION = re.compile(
     r"(?i)\btarih(?:i|in|ini|inin|ine|e|te|ten)?\b"
     r"(?:\W+\w+){0,3}\W+(?:nedir|ne|hangi|kac|goster|show|display)\b"
 )
+HISTORY_IDENTIFIER_YEAR = re.compile(r"(?i)(?:#|\b(?:ticket|port)\b)[\s#:/-]*$")
 
 
 @dataclass(frozen=True)
@@ -1370,6 +1371,8 @@ def _date_references(query: str) -> tuple[_HistoryDateReference, ...]:
         elif groups["my_year"] is not None:
             year, month, day = int(groups["my_year"]), HISTORY_MONTHS[groups["my_month"]], None
         else:
+            if HISTORY_IDENTIFIER_YEAR.search(normalized[:match.start()]):
+                continue
             value = _date_value(int(groups["year"]), 1, 1)
             bounds = None if value is None else (value, date(value.year, 12, 31))
             references.append(_HistoryDateReference(
@@ -1699,6 +1702,8 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     weak_ends = tuple(sorted(end for _start, end in weak_history_spans))
     candidates: list[tuple[bool, int, int, int, int]] = []
     for normalized_start, normalized_end, raw_start, raw_end in connector_spans:
+        if any(start < normalized_start < end for start, end in date_history_spans):
+            continue
         current_left = bisect_right(current_ends, normalized_start)
         current_right = len(current_starts) - bisect_left(current_starts, normalized_end)
         history_left = bisect_right(history_ends, normalized_start)

@@ -471,6 +471,8 @@ Eylül etiket denetimi.
             for query in (
                 "compare hook history with current deployment checklist",
                 "current deployment checklist compare hook history",
+                "current deployment checklist; historical hook records",
+                "current deployment checklist, historical hook records",
             ):
                 with self.subTest(query=query):
                     paths = [
@@ -508,6 +510,10 @@ Eylül etiket denetimi.
             "compare current checklist to hook history": (
                 "compare current checklist",
                 "hook history",
+            ),
+            "current deployment checklist with records September 10, 2030 history": (
+                "current deployment checklist",
+                "records September 10, 2030 history",
             ),
             "güncel checklist ile geçmiş kayıtlar": (
                 "güncel checklist",
@@ -565,6 +571,31 @@ Eylül etiket denetimi.
         self.assertIn("profile-active.md", paths)
         self.assertIn("profile-history.md", paths)
         self.assertLess(paths.index("profile-active.md"), paths.index("profile-history.md"))
+
+    def test_mixed_scope_preserves_uppercase_acronym_retrieval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write(
+                root,
+                "is-active.md",
+                "---\ntitle: IS\nstatus: active\ntype: note\n---\n# IS\nIS current protocol.\n",
+            )
+            _write(
+                root,
+                "is-history.md",
+                "---\ntitle: Historical IS\nstatus: historical\ntype: research-analysis\n---\n"
+                "# Historical IS\nIS historical protocol.\n",
+            )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            hits = retrieval.search_vault(
+                entries,
+                "compare current IS with historical IS",
+                top_k=3,
+            )
+
+        paths = [hit.entry.path for hit in hits]
+        self.assertIn("is-active.md", paths)
+        self.assertIn("is-history.md", paths)
 
     def test_ordinary_history_prefix_match_keeps_active_record_ahead_of_archived_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -735,6 +766,8 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "metal eskime testi": False,
             "geçmiş metal eskime testi": True,
             "past records": True,
+            "past records for ticket #2030": True,
+            "past records for port 8080": True,
             "show work that is past due": False,
             "show projects past deadline": False,
             "show projects past their deadline": False,
