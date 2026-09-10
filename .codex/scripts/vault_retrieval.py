@@ -162,7 +162,7 @@ HISTORY_CHANGE_QUERY = re.compile(
     r"(?:\s+\w+){0,5}\s+(?:should|must|can|will)\b)"
     r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
     r"|"
-    r"\bhow\s+(?:has|have|had)\s+(?:\w+\s+){1,5}changed\b"
+    r"\b(?:how|why|when|what)\s+(?:has|have|had|was|were)\s+(?:\w+\s+){1,5}changed\b"
     r"(?!\s+(?:in|to|from|with|about|between|since|after|over|for)\b"
     r"(?:\s+\w+){0,5}\s+(?:should|must|can|will)\b)"
     r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
@@ -180,6 +180,7 @@ HISTORY_CONTEXT_TERMS = frozenset({
     "degisim", "degisimler", "event", "events", "history", "histories", "kayit", "kayitlar",
     "log", "logs", "olay", "olaylar", "record", "records", "report", "reports",
     "timeline", "version", "versions", "surum", "surumler", "karar", "kararlar", "donem", "donemler",
+    "performance", "experience", "work", "result", "results", "project", "projects",
 })
 # `eskime` is the noun/verb form for tarnishing and must not be read as `eski` + suffix.
 HISTORY_DERIVATIONAL_HOMONYMS = frozenset({"eskime"})
@@ -1344,12 +1345,25 @@ def _before_date_status(
     return None if not statuses else any(statuses)
 
 
+def _before_relative_date_status(query: str) -> bool | None:
+    normalized = _normalize(query)
+    for marker in re.finditer(r"\bbefore\b", normalized):
+        suffix = normalized[marker.end():].lstrip(" ,;:()[]")
+        if re.match(r"(?:today|yesterday)\b(?!['’]s\b|\s+s\b)", suffix):
+            return True
+    return None
+
+
 def _past_date_status(query: str, query_terms: frozenset[str]) -> bool | None:
     """Return past/future status; None means the query contains no date."""
     today = date.today()
     if query:
         references = _date_references(query)
         if not references:
+            if "before" in query_terms:
+                relative = _before_relative_date_status(query)
+                if relative is not None:
+                    return relative
             return None
         if "before" in query_terms:
             adjacent = _before_date_status(query, references, today)
