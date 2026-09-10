@@ -1806,16 +1806,20 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     }
 
     def topic_terms(scope: str) -> list[str]:
+        scope_terms = _retrieval_terms(scope)
         terms = []
         for match in re.finditer(r"(?<!\w)[\w]+(?!\w)", scope):
-            token = _normalize(match[0])
-            if (
-                token in CURRENT_QUERY_TERMS
-                or token in HISTORY_QUERY_TERMS
-                or token in scope_connector_terms
-                or token in SCOPE_COMMAND_TERMS
-                or token.isdigit()
-                or any(_matches_history_inflection(token, root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
+            raw_terms = _tokens(match[0])
+            if not raw_terms or not any(term in scope_terms for term in raw_terms):
+                continue
+            if not all(
+                term not in CURRENT_QUERY_TERMS
+                and term not in HISTORY_QUERY_TERMS
+                and term not in scope_connector_terms
+                and term not in SCOPE_COMMAND_TERMS
+                and not term.isdigit()
+                and not any(_matches_history_inflection(term, root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
+                for term in raw_terms
             ):
                 continue
             terms.append(match[0])
@@ -1825,8 +1829,14 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     history_topic_terms = topic_terms(history_scope)
     if current_topic_terms and not history_topic_terms:
         history_scope = f"{history_scope} {' '.join(current_topic_terms)}"
+        history_terms = _retrieval_terms(history_scope)
+        if history_terms & CURRENT_QUERY_TERMS or not _is_history_query(history_terms, history_scope):
+            return None
     elif history_topic_terms and not current_topic_terms:
         current_scope = f"{current_scope} {' '.join(history_topic_terms)}"
+        current_terms = _retrieval_terms(current_scope)
+        if not current_terms & CURRENT_QUERY_TERMS or _is_history_query(current_terms, current_scope):
+            return None
     elif not current_topic_terms:
         return None
     return current_scope, history_scope
@@ -1844,6 +1854,25 @@ def _has_independent_current_cue(query: str) -> bool:
         match.span("current")
         for match in HISTORY_OBJECT_CURRENT_CUE.finditer(normalized)
     }
+    words = tuple(re.finditer(r"(?<!\w)[\w]+(?!\w)", normalized))
+    genitive_suffixes = HISTORY_QUERY_INFLECTION_CASE_SUFFIXES & {"in", "nin"}
+    for current_index, current_word in enumerate(words):
+        if current_word.group() not in CURRENT_QUERY_TERMS:
+            continue
+        for noun_index in range(current_index + 1, min(current_index + 4, len(words))):
+            noun = words[noun_index].group()
+            if not any(noun.endswith(suffix) for suffix in genitive_suffixes):
+                continue
+            for history_index in range(noun_index + 1, min(noun_index + 3, len(words))):
+                history_term = words[history_index].group()
+                if any(
+                    _matches_history_inflection(history_term, root)
+                    for root in ("gecmis", "tarihce")
+                ):
+                    related_current_spans.add(current_word.span())
+                    break
+            if current_word.span() in related_current_spans:
+                break
     return any(span not in related_current_spans for span in current_spans)
 
 

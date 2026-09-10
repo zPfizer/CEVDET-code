@@ -521,6 +521,26 @@ Eylül etiket denetimi.
                 "current work profiles",
                 "compare historical work profiles",
             ),
+            "compare the current and historical work profiles": (
+                "compare the current work profiles",
+                "historical work profiles",
+            ),
+            "compare the historical and the current work profiles": (
+                "the current work profiles",
+                "compare the historical work profiles",
+            ),
+            "compare historical and current IS": (
+                "current IS",
+                "compare historical IS",
+            ),
+            "compare the historical and current WorkProfile": (
+                "current WorkProfile",
+                "compare the historical WorkProfile",
+            ),
+            "compare the current and historical WorkProfile": (
+                "compare the current WorkProfile",
+                "historical WorkProfile",
+            ),
             "current deployment checklist with records September 10, 2030 history": (
                 "current deployment checklist",
                 "records September 10, 2030 history",
@@ -579,6 +599,8 @@ Eylül etiket denetimi.
             for query in (
                 "compare current and historical work profiles",
                 "compare historical and current work profiles",
+                "compare the current and historical work profiles",
+                "compare the historical and the current work profiles",
             ):
                 with self.subTest(query=query):
                     hits = retrieval.search_vault(entries, query, top_k=3)
@@ -593,11 +615,16 @@ Eylül etiket denetimi.
             "show the history of the current hook contract",
             "show the previous version of the current hook contract",
         )
-        for query in object_queries:
+        qualified_object_queries = object_queries + (
+            "güncel hook sözleşmesinin geçmişi",
+            "güncel hook sözleşmesinin geçmişini göster",
+        )
+        for query in qualified_object_queries:
             with self.subTest(query=query):
                 self.assertIsNone(retrieval._split_current_history_query(query))
                 self.assertFalse(retrieval._has_independent_current_cue(query))
         self.assertTrue(retrieval._has_independent_current_cue("current work profile history"))
+        self.assertTrue(retrieval._has_independent_current_cue("güncel work profile history"))
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
