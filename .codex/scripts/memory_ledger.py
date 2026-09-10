@@ -43,13 +43,17 @@ AUTHORIZATION = re.compile(
     r'''(?:"Bearer\s+(?:\\.|[^"\\\r\n])+"|'''
     r"""'Bearer\s+(?:\\.|[^'\\\r\n])+'|Bearer\s+[^\s\r\n]+)"""
 )
-_ENV_CREDENTIAL_NAME = r'(?:[A-Za-z0-9]+_)+(?:api[_-]?key|password|secret(?:_[A-Za-z0-9]+)*|token)'
+_ENV_CREDENTIAL_NAME = (
+    r'(?-i:(?:[A-Z][A-Z0-9]*_)*(?:API_KEY|ACCESS_KEY(?:_ID)?|PASSWORD|'
+    r'SECRET(?:_(?:ACCESS_)?KEY)?|(?:ACCESS|API|AUTH|CLIENT|CSRF|GITHUB|'
+    r'MY|OAUTH|REFRESH|SESSION|SERVICE)_TOKEN))'
+)
 CREDENTIAL_NAME = rf'api[_-]?key|password|secret|token|{_ENV_CREDENTIAL_NAME}'
 CREDENTIAL_NAME_RE = re.compile(rf'(?i)^(?:{CREDENTIAL_NAME})$')
 CREDENTIAL = re.compile(
     r'''(?im)(?P<prefix>(?P<key_quote>["']?)\b(?P<key>''' + CREDENTIAL_NAME + r''')'''
     r'''(?P=key_quote)\s*[:=]\s*)'''
-    r'''(?P<value>[{\[]|"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s\r\n]+)'''
+    r'''(?P<value>[{\[]|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^\s\r\n]+)'''
 )
 TOKEN_PREFIX = re.compile(r"\b(?:sk(?=[-_])|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
 PERSONAL_CREDENTIAL = re.compile(
@@ -675,6 +679,22 @@ def _balanced_value_end(text: str, start: int) -> int | None:
         length = min(length * 2, len(text) - start)
 
 
+def _quoted_credential_value_end(text: str, start: int) -> int | None:
+    quote = text[start:start + 1]
+    if quote not in {'"', "'"}:
+        return None
+    escaped = False
+    for index in range(start + 1, len(text)):
+        character = text[index]
+        if escaped:
+            escaped = False
+        elif character == '\\':
+            escaped = True
+        elif character == quote:
+            return index + 1
+    return None
+
+
 def _json_regions(text: str) -> Iterator[tuple[int, int]]:
     """Validated JSON containers and complete top-level JSON strings."""
     decoder = json.JSONDecoder()
@@ -941,6 +961,11 @@ def sanitize_text(
             cursor = json_string[1]
             continue
         end = match.end()
+        if text[match.start('value')] in {'"', "'"}:
+            quoted_end = _quoted_credential_value_end(text, match.start('value'))
+            if quoted_end is None:
+                raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+            end = max(end, quoted_end)
         if text[match.start('value')] in '{[':
             quoted_field = False
             try:

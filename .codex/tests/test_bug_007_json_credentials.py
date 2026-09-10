@@ -340,6 +340,51 @@ class Bug007JsonCredentialTests(unittest.TestCase):
             [('user', 'Sonraki karar.')],
         )
 
+    def test_environment_credential_values_consume_multiline_quotes(self) -> None:
+        text = (
+            'DATABASE_PASSWORD="first line\nP02_DATABASE_PASSWORD_MULTILINE_CANARY\nlast line"\n'
+            "MY_TOKEN='first line\nP02_MY_TOKEN_MULTILINE_CANARY\nlast line'\n"
+            'AWS_SECRET_ACCESS_KEY="first line\r\nP02_AWS_SECRET_ACCESS_KEY_MULTILINE_CANARY\r\nlast line"\n'
+            'keep=ordinary'
+        )
+
+        sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+
+        self.assertEqual(
+            sanitized,
+            'DATABASE_PASSWORD=<REDACTED>\n'
+            'MY_TOKEN=<REDACTED>\n'
+            'AWS_SECRET_ACCESS_KEY=<REDACTED>\n'
+            'keep=ordinary',
+        )
+        self.assertEqual(redactions, ('credential',))
+        self.assertNotIn('MULTILINE_CANARY', sanitized)
+
+    def test_unterminated_multiline_credential_quote_fails_closed(self) -> None:
+        text = 'DATABASE_PASSWORD="first line\nP02_UNTERMINATED_CANARY\nlast line'
+
+        with self.assertRaisesRegex(
+            ledger.MemoryPreferenceError,
+            '^memory-credential-container-unverifiable$',
+        ):
+            ledger.sanitize_text(text, max_chars=None)
+
+    def test_normal_suffixed_identifiers_are_not_secrets(self) -> None:
+        for text in (
+            'max_token=4096',
+            'expected_claim_token=claim-value',
+            'MAX_TOKEN=4096',
+            'EXPECTED_CLAIM_TOKEN=claim-value',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(ledger.sanitize_text(text, max_chars=None), (text, ()))
+                self.assertFalse(ledger.contains_secret(text))
+                self.assertEqual(ledger.memory_directive(text).kind, 'ordinary')
+                self.assertEqual(
+                    ledger.persistent_turns([('user', text), ('assistant', 'ordinary reply')]),
+                    [('user', text), ('assistant', 'ordinary reply')],
+                )
+
     def test_quoted_authorization_keys_use_the_existing_authorization_redaction(self) -> None:
         text = (
             'Authorization: Bearer plain-auth; '
