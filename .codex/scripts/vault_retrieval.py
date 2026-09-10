@@ -162,12 +162,12 @@ HISTORY_CHANGE_QUERY = re.compile(
     r"(?:\s+\w+){0,5}\s+(?:should|must|can|will)\b)"
     r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
     r"|"
-    r"\b(?:how|why|when|what)\s+(?:has|have|had|was|were)\s+(?:\w+\s+){1,5}changed\b"
+    r"\b(?:(?:how|why|when|what)\s+)?(?:has|have|had|was|were)\s+(?:\w+\s+){1,5}changed\b"
     r"(?!\s+(?:in|to|from|with|about|between|since|after|over|for)\b"
     r"(?:\s+\w+){0,5}\s+(?:should|must|can|will)\b)"
     r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
     r"|"
-    r"\b(?:how|why|what|when)\s+did\s+(?:\w+\s+){1,5}change\b"
+    r"\b(?:(?:how|why|what|when)\s+)?did\s+(?:\w+\s+){1,5}change\b"
     r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
     r"|"
     r"\b(?:ne|neler|nasil|neden)\b(?:\s+\w+){0,3}?\s+\bdegisti\b"
@@ -182,6 +182,7 @@ HISTORY_CONTEXT_TERMS = frozenset({
     "timeline", "version", "versions", "surum", "surumler", "karar", "kararlar", "donem", "donemler",
     "performance", "experience", "work", "result", "results", "project", "projects",
 })
+HISTORY_DIRECTIONAL_PAST = re.compile(r"(?i)\bpast(?:\s+the)?\s+(?:due|deadline)\b")
 # `eskime` is the noun/verb form for tarnishing and must not be read as `eski` + suffix.
 HISTORY_DERIVATIONAL_HOMONYMS = frozenset({"eskime"})
 HISTORY_MONTHS = {
@@ -1393,12 +1394,13 @@ def _has_history_context(query: str) -> bool:
     if not query:
         return False
     context_terms = "|".join(map(re.escape, sorted(HISTORY_CONTEXT_TERMS, key=len, reverse=True)))
+    query = HISTORY_DIRECTIONAL_PAST.sub(" ", _normalize(query))
     return re.search(
         rf"(?ix)(?:"
         rf"\b(?:past|previous)\b(?:\W+\w+){{0,2}}\W+\b(?:{context_terms})\b"
         rf"|\b(?:{context_terms})\b(?:\W+\w+){{0,2}}\W+\b(?:past|previous)\b"
         rf")",
-        _normalize(query),
+        query,
     ) is not None
 
 
