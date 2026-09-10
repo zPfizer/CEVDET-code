@@ -85,7 +85,7 @@ _QUOTE_PAIRS = (
 )
 _QUOTED_CASE_SUFFIX = r"(?:['’]?y?[ıiuü])?"
 _QUOTED_DIRECTORY_PREFIX = (
-    r"(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])"
+    r"(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]?|[\w.-]+[\\/])"
 )
 DO_NOT_SAVE = r'(?:(?:bunu|bu bilgiyi|bu ayrıntıyı)\s+)?(?:kaydetme|saklama|hafızana alma|hafızanda tutma|kaydetmeni istemiyorum)'
 STANDALONE_DO_NOT_SAVE = (
@@ -166,7 +166,7 @@ _QUOTED_DIRECTORY = (
     "(?:"
     + "|".join(
         rf"{re.escape(opening)}{_QUOTED_DIRECTORY_PREFIX}"
-        rf"[^{re.escape(closing)}\r\n]+?{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
+        rf"[^{re.escape(closing)}\r\n]*?{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
         for opening, closing in _QUOTE_PAIRS
     )
     + ")"
@@ -186,7 +186,7 @@ _WRITE_TARGET = (
     rf"{_QUOTED_PATH}{_WRITE_TARGET_SUFFIX}|"
     rf"{_QUOTED_FILENAME}\s+{_WRITE_FILE_OBJECT})"
 )
-_TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen|ok|okay|tamam)(?:[,;:]\s++|\s++))*"
+_TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen|ok|okay|tamam|sonra)(?:[,;:]\s++|\s++))*"
 _TRAILING_POLITENESS = r"(?:(?:\s*+,\s*+|\s++)lütfen)?"
 # ponytail: only this test-running suffix; broader compound sentences need shared sentence parsing.
 _WRITE_FOLLOWUP = r"(?:\s+ve\s+testleri\s+çalıştır|[.!]\s+sonra\s+testleri\s+çalıştır)?"

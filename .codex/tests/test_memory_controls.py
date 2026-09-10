@@ -36,6 +36,8 @@ class MemoryDirectiveTests(unittest.TestCase):
     def test_all_supported_quoted_target_pairs_keep_bounds(self) -> None:
         path = r"C:\Users\Me\My Project\app.py"
         directory = r"C:\Program Files (x86)\Project / R&D"
+        unc_root = r"\\server\share"
+        unc_single_share = r"\\server\x"
         for opening, closing in memory_ledger._QUOTE_PAIRS:
             with self.subTest(opening=opening, closing=closing):
                 for target in ("app.py", path):
@@ -49,11 +51,12 @@ class MemoryDirectiveTests(unittest.TestCase):
                             f"{opening}{target}{closing} dosyasını düzelt."
                         )
                     )
-                self.assertTrue(
-                    memory_ledger.is_explicit_write_intent(
-                        f"{opening}{directory}{closing} klasörünü değiştir."
+                for target in (directory, unc_root, unc_single_share):
+                    self.assertTrue(
+                        memory_ledger.is_explicit_write_intent(
+                            f"{opening}{target}{closing} klasörünü değiştir."
+                        )
                     )
-                )
                 self.assertFalse(
                     memory_ledger.is_explicit_write_intent(
                         f"{opening}app.py dosyasını düzelt.{closing}"
@@ -252,6 +255,7 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Kaç dosyayı düzeltebilir misin?",
             "Borsa dosyasındaki hatayı düzelt.",
             "Borsa dosyasını düzelt.",
+            "Onaydan sonra src/app.py dosyasını düzelt.",
             "Onay yoksa dosyayı düzelt.",
             "Onay varsa dosyayı düzelt.",
             "Yoksa BIB projesindeki hatayı düzelt.",
@@ -315,6 +319,8 @@ class MemoryDirectiveTests(unittest.TestCase):
             "ne.py dosyasını düzelt.",
             "app.v1.py dosyasını düzelt.",
             "src/app.py dosyasını düzelt, lütfen.",
+            "Sonra dosyayı düzelt.",
+            "Sonra src/app.py dosyasını düzelt.",
             r'\\server\share\app.py dosyasını düzelt.',
             r'\\server-name\share.name\nested\app.py dosyasını düzelt.',
             "Tamam, src/app.py dosyasını düzelt.",

@@ -545,6 +545,8 @@ class ConversationContinuityTests(unittest.TestCase):
             '“app.py” dosyasını düzelt.',
             '‘app.py’ dosyasını düzelt.',
             '‘C:\\Users\\Me\\My Project\\app.py’yi düzelt.',
+            'Sonra dosyayı düzelt.',
+            'Sonra src/app.py dosyasını düzelt.',
             'src/app.py dosyasını düzelt, lütfen.',
             "src/app.py'yi düzelt.",
             'src/app.py dosyasını düzelt ve testleri çalıştır.',
@@ -577,6 +579,7 @@ class ConversationContinuityTests(unittest.TestCase):
             "Lütfen dosyayı değiştiriniz.",
             '"LICENSE" dosyasını düzenle.',
             '"C:\\Program Files (x86)\\Project / R&D" klasörünü değiştir.',
+            '"\\\\server\\share" klasörünü değiştir.',
         ):
             with self.subTest(prompt=prompt):
                 self._check_explicit_write_prompt_reopens_read_only_scope(prompt)
@@ -630,6 +633,7 @@ class ConversationContinuityTests(unittest.TestCase):
             'Kaç dosyayı düzeltebilir misin?',
             'Borsa dosyasındaki hatayı düzelt.',
             'Borsa dosyasını düzelt.',
+            'Onaydan sonra src/app.py dosyasını düzelt.',
             'Onay yoksa dosyayı düzelt.',
             'Onay varsa dosyayı düzelt.',
             'Yoksa BIB projesindeki hatayı düzelt.',
