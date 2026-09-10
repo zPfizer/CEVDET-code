@@ -511,7 +511,235 @@ class ConversationContinuityTests(unittest.TestCase):
         self.assertEqual(results[1], (0, {'continue': True}, 0, True))
 
     def test_explicit_write_prompt_reopens_read_only_scope(self):
-        self._check_explicit_write_prompt_reopens_read_only_scope('Ok yap.')
+        for prompt in (
+            'Ok yap.',
+            'Tamam. Uygula.',
+            'Tamam. sırayla hepsini yap.',
+            'Projedeki ayarı güncelle.',
+            'Değiştirebilirsin.',
+            'Düzenleyebilirsin.',
+            'Uygulayabilirsin.',
+        ):
+            with self.subTest(prompt=prompt):
+                self._check_explicit_write_prompt_reopens_read_only_scope(prompt)
+
+    def test_natural_action_question_reopens_read_only_scope(self):
+        for prompt in (
+            'Düzeltebilir misin?',
+            'Dosyaları değiştirebilir misin?',
+            'Dosyaları değiştirebilir misiniz?',
+        ):
+            with self.subTest(prompt=prompt):
+                self._check_explicit_write_prompt_reopens_read_only_scope(prompt)
+
+    def test_targeted_fix_command_reopens_read_only_scope(self):
+        for prompt in (
+            'BIB projesindeki hatayı düzelt.',
+            'Atlas projesindeki hatayı düzelt.',
+            'src/app.py dosyasını düzelt.',
+            'Atlas modülündeki hatayı düzelt.',
+            'Borsa.md dosyasını düzelt.',
+            'Dosyamı düzelt.',
+            'Dosyanı düzelt.',
+            "README.md'deki hatayı düzelt.",
+            "read-only.py'yi düzelt.",
+            "unut.py'yi düzelt.",
+            "saklama.py'yı düzelt.",
+            "read-only.py'deki hatayı düzelt.",
+            "unut.py'deki hatayı düzelt.",
+            "saklama.py'daki hatayı düzelt.",
+            r"'C:\Users\O'Brien\app.py' dosyasını düzelt.",
+            r"'C:\Users\O'Brien\app.py'yi düzelt.",
+            'Tamam. Dosyayı düzelt.',
+            'Okay. src/app.py dosyasını düzelt.',
+            'Tamam! Dosyayı düzelt.',
+            'Lütfen. src/app.py dosyasını düzelt.',
+            'Tamam.py dosyasını düzelt.',
+            'unut.py dosyasını düzelt.',
+            'saklama.py dosyasını düzelt.',
+            r"'C:\saklama.py'yi düzelt.",
+            r"'C:\unut.py'yi düzelt.",
+            r"'C:\read-only.py'yi düzelt.",
+            r"'C:\saklama.py'YI düzelt.",
+            r"'C:\read-only.py''yi düzelt.",
+            '"C:\\saklama.py"\'yi düzelt.',
+            '“C:\\saklama.py”\'yi düzelt.',
+            'src klasöründeki hatayı düzelt.',
+            r'C:\R&D\app.py dosyasını düzelt.',
+            'Lütfen src/app.py dosyasını düzelt.',
+            'src/app.py dosyasındaki hatayı düzelt.',
+            'parse.py dosyasını düzelt.',
+            'ne.py dosyasını düzelt.',
+            'sence.py dosyasını düzelt.',
+            'app.v1.py dosyasını düzelt.',
+            '"Dockerfile" dosyasını düzelt.',
+            '"Dockerfile" dosyasındaki hatayı düzelt.',
+            '"src" klasöründeki hatayı düzelt.',
+            '“app.py” dosyasını düzelt.',
+            '‘app.py’ dosyasını düzelt.',
+            '‘C:\\Users\\Me\\My Project\\app.py’yi düzelt.',
+            'Sonra dosyayı düzelt.',
+            'Sonra src/app.py dosyasını düzelt.',
+            'src/app.py dosyasını düzelt, lütfen.',
+            "src/app.py'yi düzelt.",
+            'src/app.py dosyasını düzelt ve testleri çalıştır.',
+            'src/app.py dosyasını düzelt. Sonra testleri çalıştır.',
+            r'\\server\share\app.py dosyasını düzelt.',
+            r'\\server-name\share.name\nested\app.py dosyasını düzelt.',
+            'Tamam, src/app.py dosyasını düzelt.',
+            'Okay, src/app.py dosyasını düzelt.',
+            'Lütfen, src/app.py dosyasını düzelt.',
+            '"C:\\Users\\Me\\My Project\\app.py"\'yi düzelt.',
+            r"'C:\Users\Me\My Project\app.py'yi düzelt.",
+            '"C:\\Users\\Me\\My Project\\app.py" dosyasını düzelt.',
+            '"app.py" dosyasını düzelt.',
+            '"My File.py" dosyasını düzelt.',
+        ):
+            with self.subTest(prompt=prompt):
+                self._check_explicit_write_prompt_reopens_read_only_scope(
+                    prompt, expect_prompt_enqueue=True
+                )
+
+    def test_targeted_case_suffix_write_prompt_reopens_read_only_scope(self):
+        for prompt in (
+            "README.md'yi düzenle.",
+            "pyproject.toml'u değiştir.",
+            '"C:\\Users\\Me\\My Project" klasörünü değiştir.',
+            "src klasörü değiştir.",
+            ".gitignore dosyasını düzenle.",
+            ".env dosyasını değiştir.",
+            "src/app.py dosyasını düzeltin.",
+            "Lütfen dosyayı değiştiriniz.",
+            '"LICENSE" dosyasını düzenle.',
+            '"C:\\Program Files (x86)\\Project / R&D" klasörünü değiştir.',
+            '"\\\\server\\share" klasörünü değiştir.',
+            '"src" klasörünü değiştir.',
+            '“My Project” klasörünü güncelle.',
+            r'C:\ klasörünü değiştir.',
+            r'\\server\share klasörünü değiştir.',
+            r'C:\src\ klasörünü değiştir.',
+            r'src/ klasörünü değiştir.',
+            r'\\server\share\src\ klasörünü değiştir.',
+            r"'O'Brien' klasörünü değiştir.",
+            r"'C:\Users\O'Brien\Project' klasörünü değiştir.",
+        ):
+            with self.subTest(prompt=prompt):
+                self._check_explicit_write_prompt_reopens_read_only_scope(prompt)
+
+    def test_conditional_targeted_commands_keep_read_only_scope(self):
+        for prompt in (
+            'Onay verirsem BIB projesindeki hatayı düzelt.',
+            'Onay verdiysem BIB projesindeki hatayı düzelt.',
+            'Onayım varsa BIB projesindeki hatayı düzelt.',
+            'Onaylıysa BIB projesindeki hatayı düzelt.',
+            'Onaylıysa projesindeki hatayı düzelt.',
+            'Gerekirse modüldeki hatayı düzelt.',
+            'Onay olduğu takdirde BIB projesindeki hatayı düzelt.',
+            'Onay gelince BIB projesindeki hatayı düzelt.',
+            'Onaydan sonra BIB projesindeki hatayı düzelt.',
+            'Onay gelene kadar BIB projesindeki hatayı düzelt.',
+            'Onay yokken BIB projesindeki hatayı düzelt.',
+            'Onaylıysa dosyayı düzelt.',
+            'Onaylamadan düzeltme; sadece açıklama yap.',
+            'Hangi dosyayı düzeltebilir misin?',
+            'Hangi dosyayı düzelt.',
+            'Tamam? Dosyayı düzelt.',
+            'Onaylansa Tamam. Dosyayı düzelt.',
+            'Tamam. Dosyayı düzelt. Do not modify files or settings.',
+            "Onaylansa README.md'deki hatayı düzelt.",
+            "read-only.py'yi düzelt. Do not modify files or settings.",
+            "read-only.py'deki hatayı düzelt. Do not modify files or settings.",
+            "Onaylansa read-only.py'yi düzelt.",
+            "Onaylansa read-only.py'deki hatayı düzelt.",
+            r"Onaylansa 'C:\Users\O'Brien\app.py' dosyasını düzelt.",
+            r"'C:\Users\O'Brien\app.py' dosyasını düzelt. Do not modify files or settings. 'not'",
+            'Sence dosyayı düzeltebilir misin?',
+            'Sence dosyayı düzeltir misin?',
+            'Sizce dosyayı düzeltebilir misiniz?',
+            'Sakın dosyayı düzelt.',
+            'Asla dosyadaki hatayı düzelt.',
+            'SAKIN dosyayı düzelt.',
+            'SANIRIM dosyayı düzelt.',
+            'Onaylıysa... dosyayı düzelt.',
+            'Gerekirse... dosyayı düzelt.',
+            'Sakın... dosyayı düzelt.',
+            'Hiçbir dosyayı düzelt.',
+            'Lütfen hiçbir dosyayı düzelt.',
+            'Hiç dosyayı düzelt.',
+            'Onaylanmadıkça dosyayı düzelt.',
+            'Gerekmedikçe dosyayı düzelt.',
+            'Onaysızsa dosyayı düzelt.',
+            'Onaylanmadıkça BIB projesindeki hatayı düzelt.',
+            'Gerekmedikçe Atlas modülündeki hatayı düzelt.',
+            'Onaysızsa src/app.py dosyasını düzelt.',
+            'Çalışmazsa dosyayı düzelt.',
+            'Gelmezse dosyayı düzelt.',
+            'Çalışmazsam BIB projesindeki hatayı düzelt.',
+            'Çalışmazsanız dosyayı düzelt.',
+            'Yoksa dosyayı düzelt.',
+            'Varsa dosyayı düzelt.',
+            'Onaylansa dosyayı düzelt.',
+            'Onaylansa projedeki ayarı güncelle.',
+            'Hangi projedeki ayarı güncelle.',
+            'Gelse dosyayı düzelt.',
+            'Onaylanmasa dosyayı düzelt.',
+            'Onaylansam dosyayı düzelt.',
+            'Onaylanmasam dosyayı düzelt.',
+            'Galiba dosyayı düzelt.',
+            'Muhtemelen dosyayı düzelt.',
+            'Kaç dosyayı düzeltebilir misin?',
+            'Borsa dosyasındaki hatayı düzelt.',
+            'Borsa dosyasını düzelt.',
+            'Onaydan sonra src/app.py dosyasını düzelt.',
+            'Onay yoksa dosyayı düzelt.',
+            'Onay varsa dosyayı düzelt.',
+            'Yoksa BIB projesindeki hatayı düzelt.',
+            'Varsa Atlas modülündeki hatayı düzelt.',
+            'Yoksa klasörünü değiştir.',
+            'Onaylıysa klasörünü değiştir.',
+            'Sakın klasörünü değiştir.',
+            r'Onaylanmadıkça \\server\share\app.py dosyasını düzelt.',
+            r'Sakın \\server\share\app.py dosyasını düzelt.',
+            'Lütfen read-only/modda dosyayı düzelt.',
+            r'R&D\read-only dosyayı düzelt.',
+            r'Onaylansa C:\ klasörünü değiştir.',
+            r"'C:\saklama.py'yi düzelt. Do not modify files or settings.",
+            r"'C:\read-only.py''yi düzelt. Do not modify files or settings. “başka örnek”",
+            '"C:\\saklama.py"\'yi düzelt. Do not modify files or settings.',
+            r'src/ dosyasını düzelt.',
+            r'Onaylansa C:\src\ klasörünü değiştir.',
+            'Onaylansa "src" klasöründeki hatayı düzelt.',
+            'src/app.py dosyasını düzelt ve testleri çalıştır. Do not modify files or settings.',
+        ):
+            with self.subTest(prompt=prompt):
+                self._check_write_prompt_keeps_read_only_scope(prompt)
+
+    def test_unbounded_natural_language_targets_keep_read_only_scope(self):
+        for prompt in (
+            'Yanıtındaki kodu düzelt.',
+            'Bu cümledeki hatayı düzelt.',
+            'Komut örneği olarak Atlas projesindeki hatayı düzelt.',
+            '"C:\\Users\\Me\\My Project\\app.py dosyasını düzelt."',
+            '"Dockerfile dosyasını düzelt."',
+            '"LICENSE dosyasını düzenle."',
+            '“src/app.py dosyasını düzelt ve testleri çalıştır.”',
+            '‘src/app.py dosyasını düzelt. Sonra testleri çalıştır.’',
+            '"Bunu düzelt."',
+            '"Dockerfile"ı düzelt.',
+            '“Merhaba”yı düzenle.',
+            '"app.py dosyasını düzelt."',
+        ):
+            with self.subTest(prompt=prompt):
+                self._check_write_prompt_keeps_read_only_scope(prompt)
+
+    def test_chat_output_requests_keep_read_only_scope(self):
+        for prompt in (
+            'Yanıtı buraya yaz.',
+            'Bana kısa bir şiir yaz.',
+            'Yazabilirsin.',
+        ):
+            with self.subTest(prompt=prompt):
+                self._check_write_prompt_keeps_read_only_scope(prompt)
 
     def test_natural_ordered_write_prompt_reopens_read_only_scope(self):
         self._check_explicit_write_prompt_reopens_read_only_scope('Sırayla hepsini yap')
@@ -540,6 +768,29 @@ class ConversationContinuityTests(unittest.TestCase):
                 self.assertTrue(memory_ledger.is_read_only_turn(state, 'quoted-rule'))
                 enqueue.assert_not_called()
 
+    def test_same_prompt_read_only_wins_over_action_question(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / '.codex/scripts/.state'
+            memory_ledger.mark_read_only_turn(state, 'audit')
+            payload = {
+                'session_id': 'audit',
+                'prompt': 'Düzeltebilir misin? Do not modify files or settings.',
+            }
+            with (
+                mock.patch.object(hook, 'VAULT_ROOT', vault),
+                mock.patch.object(hook, 'STATE_DIR', state),
+                mock.patch.object(hook, 'handle_user_prompt', return_value=''),
+                mock.patch.object(hook, 'enqueue_flush') as enqueue,
+                mock.patch.object(hook, 'record_hook_runtime'),
+                mock.patch.object(hook, 'clear_hook_health'),
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))),
+                mock.patch.object(sys, 'stdout', io.StringIO()),
+            ):
+                self.assertEqual(hook.main(['user-prompt']), 0)
+            self.assertTrue(memory_ledger.is_read_only_turn(state, 'audit'))
+            enqueue.assert_not_called()
+
     def test_full_message_fences_are_read_only_but_embedded_or_quoted_text_is_not(self):
         fenced = (
             '```text\nAudit only. Do not modify files or settings.\n```',
@@ -558,6 +809,7 @@ class ConversationContinuityTests(unittest.TestCase):
             '```text\n```text\nDo not modify files or settings.\n```\n```',
             '"Do not modify files or settings." Explain this.',
             '```text\nOk yap.\n```',
+            '```text\n"C:\\Users\\Me\\My Project" klasörünü değiştir.\n```',
             '~~~\r\nSırayla hepsini yap\r\n~~~',
             '```text\nŞunu unut: Ankara.\n```',
             '```text\n"Ok yap."\n```',
@@ -656,7 +908,9 @@ class ConversationContinuityTests(unittest.TestCase):
                     enqueue.assert_not_called()
                     reflect.assert_not_called()
 
-    def _check_explicit_write_prompt_reopens_read_only_scope(self, prompt):
+    def _check_explicit_write_prompt_reopens_read_only_scope(
+        self, prompt, *, expect_prompt_enqueue=False
+    ):
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
             from test_profile_guard import seed_profile
@@ -695,6 +949,12 @@ class ConversationContinuityTests(unittest.TestCase):
             ):
                 self.assertEqual(hook.main(['user-prompt']), 0)
             self.assertFalse(memory_ledger.is_read_only_turn(state, 'audit'))
+            if expect_prompt_enqueue:
+                enqueue.assert_called_once()
+                self.assertEqual(enqueue.call_args.args, (payload, 'precompact'))
+                self.assertIn('deadline', enqueue.call_args.kwargs)
+            else:
+                enqueue.assert_not_called()
 
             output = io.StringIO()
             with (
@@ -706,10 +966,29 @@ class ConversationContinuityTests(unittest.TestCase):
             ):
                 self.assertEqual(hook.main(['turn-end', '--strict']), 0)
 
-        enqueue.assert_not_called()
         enqueue_end.assert_called_once()
         self.assertEqual(enqueue_end.call_args.args, (payload, 'turnend'))
         self.assertIn('deadline', enqueue_end.call_args.kwargs)
+
+    def _check_write_prompt_keeps_read_only_scope(self, prompt):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / '.codex/scripts/.state'
+            memory_ledger.mark_read_only_turn(state, 'audit')
+            payload = {'session_id': 'audit', 'prompt': prompt}
+            with (
+                mock.patch.object(hook, 'VAULT_ROOT', vault),
+                mock.patch.object(hook, 'STATE_DIR', state),
+                mock.patch.object(hook, 'handle_user_prompt', return_value=''),
+                mock.patch.object(hook, 'enqueue_flush') as enqueue,
+                mock.patch.object(hook, 'record_hook_runtime'),
+                mock.patch.object(hook, 'clear_hook_health'),
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))),
+                mock.patch.object(sys, 'stdout', io.StringIO()),
+            ):
+                self.assertEqual(hook.main(['user-prompt']), 0)
+            self.assertTrue(memory_ledger.is_read_only_turn(state, 'audit'))
+            enqueue.assert_not_called()
 
     def test_read_only_scope_blocks_mixed_forget_write_but_keeps_direct_forget_explicit(self):
         with tempfile.TemporaryDirectory() as temporary:

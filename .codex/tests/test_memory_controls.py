@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -14,8 +16,343 @@ import vault_retrieval  # noqa: E402
 
 
 class MemoryDirectiveTests(unittest.TestCase):
+    def test_long_write_intent_whitespace_is_bounded(self) -> None:
+        script = (
+            "import sys; sys.path.insert(0, '.codex/scripts'); "
+            "import memory_ledger as ledger; "
+            "assert not ledger.is_explicit_write_intent('Lütfen' + ' ' * 12000 + '?'); "
+            "assert not ledger.is_explicit_write_intent('src/app.py dosyasını düzelt' + ' ' * 12000 + '?'); "
+            "assert ledger.is_explicit_write_intent('src/app.py dosyasını düzelt, ' + ' ' * 12000 + 'lütfen.'); "
+            "assert ledger.is_read_only_request('a' * 100000 + ' read-only dosyayı düzelt.'); "
+            "assert not ledger.is_read_only_request(('read-only-' * 10000) + 'file.py dosyasını düzelt.'); "
+            "assert not ledger.is_read_only_request('/' * 100000)"
+        )
+        subprocess.run(
+            [sys.executable, "-X", "utf8", "-c", script],
+            cwd=CODEX_DIR.parent,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+    def test_all_supported_quoted_target_pairs_keep_bounds(self) -> None:
+        path = r"C:\Users\Me\My Project\app.py"
+        directory = r"C:\Program Files (x86)\Project / R&D"
+        drive_relative_directory = r"C:Program Files\Project"
+        unc_root = r"\\server\share"
+        unc_single_share = r"\\server\x"
+        for opening, closing in memory_ledger._QUOTE_PAIRS:
+            with self.subTest(opening=opening, closing=closing):
+                for target in ("app.py", path):
+                    self.assertTrue(
+                        memory_ledger.is_explicit_write_intent(
+                            f"{opening}{target}{closing}yi düzelt."
+                        )
+                    )
+                    self.assertTrue(
+                        memory_ledger.is_explicit_write_intent(
+                            f"{opening}{target}{closing} dosyasını düzelt."
+                        )
+                    )
+                for target in (
+                    directory,
+                    drive_relative_directory,
+                    unc_root,
+                    unc_single_share,
+                ):
+                    self.assertTrue(
+                        memory_ledger.is_explicit_write_intent(
+                            f"{opening}{target}{closing} klasörünü değiştir."
+                        )
+                    )
+                self.assertFalse(
+                    memory_ledger.is_explicit_write_intent(
+                        f"{opening}app.py dosyasını düzelt.{closing}"
+                    )
+                )
+                self.assertFalse(
+                    memory_ledger.is_explicit_write_intent(
+                        f"Onaylıysa {opening}app.py{closing} dosyasını düzelt."
+                    )
+                )
+        for fence in ("```", "~~~"):
+            self.assertFalse(
+                memory_ledger.is_explicit_write_intent(
+                    f"{fence}text\napp.py dosyasını düzelt.\n{fence}"
+                )
+            )
+
+    def test_targeted_creation_update_write_and_root_relative_paths(self) -> None:
+        for prompt in (
+            "src/new.py dosyasını oluştur.",
+            "README.md dosyasını güncelle.",
+            "src/new.py dosyasını yaz.",
+            "src/new.py dosyasını oluşturabilir misin?",
+            "README.md dosyasını güncelleyebilir misin?",
+            "src/new.py dosyasını yazabilir misin?",
+            "rapor.şablon dosyasını düzelt.",
+            "rapor.şablon dosyasını oluştur.",
+            '"C:\\Temp\\rapor.şablon"yi düzelt.',
+            "kimin.py dosyasını düzelt.",
+            r"src/kimin dosyasını düzelt.",
+            "Kimya dosyasını düzeltebilir misin?",
+            "Herhalde.py dosyasını düzelt.",
+            r"src/herhalde dosyasını düzelt.",
+            "unut.py dosyasını düzelt.",
+            "saklama.py dosyasını düzelt.",
+            "düzelt.py dosyasını düzelt.",
+            "niye.py dosyasını düzelt.",
+            r"src/niye dosyasını düzelt.",
+            "sence.py dosyasını düzelt.",
+            "Projeyi düzelt.",
+            "Atlas projesini güncelle.",
+            "Atlas projesini güncelleyebilir misin?",
+            "Atlas projesindeki ayarı güncelle.",
+            "Projedeki ayarı güncelle.",
+            "Atlas modülündeki dosyayı yazabilir misin?",
+            "src klasöründeki hatayı düzelt.",
+            "src klasöründeki dosyayı güncelle.",
+            "src klasöründeki dosyayı yazabilir misin?",
+            "Dosyamı düzelt.",
+            "Dosyanı düzelt.",
+            "Ayarımı değiştir.",
+            "README.md'deki hatayı düzelt.",
+            "README.md'daki hatayı düzelt.",
+            "README.md'teki hatayı düzelt.",
+            "README.md'taki hatayı düzelt.",
+            "README.md’deki hatayı düzelt.",
+            "read-only.py'yi düzelt.",
+            "unut.py'yi düzelt.",
+            "saklama.py'yı düzelt.",
+            "read-only.py'deki hatayı düzelt.",
+            "unut.py'deki hatayı düzelt.",
+            "saklama.py'daki hatayı düzelt.",
+            r"'C:\Users\O'Brien\app.py' dosyasını düzelt.",
+            r"'C:\Users\O'Brien\app.py'yi düzelt.",
+            r"'O'Brien' klasörünü değiştir.",
+            r"'C:\Users\O'Brien\Project' klasöründeki dosyayı düzelt.",
+            "Tamam. Dosyayı düzelt.",
+            "Okay. src/app.py dosyasını düzelt.",
+            "Tamam! Dosyayı düzelt.",
+            "Lütfen. src/app.py dosyasını düzelt.",
+            "Tamam. Uygula.",
+            "Tamam. sırayla hepsini yap.",
+            "Tamam.py dosyasını düzelt.",
+            r"'C:\saklama.py'yi düzelt.",
+            r"'C:\unut.py'yi düzelt.",
+            r"'C:\read-only.py'yi düzelt.",
+            r"'C:\saklama.py'YI düzelt.",
+            r"'C:\read-only.py''yi düzelt.",
+            '"C:\\saklama.py"\'yi düzelt.',
+            '“C:\\saklama.py”\'yi düzelt.',
+            r"C:\R&D\app.py dosyasını düzelt.",
+            r"C:\R&D+v2\app.py dosyasını düzelt.",
+            r"R&D\app.py dosyasını düzelt.",
+            r"\\server\R&D\app.py dosyasını düzelt.",
+            '"src" klasörünü değiştir.',
+            '“My Project” klasörünü güncelle.',
+            r"./read-only dosyayı düzelt.",
+            r"C:\ klasörünü değiştir.",
+            r"C:/ klasörünü değiştir.",
+            r"\ klasörünü değiştir.",
+            r"/ klasörünü değiştir.",
+            r"\\server\share klasörünü değiştir.",
+            r"\\server\share\ klasörünü değiştir.",
+            r"C:\src\ klasörünü değiştir.",
+            r"src/ klasörünü değiştir.",
+            r"\\server\share\src\ klasörünü değiştir.",
+            '"src" klasöründeki hatayı düzelt.',
+            '“My Project” klasöründeki dosyayı güncelle.',
+            "dosyayı oluştur.",
+            "src klasörünü güncelle.",
+            r"C:src\app.py dosyasını düzelt.",
+            r"C:src\app.py dosyasını oluşturabilir misin?",
+            r"\src\app.py dosyasını düzelt.",
+            r"/src/app.py dosyasını düzelt.",
+            "Dosyayı yazabilirsin.",
+            "Dosyayı yazabilirsiniz.",
+            "src/app.py dosyasını değiştirebilirsin.",
+            "src/app.py dosyasını değiştirebilirsiniz.",
+            "src/app.py dosyasını güncelleyebilirsin.",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertTrue(memory_ledger.is_explicit_write_intent(prompt))
+                self.assertFalse(memory_ledger.is_read_only_request(prompt))
+
+        for prompt in (
+            "Onaydan sonra src/new.py dosyasını oluştur.",
+            "Gerekirse README.md dosyasını güncelle.",
+            "Sakın src/new.py dosyasını yaz.",
+            "Yazabilir misin?",
+            "Oluşturabilir misin?",
+            "Güncelleyebilir misin?",
+            "Kodu yaz.",
+            "Bunu yaz.",
+            "Şunu oluştur.",
+            "Kodu güncelle.",
+            "Kodu yazabilir misin?",
+            "Bunu yazabilir misin?",
+            "Şunu oluşturabilir misin?",
+            "Herhalde dosyayı düzelt.",
+            "Herhalde dosyayı düzeltebilir misin?",
+            "Bunu yazabilirsin.",
+            "Kodu yazabilirsin.",
+            "Bunu değiştirebilirsin.",
+            "Onaylansa dosyayı yazabilirsin.",
+            "Gerekirse dosyayı yazabilirsin.",
+            "Sakın dosyayı yazabilirsin.",
+            "Hiç dosyayı güncelleyebilirsin.",
+            "Onaylansa dosyayı oluştur.",
+            "Gelse dosyasını yaz.",
+            "Hiç dosyayı güncelle.",
+            "Onaylansa dosyayı oluşturabilir misin?",
+            "Gelse dosyasını yazabilir misin?",
+            "Hiç dosyayı güncelleyebilir misin?",
+            "Onaylansa projeyi güncelle.",
+            "Onaylansa projedeki ayarı güncelle.",
+            "Hangi projedeki ayarı güncelle.",
+            "Gerekirse Atlas projesini oluştur.",
+            "Hiç Atlas projesindeki ayarı güncelle.",
+            "Onaylansa Atlas modülündeki dosyayı yazabilir misin?",
+            "Kimin dosyasını düzeltebilir misin?",
+            "Kimlerin dosyasını düzeltebilir misin?",
+            "Neredeki dosyayı düzeltebilir misin?",
+            "Nerelerdeki dosyayı düzeltebilir misin?",
+            "Kaçıncı dosyayı düzeltebilir misin?",
+            "Kaçıncısının dosyasını düzeltebilir misin?",
+            "Hangisinin dosyasını düzeltebilir misin?",
+            "Hangilerinin dosyasını düzeltebilir misin?",
+            "Neyin dosyasını düzeltebilir misin?",
+            "Nelerin dosyasını düzeltebilir misin?",
+            "Niye dosyayı düzelt.",
+            "Niye dosyayı düzeltebilir misin?",
+            "Sence dosyayı düzeltebilir misin?",
+            "Sence dosyayı düzeltir misin?",
+            "Sizce dosyayı düzeltebilir misiniz?",
+            "Tamam? Dosyayı düzelt.",
+            "Onaylansa Tamam. Dosyayı düzelt.",
+            "Tamam. Dosyayı düzelt. Do not modify files or settings.",
+            r"C:\bad|name\app.py dosyasını düzelt.",
+            r"C:\bad?name\app.py dosyasını düzelt.",
+            r"C:\bad name\app.py dosyasını düzelt.",
+            "Lütfen read-only/modda dosyayı düzelt.",
+            r"R&D\read-only dosyayı düzelt.",
+            r"src/read-only dosyayı düzelt.",
+            r"C:\ dosyasını düzelt.",
+            "C: klasörünü değiştir.",
+            "C: dosyasını düzelt.",
+            r"Onaylansa C:\ klasörünü değiştir.",
+            r"src/ dosyasını düzelt.",
+            r"Onaylansa C:\src\ klasörünü değiştir.",
+            'Onaylansa "src" klasöründeki hatayı düzelt.',
+            r"Onaylansa 'C:\Users\O'Brien\app.py' dosyasını düzelt.",
+            r"'C:\Users\O'Brien\app.py' dosyasını düzelt. Do not modify files or settings. 'not'",
+            "Onaylansa README.md'deki hatayı düzelt.",
+            "read-only.py'yi düzelt. Do not modify files or settings.",
+            "read-only.py'deki hatayı düzelt. Do not modify files or settings.",
+            "Onaylansa read-only.py'yi düzelt.",
+            "Onaylansa read-only.py'deki hatayı düzelt.",
+            '"Dockerfile"ı düzelt.',
+            '“Merhaba”yı düzenle.',
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
+
+    def test_read_only_keywords_in_bounded_targets_do_not_override_shared_restrictions(self) -> None:
+        for prompt in (
+            "read-only.py dosyasını düzelt.",
+            "salt-okunur.md dosyasını düzelt.",
+            r"src/read-only.py dosyasını düzelt.",
+            "Onaylıysa read-only.py dosyasını düzelt.",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertFalse(memory_ledger.is_read_only_request(prompt))
+                if prompt.startswith("Onaylıysa"):
+                    self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
+                else:
+                    self.assertTrue(memory_ledger.is_explicit_write_intent(prompt))
+                self.assertEqual(memory_ledger.memory_directive(prompt).kind, "correct")
+
+        question_target = "read-only.py dosyasını oluşturabilir misin?"
+        self.assertFalse(memory_ledger.is_read_only_request(question_target))
+        self.assertTrue(memory_ledger.is_explicit_write_intent(question_target))
+        self.assertEqual(memory_ledger.memory_directive(question_target).kind, "write-intent")
+
+        self.assertTrue(memory_ledger.is_read_only_request("read-only dosyayı düzelt."))
+        for prompt in (
+            "Read-only. dosyayı düzelt.",
+            "Salt-okunur. dosyayı düzelt.",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertTrue(memory_ledger.is_read_only_request(prompt))
+                self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
+        self.assertEqual(
+            memory_ledger.memory_directive("read-only dosyayı düzelt.").kind,
+            "read-only",
+        )
+        for prompt in (
+            "unut.py dosyasını düzelt.",
+            "saklama.py dosyasını düzelt.",
+            "read-only.py'yi düzelt.",
+            "unut.py'yi düzelt.",
+            "saklama.py'yı düzelt.",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(memory_ledger.memory_directive(prompt).kind, "correct")
+        self.assertEqual(memory_ledger.memory_directive("düzelt.py nedir?").kind, "ordinary")
+        self.assertEqual(
+            memory_ledger.memory_directive("unut.py dosyasını düzelt. Bunu unut.").kind,
+            "forget",
+        )
+        self.assertEqual(
+            memory_ledger.memory_directive("saklama.py dosyasını düzelt. Bunu kaydetme.").kind,
+            "do-not-save",
+        )
+        self.assertTrue(
+            memory_ledger.is_read_only_request(
+                "read-only.py dosyasını düzelt. Do not modify files or settings."
+            )
+        )
+        for prompt in (
+            r"'C:\saklama.py'yi düzelt. Do not modify files or settings.",
+            r"'C:\read-only.py'yi düzelt. Do not modify files or settings.",
+            r"'C:\read-only.py''yi düzelt. Do not modify files or settings. “başka örnek”",
+            '"C:\\saklama.py"\'yi düzelt. Do not modify files or settings.',
+            '“C:\\saklama.py”\'yi düzelt. Do not modify files or settings.',
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertTrue(memory_ledger.is_read_only_request(prompt))
+                self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
+        for prompt in (
+            "read-only.py nedir?",
+            r"src/read-only.py hakkında bilgi ver.",
+            "salt-okunur.md içeriğini açıkla.",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertFalse(memory_ledger.is_read_only_request(prompt))
+                self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
+                self.assertEqual(memory_ledger.memory_directive(prompt).kind, "ordinary")
+        self.assertTrue(memory_ledger.is_read_only_request("Read-only."))
+        self.assertTrue(memory_ledger.is_read_only_request("Salt-okunur."))
+
     def test_quoted_controls_are_content_but_outer_controls_still_apply(self) -> None:
+        self.assertEqual(
+            memory_ledger.memory_directive(
+                "Örnek: ```bunu kaydetme```'yi açıkla. Bu konuşmada kalsın. 'not'"
+            ).kind,
+            "session-only",
+        )
+        self.assertEqual(
+            memory_ledger.memory_directive(
+                "Örnek: ```bunu kaydetme```'yi açıkla. Do not modify files or settings. 'not'"
+            ).kind,
+            "read-only",
+        )
         ordinary = [
+            "CEVDET'in profilini açıkla.",
+            "'CEVDET'in metninde bunu kaydetme yazıyor' örneğini değerlendir.",
+            "'Bunu kaydetme'YI örnek olarak göster.",
             'Makalede “bu konuşmada kalsın” yazıyor. Bunu değerlendir.',
             'Yazar "bunu kaydetme" diyor; bu görüşü araştır.',
             'Yazar "bunu kaydetme, lütfen" diyor; bu görüşü araştır.',
@@ -37,6 +374,7 @@ class MemoryDirectiveTests(unittest.TestCase):
         for quoted_target in (
             '"Geçici bilgi". Bunu kaydetme.',
             "'Geçici bilgi'. Bunu kaydetme.",
+            r"'C:\saklama.py''yi düzelt. Bunu kaydetme. “başka örnek”",
             '```text\nGeçici bilgi\n```\nBunu kaydetme.',
         ):
             with self.subTest(quoted_target=quoted_target):
@@ -115,6 +453,26 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Tamam, lütfen hepsini sırayla uygula!": ("write-intent", ""),
             "SIRAYLA HEPSİNİ YAP": ("write-intent", ""),
             "Bunu düzelt.": ("correct", ""),
+            "Değiştirebilirsin.": ("write-intent", ""),
+            "Düzenleyebilirsin.": ("write-intent", ""),
+            "Uygulayabilirsin.": ("write-intent", ""),
+            "Düzeltebilir misin?": ("write-intent", ""),
+            "Dosyaları değiştirebilir misin?": ("write-intent", ""),
+            "Dosyaları değiştirebilir misiniz?": ("write-intent", ""),
+            "BIB projesindeki hatayı düzelt.": ("correct", ""),
+            "Atlas projesindeki hatayı düzelt.": ("correct", ""),
+            "Atlas modülündeki hatayı düzelt.": ("correct", ""),
+            "Borsa.md dosyasını düzelt.": ("correct", ""),
+            "src/app.py dosyasını düzelt.": ("correct", ""),
+            "Lütfen src/app.py dosyasını düzelt.": ("correct", ""),
+            "parse.py dosyasını düzelt.": ("correct", ""),
+            "ne.py dosyasını düzelt.": ("correct", ""),
+            '"C:\\Users\\Me\\My Project\\app.py" dosyasını düzelt.': ("correct", ""),
+            '"app.py" dosyasını düzelt.': ("correct", ""),
+            '"My File.py" dosyasını düzelt.': ("correct", ""),
+            "Bunları değiştir.": ("write-intent", ""),
+            "BIB projesindeki hatayı düzeltebilir misin?": ("write-intent", ""),
+            "Acaba düzeltebilir misin?": ("write-intent", ""),
         }
 
         for prompt, expected in cases.items():
@@ -127,7 +485,6 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Yazar 'Uygula' demiş; ne anlama geliyor?",
             "Belgelerde ‘Bunu düzelt’ geçiyor.",
             "Ok yap?",
-            "Dosyaları değiştirebilir misin?",
             "Dosyaları değiştirme kuralı nedir?",
             "Sırayla hepsini yap?",
             "Sırayla yap?",
@@ -140,11 +497,140 @@ class MemoryDirectiveTests(unittest.TestCase):
             'Alıntıda "Sırayla hepsini yap" yazıyor.',
             "Sadece incele; sırayla hepsini yap.",
             "> Sırayla hepsini yap",
+            '"Düzeltebilir misin?"',
+            "BIB projesindeki hatayı düzeltme.",
+            "Yanıtı buraya yaz.",
+            "Bana kısa bir şiir yaz.",
+            "Bana kısa bir şiiri düzelt.",
+            "Hangi dosyayı düzeltebilir misin?",
+            "Hangi dosyayı düzelt.",
+            "Sakın dosyayı düzelt.",
+            "Asla dosyadaki hatayı düzelt.",
+            "SAKIN dosyayı düzelt.",
+            "SANIRIM dosyayı düzelt.",
+            "Hiçbir dosyayı düzelt.",
+            "Lütfen hiçbir dosyayı düzelt.",
+            "Hiç dosyayı düzelt.",
+            "Onaylanmadıkça dosyayı düzelt.",
+            "Gerekmedikçe dosyayı düzelt.",
+            "Onaysızsa dosyayı düzelt.",
+            "Onaylanmadıkça BIB projesindeki hatayı düzelt.",
+            "Gerekmedikçe Atlas modülündeki hatayı düzelt.",
+            "Onaysızsa src/app.py dosyasını düzelt.",
+            "Çalışmazsa dosyayı düzelt.",
+            "Gelmezse dosyayı düzelt.",
+            "Çalışmazsam BIB projesindeki hatayı düzelt.",
+            "Çalışmazsanız dosyayı düzelt.",
+            "Yoksa dosyayı düzelt.",
+            "Varsa dosyayı düzelt.",
+            "Onaylansa dosyayı düzelt.",
+            "Gelse dosyayı düzelt.",
+            "Onaylanmasa dosyayı düzelt.",
+            "Onaylansam dosyayı düzelt.",
+            "Onaylanmasam dosyayı düzelt.",
+            "Galiba dosyayı düzelt.",
+            "Muhtemelen dosyayı düzelt.",
+            "Kaç dosyayı düzeltebilir misin?",
+            "Borsa dosyasındaki hatayı düzelt.",
+            "Borsa dosyasını düzelt.",
+            "Onaydan sonra src/app.py dosyasını düzelt.",
+            "Onay yoksa dosyayı düzelt.",
+            "Onay varsa dosyayı düzelt.",
+            "Yoksa BIB projesindeki hatayı düzelt.",
+            "Varsa Atlas modülündeki hatayı düzelt.",
+            "Yoksa klasörünü değiştir.",
+            "Onaylıysa klasörünü değiştir.",
+            "Sakın klasörünü değiştir.",
+            r'Onaylanmadıkça \\server\share\app.py dosyasını düzelt.',
+            r'Sakın \\server\share\app.py dosyasını düzelt.',
+            "Onaylıysa... dosyayı düzelt.",
+            "Gerekirse... dosyayı düzelt.",
+            "Sakın... dosyayı düzelt.",
+            "Yanıtındaki kodu düzelt.",
+            "Bu cümledeki hatayı düzelt.",
+            "Komut örneği olarak Atlas projesindeki hatayı düzelt.",
+            '"C:\\Users\\Me\\My Project\\app.py dosyasını düzelt."',
+            '"README.md\'yi düzenle."',
+            '```text\n"C:\\Users\\Me\\My Project" klasörünü değiştir.\n```',
+            '"Dockerfile dosyasını düzelt."',
+            '"LICENSE dosyasını düzenle."',
+            '“src/app.py dosyasını düzelt ve testleri çalıştır.”',
+            '‘src/app.py dosyasını düzelt. Sonra testleri çalıştır.’',
+            'src/app.py dosyasını düzelt ve testleri çalıştır. Do not modify files or settings.',
+            'Onaylıysa src/app.py dosyasını düzelt ve testleri çalıştır.',
+            '"Bunu düzelt."',
+            '"app.py dosyasını düzelt."',
+            "Yazabilirsin.",
+            "Eğer uygunsa BIB projesindeki hatayı düzelt.",
+            "Belki BIB projesindeki hatayı düzelt.",
+            "Onay verirsem BIB projesindeki hatayı düzelt.",
+            "Onay verirseniz BIB projesindeki hatayı düzelt.",
+            "Onay verdiysem BIB projesindeki hatayı düzelt.",
+            "Onayım varsa BIB projesindeki hatayı düzelt.",
+            "Onaylıysa BIB projesindeki hatayı düzelt.",
+            "Onaylıysa projesindeki hatayı düzelt.",
+            "Gerekirse modüldeki hatayı düzelt.",
+            "Onay olduğu takdirde BIB projesindeki hatayı düzelt.",
+            "Onay gelince BIB projesindeki hatayı düzelt.",
+            "Onaydan sonra BIB projesindeki hatayı düzelt.",
+            "Onay gelene kadar BIB projesindeki hatayı düzelt.",
+            "Onay yokken BIB projesindeki hatayı düzelt.",
+            "Onaylamadan düzeltme; sadece açıklama yap.",
+            "Nasıl düzeltilir?",
+            "BIB projesindeki hatayı nasıl düzeltebilir misin?",
+            "BIB projesindeki hatayı düzeltebilir miyim?",
+            "BIB projesindeki hatayı düzeltebilir misin, olur mu?",
         ):
             with self.subTest(prompt=prompt):
                 self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
 
         self.assertTrue(memory_ledger.is_explicit_write_intent("Bunu düzelt."))
+        for prompt in (
+            "Atlas modülündeki hatayı düzelt.",
+            "Borsa.md dosyasını düzelt.",
+            "src/app.py dosyasını düzelt.",
+            "src/app.py dosyasındaki hatayı düzelt.",
+            "src/app.py dosyasını düzeltin.",
+            "Lütfen src/app.py dosyasını düzelt.",
+            "Lütfen dosyayı değiştiriniz.",
+            "parse.py dosyasını düzelt.",
+            "ne.py dosyasını düzelt.",
+            "app.v1.py dosyasını düzelt.",
+            "src/app.py dosyasını düzelt, lütfen.",
+            "Sonra dosyayı düzelt.",
+            "Sonra src/app.py dosyasını düzelt.",
+            r'\\server\share\app.py dosyasını düzelt.',
+            r'\\server-name\share.name\nested\app.py dosyasını düzelt.',
+            "Tamam, src/app.py dosyasını düzelt.",
+            "Okay, src/app.py dosyasını düzelt.",
+            "Lütfen, src/app.py dosyasını düzelt.",
+            "README.md'yi düzenle.",
+            "pyproject.toml'u değiştir.",
+            "src/app.py'yi düzelt.",
+            "src klasörünü değiştir.",
+            "src klasörü değiştir.",
+            ".gitignore dosyasını düzenle.",
+            ".env dosyasını değiştir.",
+            ".env'yi düzenle.",
+            "Dockerfile dosyasını düzelt.",
+            '"Dockerfile" dosyasını düzelt.',
+            '"Dockerfile" dosyasındaki hatayı düzelt.',
+            '"LICENSE" dosyasını düzenle.',
+            '“app.py” dosyasını düzelt.',
+            '‘app.py’ dosyasını düzelt.',
+            '‘C:\\Users\\Me\\My Project\\app.py’yi düzelt.',
+            '"C:\\Program Files (x86)\\Project / R&D" klasörünü değiştir.',
+            'src/app.py dosyasını düzelt ve testleri çalıştır.',
+            'src/app.py dosyasını düzelt. Sonra testleri çalıştır.',
+            '"C:\\Users\\Me\\My Project" klasörünü değiştir.',
+            '"C:\\Users\\Me\\My Project\\app.py"\'yi düzelt.',
+            r"'C:\Users\Me\My Project\app.py'yi düzelt.",
+            '"C:\\Users\\Me\\My Project\\app.py" dosyasını düzelt.',
+            '"app.py" dosyasını düzelt.',
+            '"My File.py" dosyasını düzelt.',
+        ):
+            with self.subTest(explicit_target=prompt):
+                self.assertTrue(memory_ledger.is_explicit_write_intent(prompt))
 
     def test_secret_value_is_non_persistent(self) -> None:
         for text in ('API anahtarım sk-ABCDEFGHIJKLMNOPQRSTUV',

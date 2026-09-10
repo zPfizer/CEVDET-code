@@ -74,15 +74,26 @@ NON_PERSISTENT_DIRECTIVES = {
 }
 
 # These are quoted data, not requests. Keep the original text for target extraction.
+_QUOTED_CASE_SUFFIX = r"(?:(?i:['’]?y?[ıiuü])(?!\w))?"
+_QUOTED_CASE_SUFFIX_RE = re.compile(_QUOTED_CASE_SUFFIX)
 QUOTED_CONTENT = re.compile(
-    r'(?ms:^[ \t]*(?P<fence>(?P<fence_char>`|~)(?P=fence_char){2,})[^\r\n]*\r?\n'
+    r'(?:(?ms:^[ \t]*(?P<fence>(?P<fence_char>`|~)(?P=fence_char){2,})[^\r\n]*\r?\n'
     r'(?P<fenced_body>.*?)(?:^[ \t]*(?P=fence)(?P=fence_char)*[ \t]*\r?$|\Z))|'
     # Embedded multiline snippets remain data; only the named line-fence
     # branch can be unwrapped as a whole-message read-only restriction.
     r'```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z)|'
     r'(?m:^[ \t]*>[^\n]*|^(?: {4}|\t)[^\n]*)|'
     r'`[^`\n]*`|"[^"\n]*"|“[^”]*”|‘[^’]*’|«[^»]*»'
+    r')' + _QUOTED_CASE_SUFFIX
 )
+_QUOTE_PAIRS = (
+    ("'", "'"), ('"', '"'), ("“", "”"), ("‘", "’"),
+    ("`", "`"), ("«", "»"),
+)
+_QUOTED_DIRECTORY_PREFIX = (
+    r"(?:[a-z]:[\\/]?|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]?|[\w.-]+[\\/])"
+)
+_WRITE_EXTENSION = r"[\w-]+"
 DO_NOT_SAVE = r'(?:(?:bunu|bu bilgiyi|bu ayrıntıyı)\s+)?(?:kaydetme|saklama|hafızana alma|hafızanda tutma|kaydetmeni istemiyorum)'
 STANDALONE_DO_NOT_SAVE = (
     r'(?:lütfen\s+)?' + DO_NOT_SAVE
@@ -96,11 +107,30 @@ READ_ONLY_REQUEST = re.compile(
     r"don['’]t\s+(?:modify|change|touch)\s+files(?:\s+or\s+settings)?|"
     r"no\s+(?:file|files)\s+(?:changes?|modifications?))\b"
 )
+SESSION_ONLY_REQUEST = re.compile(
+    r"\b(?:bu (?:konuşmada|sohbette|oturumda|sohbet aramızda)|aramızda) kalsın\b"
+)
+FORGET_REQUEST = re.compile(
+    r"\b(?:unut(?:ur\s+musun)?|hafızandan\s+(?:çıkar|sil)|"
+    r"hatırlamanı\s+istemiyorum)\b"
+)
+DO_NOT_SAVE_REQUEST = re.compile(r"\b" + DO_NOT_SAVE + r"\b")
+WHAT_KNOWN_REQUEST = re.compile(r"\bbenim\s+hakkımda\s+ne\s+biliyorsun\b")
+CORRECT_REQUEST = re.compile(r"\bdüzelt\b")
+_MEMORY_CONTROL_PATTERNS = (
+    READ_ONLY_REQUEST,
+    SESSION_ONLY_REQUEST,
+    FORGET_REQUEST,
+    DO_NOT_SAVE_REQUEST,
+    WHAT_KNOWN_REQUEST,
+    CORRECT_REQUEST,
+)
+_ACK_SEPARATOR = r"[,;:.!]"
 EXPLICIT_WRITE_INTENT = re.compile(
     r"^\s*(?:"
-    r"(?:lütfen\s+)?(?:(?:ok|okay|tamam)\s*[,;:]?\s*)?(?:lütfen\s+)?"
+    rf"(?:lütfen\s+)?(?:(?:ok|okay|tamam)\s*{_ACK_SEPARATOR}?\s*)?(?:lütfen\s+)?"
     r"(?:s[ıi]rayla(?:\s+hepsini)?|hepsini(?:\s+s[ıi]rayla)?)\s+(?:yap|uygula)|"
-    r"(?:ok|okay|tamam)\s*[,;:]?\s*(?:yap|uygula)|"
+    rf"(?:ok|okay|tamam)\s*{_ACK_SEPARATOR}?\s*(?:yap|uygula)|"
     r"uygula|"
     r"bunu\s+düzelt|"
     r"gerekli\s+değişiklikleri\s+yap|"
@@ -109,10 +139,234 @@ EXPLICIT_WRITE_INTENT = re.compile(
     r"\s+(?:yap|uygula)|"
     r"(?:dosyayı|dosyaları|ayarı|ayarları|kodu)\s+(?:değiştir|düzenle|uygula)|"
     r"(?:uygulamaya|yazmaya|değişikliğe)\s+geç|"
-    r"(?:dosyaları\s+)?(?:değiştirebilirsin|düzenleyebilirsin|"
-    r"uygulayabilirsin|yazabilirsin)"
+    r"(?:(?:dosyaları\s+)?(?:değiştirebilirsin|düzenleyebilirsin|"
+    r"uygulayabilirsin)|dosyaları\s+yazabilirsin)"
     r")\s*[.!]*\s*$"
 )
+
+_CONCRETE_WRITE_MUTATION = (
+    r"(?:oluştur(?:un(?:uz)?)?|güncelle(?:yin(?:iz)?)?|yaz(?:ın(?:ız)?)?)"
+)
+_WRITE_MUTATION = (
+    r"(?:düzelt(?:in(?:iz)?)?|değiştir(?:in(?:iz)?)?|"
+    r"düzenle(?:yin(?:iz)?)?|uygula(?:yın(?:ız)?)?|onar(?:ın(?:ız)?)?|"
+    rf"{_CONCRETE_WRITE_MUTATION})"
+)
+_WRITE_QUESTION_VERB = (
+    r"(?:düzeltebilir|düzeltir|değiştirebilir|değiştirir|"
+    r"düzenleyebilir|düzenler|uygulayabilir|uygular|onarabilir|onarır)"
+)
+_CONCRETE_WRITE_QUESTION_VERB = (
+    r"(?:oluşturabilir|oluşturur|güncelleyebilir|günceller|yazabilir|yazar)"
+)
+_CONCRETE_WRITE_PERMISSION_VERB = (
+    r"(?:düzeltebilir|değiştirebilir|düzenleyebilir|uygulayabilir|onarabilir|"
+    r"oluşturabilir|güncelleyebilir|yazabilir)sin(?:iz)?"
+)
+_TARGETED_WRITE_QUESTION_VERB = (
+    rf"(?:{_WRITE_QUESTION_VERB}|{_CONCRETE_WRITE_QUESTION_VERB})"
+)
+_QUESTION_SUFFIX = r"m[ıiuü]s[ıiuü]n(?:iz|ız|uz|üz)?"
+_WRITE_FOLDER_OBJECT = r"klasör(?:ü|ünü|leri|lerini)?"
+_WRITE_FILE_OBJECT = r"dosya(?:yı|sını|ları|larını|mı|nı)?"
+_WRITE_SETTING_OBJECT = r"ayar(?:ı|ını|ları|larını|ımı)?"
+_WRITE_FILENAME = rf"(?:[\w.-]+\.{_WRITE_EXTENSION}|\.{_WRITE_EXTENSION})"
+_WRITE_LOCATIVE_SUFFIX = r"['’][dt][ae]ki"
+_WRITE_TARGET_OBJECT = (
+    r"(?:hata(?:yı|sını|ları)?|sorun(?:u|unu|ları)?|bug(?:ı|u|unu|ları)?|"
+    rf"{_WRITE_FILE_OBJECT}|"
+    rf"{_WRITE_FOLDER_OBJECT}|"
+    r"kod(?:u|unu|ları|larını)?|değişiklik(?:i|ini|leri|lerini)?|"
+    rf"{_WRITE_SETTING_OBJECT})"
+)
+_WRITE_FILE_MEMBER = rf"(?:dosya(?:daki|deki|sındaki|sindeki)|{_WRITE_FILENAME}{_WRITE_LOCATIVE_SUFFIX})\s+{_WRITE_TARGET_OBJECT}"
+_WRITE_FOLDER_MEMBER = rf"klasör(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}"
+_WRITE_FILE_TARGET = (
+    rf"(?:[\w.-]+\s+)?(?:{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER}|"
+    rf"{_WRITE_FOLDER_MEMBER}|{_WRITE_FOLDER_OBJECT})"
+)
+_WRITE_PROJECT_MEMBER = rf"proje(?:sindeki|deki)\s+{_WRITE_TARGET_OBJECT}"
+_WRITE_PROJECT_TARGET = rf"(?:[\w.-]+\s+)?{_WRITE_PROJECT_MEMBER}"
+_WRITE_PROJECT_OBJECT = r"proje(?:yi|si(?:ni)?|ler(?:i(?:ni)?)?)?"
+_WRITE_PROJECT_OBJECT_TARGET = rf"(?:[\w.-]+\s+)?{_WRITE_PROJECT_OBJECT}"
+_WRITE_MODULE_TARGET = (
+    rf"[\w.-]+\s+modül(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}"
+)
+_QUOTED_STRAIGHT_BODY = r"(?:[^'\r\n]|(?<=\w)'(?=\w))"
+_QUOTED_PATH = (
+    "(?:"
+    + "|".join(
+        rf"{re.escape(opening)}"
+        + (
+            rf"{_QUOTED_STRAIGHT_BODY}*"
+            if opening == "'"
+            else rf"[^{re.escape(closing)}\r\n]*"
+        )
+        + rf"\.{_WRITE_EXTENSION}{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
+        for opening, closing in _QUOTE_PAIRS
+    )
+    + ")"
+)
+_QUOTED_FILENAME = (
+    "(?:"
+    + "|".join(
+        rf"{re.escape(opening)}"
+        + (
+            rf"{_QUOTED_STRAIGHT_BODY}+"
+            if opening == "'"
+            else rf"[^{re.escape(closing)}\r\n]+"
+        )
+        + rf"{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
+        for opening, closing in _QUOTE_PAIRS
+    )
+    + ")"
+)
+_QUOTED_DIRECTORY = (
+    "(?:"
+    + "|".join(
+        rf"{re.escape(opening)}{_QUOTED_DIRECTORY_PREFIX}"
+        + (
+            rf"{_QUOTED_STRAIGHT_BODY}*?"
+            if opening == "'"
+            else rf"[^{re.escape(closing)}\r\n]*?"
+        )
+        + rf"{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
+        for opening, closing in _QUOTE_PAIRS
+    )
+    + ")"
+)
+_WRITE_CASE_SUFFIX = r"['’]y?[ıiuü]"
+_WRITE_TARGET_SUFFIX = rf"(?:\s+(?:{_WRITE_TARGET_OBJECT}|{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_MEMBER})|{_WRITE_CASE_SUFFIX})?"
+_WRITE_PATH_COMPONENT = r"[^\\/\s<>:\"|?*\x00-\x1f]+"
+_WRITE_PATH = (
+    rf"(?:[a-z]:[\\/]?|\.{{1,2}}[\\/]|[\\/](?![\\/])|"
+    rf"\\\\{_WRITE_PATH_COMPONENT}[\\/]{_WRITE_PATH_COMPONENT}[\\/]|"
+    rf"{_WRITE_PATH_COMPONENT}[\\/])"
+    rf"{_WRITE_PATH_COMPONENT}(?:[\\/]{_WRITE_PATH_COMPONENT})*"
+)
+_WRITE_DIRECTORY_PATH = rf"(?:{_WRITE_PATH}[\\/]|{_WRITE_PATH_COMPONENT}[\\/])"
+_WRITE_DIRECTORY_ROOT = (
+    rf"(?:[a-z]:[\\/]|[\\/](?![\\/])|"
+    rf"\\\\{_WRITE_PATH_COMPONENT}[\\/]{_WRITE_PATH_COMPONENT}[\\/]?)"
+)
+_EXPLICIT_WRITE_PATH_PREFIX = re.compile(
+    r"(?:[a-z]:|\.{1,2}[\\/]|[\\/](?![\\/])|"
+    rf"\\\\{_WRITE_PATH_COMPONENT}[\\/]{_WRITE_PATH_COMPONENT}[\\/]?)"
+)
+_MEMORY_TARGET_TOKEN = re.compile(
+    rf"(?:[a-z]:[\\/]?|\.{{1,2}}[\\/]|[\\/]{{1,2}})?"
+    rf"{_WRITE_PATH_COMPONENT}(?:[\\/]{_WRITE_PATH_COMPONENT})*"
+)
+_CONCRETE_WRITE_TARGET_PATTERN = (
+    rf"(?:{_WRITE_PROJECT_TARGET}|{_WRITE_MODULE_TARGET}|"
+    rf"{_WRITE_DIRECTORY_ROOT}\s+{_WRITE_FOLDER_OBJECT}|"
+    rf"{_WRITE_DIRECTORY_PATH}\s+{_WRITE_FOLDER_OBJECT}|"
+    rf"{_WRITE_PROJECT_OBJECT_TARGET}|{_WRITE_FILE_TARGET}|"
+    rf"{_WRITE_PATH}{_WRITE_TARGET_SUFFIX}|"
+    rf"{_WRITE_FILENAME}{_WRITE_TARGET_SUFFIX}|"
+    rf"{_QUOTED_DIRECTORY}\s+(?:{_WRITE_FOLDER_OBJECT}|{_WRITE_FOLDER_MEMBER})|"
+    rf"{_QUOTED_PATH}{_WRITE_TARGET_SUFFIX}|"
+    rf"{_QUOTED_FILENAME}\s+(?:{_WRITE_FOLDER_OBJECT}|{_WRITE_FOLDER_MEMBER}|"
+    rf"{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER}))"
+)
+_WRITE_TARGET = (
+    rf"(?:bunu|bunları|şunu|şunları|onu|onları|"
+    rf"(?:bu|şu|o)\s+{_WRITE_TARGET_OBJECT}|"
+    rf"{_CONCRETE_WRITE_TARGET_PATTERN}|"
+    rf"{_WRITE_PROJECT_OBJECT_TARGET}|"
+    rf"{_WRITE_TARGET_OBJECT}|"
+    rf"{_WRITE_PATH}"
+    rf"{_WRITE_TARGET_SUFFIX}|"
+    rf"{_WRITE_FILENAME}{_WRITE_TARGET_SUFFIX})"
+)
+_CONCRETE_WRITE_TARGET = re.compile(_CONCRETE_WRITE_TARGET_PATTERN)
+_CONCRETE_WRITE_VERB = re.compile(
+    rf"(?:{_CONCRETE_WRITE_MUTATION}|{_CONCRETE_WRITE_QUESTION_VERB}|"
+    rf"{_CONCRETE_WRITE_PERMISSION_VERB})"
+)
+_TARGETED_WRITE_PREFIX = rf"(?:(?:acaba|lütfen|ok|okay|tamam|sonra)(?:{_ACK_SEPARATOR}\s++|\s++))*"
+_TRAILING_POLITENESS = r"(?:(?:\s*+,\s*+|\s++)lütfen)?"
+# ponytail: only this test-running suffix; broader compound sentences need shared sentence parsing.
+_WRITE_FOLLOWUP = r"(?:\s+ve\s+testleri\s+çalıştır|[.!]\s+sonra\s+testleri\s+çalıştır)?"
+TARGETED_WRITE_COMMAND = re.compile(
+    rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+"
+    rf"(?P<mutation>{_WRITE_MUTATION})"
+    rf"{_TRAILING_POLITENESS}{_WRITE_FOLLOWUP}\s*+[.!]*\s*+$"
+)
+TARGETED_WRITE_QUESTION = re.compile(
+    rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+"
+    rf"(?P<mutation>{_TARGETED_WRITE_QUESTION_VERB})\s+"
+    rf"{_QUESTION_SUFFIX}{_TRAILING_POLITENESS}\?\s*+$"
+)
+TARGETED_WRITE_PERMISSION = re.compile(
+    rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+"
+    rf"(?P<mutation>{_CONCRETE_WRITE_PERMISSION_VERB})"
+    rf"{_TRAILING_POLITENESS}\s*+[.!]*\s*+$"
+)
+BARE_WRITE_QUESTION = re.compile(
+    rf"^\s*{_TARGETED_WRITE_PREFIX}{_WRITE_QUESTION_VERB}\s+{_QUESTION_SUFFIX}"
+    rf"{_TRAILING_POLITENESS}\?\s*+$"
+)
+NON_COMMITTAL_WRITE = re.compile(
+    r"\b(?:eğer|şayet|uygunsa|mümkünse|istersen(?:iz)?|gerekirse|"
+    r"olursa|belki|san[ıi]r[ıi]m|sak[ıi]n|asla|hiç(?:bir)?|"
+    r"galiba|muhtemelen|herhalde)\b"
+)
+_CONDITIONAL_PERSON = (
+    r"(?:sa|se|sam|sem|san|sen|sak|sek|salar|seler|sınız|siniz|"
+    r"sunuz|sünüz|sanız|seniz)"
+)
+CONDITIONAL_WRITE = re.compile(
+    r"\b(?:var|yok)(?:sa|se)\b|"
+    r"\b\w+(?:(?:[ıiuü]r|[ae]r|[uü]r|m[ae]z|acak|ecek|iyor|ıyor|uyor|"
+    r"miş|mış|muş|müş)(?:sa|se|sam|sem|san|sen|sak|sek|salar|seler|"
+    r"sınız|siniz|sunuz|sünüz|sanız|seniz)|d[iıuü]y?(?:sa|se|sam|sem|"
+    r"san|sen|sak|sek|salar|seler|sınız|siniz|sunuz|sünüz|sanız|seniz)|"
+    r"y(?:sa|se|sam|sem|san|sen|sak|sek|salar|seler|sınız|siniz|sunuz|"
+    r"sünüz|sanız|seniz)|"
+    r"(?:ince|ınca|unca|ünce|diğinde|dığında|duğunda|düğünde|ken)|"
+    r"madan|meden|madıkça|medikçe|s[ıiuü]z(?:sa|se))\b|"
+    rf"\b\w+m[ae]{_CONDITIONAL_PERSON}\b|"
+    r"\b(?:takdirde|halinde|durumunda|sonra|kadar)\b"
+)
+_QUESTION_PLURAL_SUFFIX = (
+    r"ler(?:inin|ine|ini|inde|inden|indeki|in(?:de|den)?|e|i|de|den)?"
+)
+_QUESTION_NE = (
+    rf"ne(?:yin|ye|yi|de|den|{_QUESTION_PLURAL_SUFFIX}(?:ki)?|"
+    r"si(?:nin|ne|ni|nde|nden|ndeki)?)?"
+)
+_QUESTION_HANGI = (
+    rf"hangi(?:si(?:nin|ne|ni|nde|nden|ndeki)?|"
+    rf"{_QUESTION_PLURAL_SUFFIX}(?:ki)?|nin|ne|yi|de|den|deki)?"
+)
+_QUESTION_KIM = (
+    rf"kim(?:in|e|i|de|den|{_QUESTION_PLURAL_SUFFIX}(?:ki)?)?(?:ki)?"
+)
+_QUESTION_NERE = (
+    rf"nere(?:si(?:nin|ne|ni|nde|nden|ndeki)?|"
+    rf"{_QUESTION_PLURAL_SUFFIX}(?:ki)?|nin|ye|yi|de|den|deki)?"
+)
+_QUESTION_KAC = (
+    r"kaç(?:ıncı(?:sı(?:nın|na|nı|nda|ndan|ndaki)?|"
+    r"lar(?:ın|a|ı|da|dan)?(?:ki)?)?|ın|a|ı|ta|tan)?"
+)
+ACTION_QUESTION_WORD = re.compile(
+    rf"\b(?:{_QUESTION_NE}|nasıl|niçin|niye|sence|sizce|{_QUESTION_HANGI}|"
+    rf"{_QUESTION_KIM}|{_QUESTION_NERE}|{_QUESTION_KAC}|ne\s+zaman)\b"
+)
+_NAMED_TARGET = re.compile(
+    rf"^(?P<name>[\w.-]+)\s+(?:{_WRITE_PROJECT_OBJECT}|"
+    rf"{_WRITE_PROJECT_MEMBER}|"
+    rf"modül(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}|"
+    rf"{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_MEMBER}|"
+    rf"{_WRITE_FOLDER_OBJECT})$"
+)
+_NAMED_FILENAME = re.compile(_WRITE_FILENAME)
+_WRITE_FILENAME_WITH_CASE_SUFFIX = re.compile(
+    rf"(?P<filename>{_WRITE_FILENAME})(?:{_WRITE_CASE_SUFFIX}|{_WRITE_LOCATIVE_SUFFIX})"
+)
+_SIMPLE_CONDITIONAL = re.compile(rf"\b\w+{_CONDITIONAL_PERSON}\b")
 
 
 @dataclass(frozen=True)
@@ -127,6 +381,58 @@ class MemoryPreferenceError(ValueError):
 
 class MemorySourceError(ValueError):
     pass
+
+
+def _targeted_write_matches(pattern: re.Pattern[str], folded: str) -> bool:
+    match = pattern.fullmatch(folded)
+    if match is None:
+        return False
+    if _CONCRETE_WRITE_VERB.fullmatch(match.group("mutation")) is not None:
+        if _CONCRETE_WRITE_TARGET.fullmatch(match.group("target")) is None:
+            return False
+    named_target = _NAMED_TARGET.fullmatch(match.group("target"))
+    if named_target is None:
+        return True
+    name = named_target.group("name")
+    # A dot-qualified name is target data only when it matches the filename
+    # grammar; punctuation such as an ellipsis remains prose.
+    if "." in name:
+        return _NAMED_FILENAME.fullmatch(name) is not None
+    if _SIMPLE_CONDITIONAL.fullmatch(name) is not None:
+        return False
+    return not (
+        NON_COMMITTAL_WRITE.fullmatch(name) is not None
+        or CONDITIONAL_WRITE.fullmatch(name) is not None
+        or ACTION_QUESTION_WORD.fullmatch(name) is not None
+    )
+
+
+def _mask_bounded_memory_controls(folded: str) -> str:
+    # Control words can be part of a concrete path or filename. Remove only
+    # those bounded target tokens; controls elsewhere in the message remain.
+    masked = list(folded)
+    for token_match in _MEMORY_TARGET_TOKEN.finditer(folded):
+        target = token_match.group()
+        final_component = re.split(r"[\\/]", target)[-1]
+        if ":" in target and _EXPLICIT_WRITE_PATH_PREFIX.match(target) is None:
+            continue
+        filename = _NAMED_FILENAME.fullmatch(final_component)
+        if filename is None:
+            with_suffix = _WRITE_FILENAME_WITH_CASE_SUFFIX.fullmatch(final_component)
+            if with_suffix is not None:
+                filename = _NAMED_FILENAME.fullmatch(with_suffix.group("filename"))
+        if filename is None and _EXPLICIT_WRITE_PATH_PREFIX.match(target) is None:
+            continue
+        for pattern in _MEMORY_CONTROL_PATTERNS:
+            for match in pattern.finditer(target):
+                start = token_match.start() + match.start()
+                end = token_match.start() + match.end()
+                masked[start:end] = " " * (end - start)
+    return "".join(masked)
+
+
+def _read_only_scan_request(text: str) -> str:
+    return _mask_bounded_memory_controls(_folded_request(text))
 
 
 @dataclass(frozen=True)
@@ -261,7 +567,9 @@ def _unquoted_request(text: str) -> str:
     text = QUOTED_CONTENT.sub(' ', text)
     output = list(text)
     start = None
-    for index, character in enumerate(text):
+    index = 0
+    while index < len(text):
+        character = text[index]
         if character == '\n':
             start = None
         elif character == "'":
@@ -269,9 +577,15 @@ def _unquoted_request(text: str) -> str:
             next_word = index + 1 < len(text) and (text[index + 1].isalnum() or text[index + 1] == '_')
             if start is None and not previous_word:
                 start = index
-            elif start is not None and not next_word:
-                output[start:index + 1] = ' ' * (index + 1 - start)
-                start = None
+            elif start is not None:
+                suffix = _QUOTED_CASE_SUFFIX_RE.match(text, index + 1)
+                end = suffix.end() if suffix is not None else index + 1
+                if end > index + 1 or not next_word:
+                    output[start:end] = ' ' * (end - start)
+                    start = None
+                    index = end
+                    continue
+        index += 1
     return ''.join(output).strip()
 
 
@@ -288,7 +602,7 @@ def _folded_request(text: str) -> str:
 
 
 def is_read_only_request(text: str) -> bool:
-    folded = _folded_request(text)
+    folded = _read_only_scan_request(text)
     # A question elsewhere in the message does not revoke an explicit restriction.
     return any(
         not re.match(r"\s+(?:kuralı|ifadesi)\b", folded[match.end():])
@@ -297,9 +611,30 @@ def is_read_only_request(text: str) -> bool:
 
 
 def is_explicit_write_intent(text: str) -> bool:
-    # Removing quoted data must not turn a quoted rule into write authorization.
+    if is_read_only_request(text):
+        return False
     folded = unicodedata.normalize("NFKC", text).casefold().replace("i\u0307", "i")
-    return EXPLICIT_WRITE_INTENT.fullmatch(folded) is not None
+    # Targeted forms have a bounded prefix and must not inspect the target token.
+    if (
+        _targeted_write_matches(TARGETED_WRITE_COMMAND, folded)
+        or _targeted_write_matches(TARGETED_WRITE_QUESTION, folded)
+        or _targeted_write_matches(TARGETED_WRITE_PERMISSION, folded)
+    ):
+        return True
+    # Quoted data is never authorization unless the quoted target was accepted above.
+    if _unquoted_request(text) != text.strip():
+        return False
+    if (
+        NON_COMMITTAL_WRITE.search(folded)
+        or CONDITIONAL_WRITE.search(folded)
+        or _SIMPLE_CONDITIONAL.search(folded)
+        or ACTION_QUESTION_WORD.search(folded)
+    ):
+        return False
+    return (
+        EXPLICIT_WRITE_INTENT.fullmatch(folded) is not None
+        or BARE_WRITE_QUESTION.fullmatch(folded) is not None
+    )
 
 
 def _sha256_text(value: str) -> str:
@@ -663,19 +998,21 @@ def contains_secret(text: str) -> bool:
 def memory_directive(text: str) -> MemoryDirective:
     raw = text.strip()
     unquoted = _unquoted_request(text)
-    folded = unicodedata.normalize("NFKC", unquoted).casefold().replace("i\u0307", "i")
+    folded = _mask_bounded_memory_controls(
+        unicodedata.normalize("NFKC", unquoted).casefold().replace("i\u0307", "i")
+    )
     raw_folded = unicodedata.normalize("NFKC", raw).casefold().replace("i\u0307", "i")
-    if re.search(r'\b(?:bu (?:konuşmada|sohbette|oturumda|sohbet aramızda)|aramızda) kalsın\b', folded):
+    if SESSION_ONLY_REQUEST.search(folded) is not None:
         return MemoryDirective("session-only")
     if contains_secret(raw):
         return MemoryDirective("secret")
-    if re.search(r"\bbenim\s+hakkımda\s+ne\s+biliyorsun\b", folded):
+    if WHAT_KNOWN_REQUEST.search(folded) is not None:
         return MemoryDirective("what-known")
-    if re.search(r'\b' + DO_NOT_SAVE + r'\b', folded):
+    if DO_NOT_SAVE_REQUEST.search(folded) is not None:
         standalone_text = CONTROL_SEPARATOR.sub(" ", raw_folded).strip()
         standalone = re.fullmatch(STANDALONE_DO_NOT_SAVE, standalone_text)
         return MemoryDirective("do-not-save", "" if standalone else raw)
-    if re.search(r"\b(?:unut(?:ur\s+musun)?|hafızandan\s+(?:çıkar|sil)|hatırlamanı\s+istemiyorum)\b", folded):
+    if FORGET_REQUEST.search(folded) is not None:
         match = FORGET_WITH_TARGET.match(raw) or FORGET_SUFFIX.match(raw)
         if match is None:
             return MemoryDirective("forget-ambiguous", raw)
@@ -685,7 +1022,7 @@ def memory_directive(text: str) -> MemoryDirective:
         return MemoryDirective("forget", target)
     if is_read_only_request(text):
         return MemoryDirective("read-only")
-    if re.search(r"\bdüzelt\b", folded):
+    if CORRECT_REQUEST.search(folded) is not None:
         return MemoryDirective("correct")
     if is_explicit_write_intent(text):
         return MemoryDirective("write-intent")
