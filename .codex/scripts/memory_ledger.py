@@ -120,7 +120,8 @@ EXPLICIT_WRITE_INTENT = re.compile(
 
 _WRITE_MUTATION = (
     r"(?:düzelt(?:in(?:iz)?)?|değiştir(?:in(?:iz)?)?|"
-    r"düzenle(?:yin(?:iz)?)?|uygula(?:yın(?:ız)?)?|onar(?:ın(?:ız)?)?)"
+    r"düzenle(?:yin(?:iz)?)?|uygula(?:yın(?:ız)?)?|onar(?:ın(?:ız)?)?|"
+    r"oluştur(?:un(?:uz)?)?|güncelle(?:yin(?:iz)?)?|yaz(?:ın(?:ız)?)?)"
 )
 _WRITE_QUESTION_VERB = (
     r"(?:düzeltebilir|düzeltir|değiştirebilir|değiştirir|"
@@ -179,7 +180,7 @@ _WRITE_TARGET = (
     rf"(?:bu|şu|o)\s+{_WRITE_TARGET_OBJECT}|"
     rf"{_WRITE_PROJECT_TARGET}|{_WRITE_MODULE_TARGET}|{_WRITE_FILE_TARGET}|"
     rf"{_WRITE_TARGET_OBJECT}|"
-    rf"(?:[a-z]:[\\/]|\.{{1,2}}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w./\\-]+"
+    rf"(?:[a-z]:[\\/]|\.{{1,2}}[\\/]|[\\/](?![\\/])|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w./\\-]+"
     rf"{_WRITE_TARGET_SUFFIX}|"
     rf"{_WRITE_FILENAME}{_WRITE_TARGET_SUFFIX}|"
     rf"{_QUOTED_DIRECTORY}\s+{_WRITE_FOLDER_OBJECT}|"
@@ -202,6 +203,11 @@ TARGETED_WRITE_QUESTION = re.compile(
 BARE_WRITE_QUESTION = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}{_WRITE_QUESTION_VERB}\s+{_QUESTION_SUFFIX}"
     rf"{_TRAILING_POLITENESS}\?\s*+$"
+)
+_READ_ONLY_TARGET_FOLLOWUP = re.compile(
+    rf"(?:{_WRITE_CASE_SUFFIX}|\s++(?:{_WRITE_FILE_OBJECT}|"
+    rf"{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_OBJECT}|{_WRITE_MUTATION}|"
+    rf"{_WRITE_QUESTION_VERB}\s+{_QUESTION_SUFFIX}))"
 )
 
 NON_COMMITTAL_WRITE = re.compile(
@@ -271,6 +277,28 @@ def _targeted_write_matches(pattern: re.Pattern[str], folded: str) -> bool:
         or CONDITIONAL_WRITE.fullmatch(name) is not None
         or ACTION_QUESTION_WORD.fullmatch(name) is not None
     )
+
+
+def _read_only_scan_request(text: str) -> str:
+    folded = _folded_request(text)
+    # A read-only keyword can be part of a concrete path or filename. Remove
+    # only that bounded target span; restrictions elsewhere in the message
+    # must continue to take precedence.
+    masked = list(folded)
+    for token_match in re.finditer(r"[\w./\\-]+", folded):
+        target = token_match.group()
+        if (
+            ("/" not in target and "\\" not in target)
+            and _NAMED_FILENAME.fullmatch(target) is None
+        ):
+            continue
+        if _READ_ONLY_TARGET_FOLLOWUP.match(folded, token_match.end()) is None:
+            continue
+        for match in READ_ONLY_REQUEST.finditer(target):
+            start = token_match.start() + match.start()
+            end = token_match.start() + match.end()
+            masked[start:end] = " " * (end - start)
+    return "".join(masked)
 
 
 @dataclass(frozen=True)
@@ -432,7 +460,7 @@ def _folded_request(text: str) -> str:
 
 
 def is_read_only_request(text: str) -> bool:
-    folded = _folded_request(text)
+    folded = _read_only_scan_request(text)
     # A question elsewhere in the message does not revoke an explicit restriction.
     return any(
         not re.match(r"\s+(?:kuralı|ifadesi)\b", folded[match.end():])

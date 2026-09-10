@@ -22,7 +22,9 @@ class MemoryDirectiveTests(unittest.TestCase):
             "import memory_ledger as ledger; "
             "assert not ledger.is_explicit_write_intent('Lütfen' + ' ' * 12000 + '?'); "
             "assert not ledger.is_explicit_write_intent('src/app.py dosyasını düzelt' + ' ' * 12000 + '?'); "
-            "assert ledger.is_explicit_write_intent('src/app.py dosyasını düzelt, ' + ' ' * 12000 + 'lütfen.')"
+            "assert ledger.is_explicit_write_intent('src/app.py dosyasını düzelt, ' + ' ' * 12000 + 'lütfen.'); "
+            "assert ledger.is_read_only_request('a' * 100000 + ' read-only dosyayı düzelt.'); "
+            "assert not ledger.is_read_only_request(('read-only-' * 10000) + 'file.py dosyasını düzelt.')"
         )
         subprocess.run(
             [sys.executable, "-X", "utf8", "-c", script],
@@ -73,6 +75,59 @@ class MemoryDirectiveTests(unittest.TestCase):
                     f"{fence}text\napp.py dosyasını düzelt.\n{fence}"
                 )
             )
+
+    def test_targeted_creation_update_write_and_root_relative_paths(self) -> None:
+        for prompt in (
+            "src/new.py dosyasını oluştur.",
+            "README.md dosyasını güncelle.",
+            "src/new.py dosyasını yaz.",
+            r"\src\app.py dosyasını düzelt.",
+            r"/src/app.py dosyasını düzelt.",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertTrue(memory_ledger.is_explicit_write_intent(prompt))
+                self.assertFalse(memory_ledger.is_read_only_request(prompt))
+
+        for prompt in (
+            "Onaydan sonra src/new.py dosyasını oluştur.",
+            "Gerekirse README.md dosyasını güncelle.",
+            "Sakın src/new.py dosyasını yaz.",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
+
+    def test_read_only_keywords_in_bounded_targets_do_not_override_shared_restrictions(self) -> None:
+        for prompt in (
+            "read-only.py dosyasını düzelt.",
+            "salt-okunur.md dosyasını düzelt.",
+            r"src/read-only.py dosyasını düzelt.",
+            "Onaylıysa read-only.py dosyasını düzelt.",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertFalse(memory_ledger.is_read_only_request(prompt))
+                if prompt.startswith("Onaylıysa"):
+                    self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
+                else:
+                    self.assertTrue(memory_ledger.is_explicit_write_intent(prompt))
+                self.assertEqual(memory_ledger.memory_directive(prompt).kind, "correct")
+
+        self.assertTrue(memory_ledger.is_read_only_request("read-only dosyayı düzelt."))
+        for prompt in (
+            "Read-only. dosyayı düzelt.",
+            "Salt-okunur. dosyayı düzelt.",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertTrue(memory_ledger.is_read_only_request(prompt))
+                self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
+        self.assertEqual(
+            memory_ledger.memory_directive("read-only dosyayı düzelt.").kind,
+            "read-only",
+        )
+        self.assertTrue(
+            memory_ledger.is_read_only_request(
+                "read-only.py dosyasını düzelt. Do not modify files or settings."
+            )
+        )
 
     def test_quoted_controls_are_content_but_outer_controls_still_apply(self) -> None:
         ordinary = [
