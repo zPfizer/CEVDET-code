@@ -98,6 +98,9 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Kimya dosyasını düzeltebilir misin?",
             "Herhalde.py dosyasını düzelt.",
             r"src/herhalde dosyasını düzelt.",
+            "unut.py dosyasını düzelt.",
+            "saklama.py dosyasını düzelt.",
+            "düzelt.py dosyasını düzelt.",
             "Projeyi düzelt.",
             "Atlas projesini güncelle.",
             "Atlas projesini güncelleyebilir misin?",
@@ -197,6 +200,21 @@ class MemoryDirectiveTests(unittest.TestCase):
         self.assertEqual(
             memory_ledger.memory_directive("read-only dosyayı düzelt.").kind,
             "read-only",
+        )
+        for prompt in (
+            "unut.py dosyasını düzelt.",
+            "saklama.py dosyasını düzelt.",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(memory_ledger.memory_directive(prompt).kind, "correct")
+        self.assertEqual(memory_ledger.memory_directive("düzelt.py nedir?").kind, "ordinary")
+        self.assertEqual(
+            memory_ledger.memory_directive("unut.py dosyasını düzelt. Bunu unut.").kind,
+            "forget",
+        )
+        self.assertEqual(
+            memory_ledger.memory_directive("saklama.py dosyasını düzelt. Bunu kaydetme.").kind,
+            "do-not-save",
         )
         self.assertTrue(
             memory_ledger.is_read_only_request(

@@ -101,6 +101,24 @@ READ_ONLY_REQUEST = re.compile(
     r"don['’]t\s+(?:modify|change|touch)\s+files(?:\s+or\s+settings)?|"
     r"no\s+(?:file|files)\s+(?:changes?|modifications?))\b"
 )
+SESSION_ONLY_REQUEST = re.compile(
+    r"\b(?:bu (?:konuşmada|sohbette|oturumda|sohbet aramızda)|aramızda) kalsın\b"
+)
+FORGET_REQUEST = re.compile(
+    r"\b(?:unut(?:ur\s+musun)?|hafızandan\s+(?:çıkar|sil)|"
+    r"hatırlamanı\s+istemiyorum)\b"
+)
+DO_NOT_SAVE_REQUEST = re.compile(r"\b" + DO_NOT_SAVE + r"\b")
+WHAT_KNOWN_REQUEST = re.compile(r"\bbenim\s+hakkımda\s+ne\s+biliyorsun\b")
+CORRECT_REQUEST = re.compile(r"\bdüzelt\b")
+_MEMORY_CONTROL_PATTERNS = (
+    READ_ONLY_REQUEST,
+    SESSION_ONLY_REQUEST,
+    FORGET_REQUEST,
+    DO_NOT_SAVE_REQUEST,
+    WHAT_KNOWN_REQUEST,
+    CORRECT_REQUEST,
+)
 EXPLICIT_WRITE_INTENT = re.compile(
     r"^\s*(?:"
     r"(?:lütfen\s+)?(?:(?:ok|okay|tamam)\s*[,;:]?\s*)?(?:lütfen\s+)?"
@@ -340,11 +358,9 @@ def _targeted_write_matches(pattern: re.Pattern[str], folded: str) -> bool:
     )
 
 
-def _read_only_scan_request(text: str) -> str:
-    folded = _folded_request(text)
-    # A read-only keyword can be part of a concrete path or filename. Remove
-    # only that bounded target span; restrictions elsewhere in the message
-    # must continue to take precedence.
+def _mask_bounded_memory_controls(folded: str) -> str:
+    # Control words can be part of a concrete path or filename. Remove only
+    # those bounded target tokens; controls elsewhere in the message remain.
     masked = list(folded)
     for token_match in re.finditer(r"[\w./\\-]+", folded):
         target = token_match.group()
@@ -353,11 +369,16 @@ def _read_only_scan_request(text: str) -> str:
             and _NAMED_FILENAME.fullmatch(target) is None
         ):
             continue
-        for match in READ_ONLY_REQUEST.finditer(target):
-            start = token_match.start() + match.start()
-            end = token_match.start() + match.end()
-            masked[start:end] = " " * (end - start)
+        for pattern in _MEMORY_CONTROL_PATTERNS:
+            for match in pattern.finditer(target):
+                start = token_match.start() + match.start()
+                end = token_match.start() + match.end()
+                masked[start:end] = " " * (end - start)
     return "".join(masked)
+
+
+def _read_only_scan_request(text: str) -> str:
+    return _mask_bounded_memory_controls(_folded_request(text))
 
 
 @dataclass(frozen=True)
@@ -643,19 +664,21 @@ def contains_secret(text: str) -> bool:
 def memory_directive(text: str) -> MemoryDirective:
     raw = text.strip()
     unquoted = _unquoted_request(text)
-    folded = unicodedata.normalize("NFKC", unquoted).casefold().replace("i\u0307", "i")
+    folded = _mask_bounded_memory_controls(
+        unicodedata.normalize("NFKC", unquoted).casefold().replace("i\u0307", "i")
+    )
     raw_folded = unicodedata.normalize("NFKC", raw).casefold().replace("i\u0307", "i")
-    if re.search(r'\b(?:bu (?:konuşmada|sohbette|oturumda|sohbet aramızda)|aramızda) kalsın\b', folded):
+    if SESSION_ONLY_REQUEST.search(folded) is not None:
         return MemoryDirective("session-only")
     if contains_secret(raw):
         return MemoryDirective("secret")
-    if re.search(r"\bbenim\s+hakkımda\s+ne\s+biliyorsun\b", folded):
+    if WHAT_KNOWN_REQUEST.search(folded) is not None:
         return MemoryDirective("what-known")
-    if re.search(r'\b' + DO_NOT_SAVE + r'\b', folded):
+    if DO_NOT_SAVE_REQUEST.search(folded) is not None:
         standalone_text = CONTROL_SEPARATOR.sub(" ", raw_folded).strip()
         standalone = re.fullmatch(STANDALONE_DO_NOT_SAVE, standalone_text)
         return MemoryDirective("do-not-save", "" if standalone else raw)
-    if re.search(r"\b(?:unut(?:ur\s+musun)?|hafızandan\s+(?:çıkar|sil)|hatırlamanı\s+istemiyorum)\b", folded):
+    if FORGET_REQUEST.search(folded) is not None:
         match = FORGET_WITH_TARGET.match(raw) or FORGET_SUFFIX.match(raw)
         if match is None:
             return MemoryDirective("forget-ambiguous", raw)
@@ -665,7 +688,7 @@ def memory_directive(text: str) -> MemoryDirective:
         return MemoryDirective("forget", target)
     if is_read_only_request(text):
         return MemoryDirective("read-only")
-    if re.search(r"\bdüzelt\b", folded):
+    if CORRECT_REQUEST.search(folded) is not None:
         return MemoryDirective("correct")
     if is_explicit_write_intent(text):
         return MemoryDirective("write-intent")
