@@ -507,6 +507,9 @@ Eylül etiket denetimi.
                 "show current hook records, not historical records": {"active.md"},
                 "show current hook records and exclude historical records": {"active.md"},
                 "show current hook records and exclude only historical records": {"active.md"},
+                "show current hook records, not archived records": {"active.md"},
+                "show current hook records, not superseded records": {"active.md"},
+                "show current hook records, not historical hook records with errors": set(),
                 "historical records, not current records": {
                     "historical.md", "archived.md", "superseded.md",
                 },

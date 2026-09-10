@@ -1763,19 +1763,22 @@ def _excerpt(
 
 
 def _split_selection_exclusion(query: str) -> tuple[str, str, bool, bool] | None:
+    """Empty positive query means a recognized exclusion has unsupported nesting."""
     connectors = tuple(CURRENT_HISTORY_CONNECTOR.finditer(query))
     for index, connector in enumerate(connectors):
         marker = SELECTION_EXCLUSION_MARKER.match(query, connector.end())
         if marker is None:
             continue
         if index + 1 != len(connectors):
-            return None
+            return "", "", False, False
         left = query[:connector.start()].strip(" ,;:()[]")
         excluded = query[marker.end():].strip(" ,;:()[]")
         if not left or not excluded:
             continue
         excluded_terms = _retrieval_terms(excluded)
-        excludes_history = _is_history_query(excluded_terms, excluded)
+        excludes_history = _is_history_query(excluded_terms, excluded) or any(
+            _is_historical_status(term) for term in excluded_terms
+        )
         excludes_current = bool(
             excluded_terms & CURRENT_QUERY_TERMS
             and _has_independent_current_cue(excluded)
@@ -2142,12 +2145,12 @@ def _is_historical_material(entry: VaultEntry) -> bool:
     )
 
 
+def _is_historical_status(status: str) -> bool:
+    return status in {"archived", "historical"} or status.startswith("superseded")
+
+
 def _is_historical_preference_material(entry: VaultEntry) -> bool:
-    return (
-        _is_historical_material(entry)
-        or entry.status in {"archived", "historical"}
-        or entry.status.startswith("superseded")
-    )
+    return _is_historical_material(entry) or _is_historical_status(entry.status)
 
 
 def _is_current_material(entry: VaultEntry) -> bool:
