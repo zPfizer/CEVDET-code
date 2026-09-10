@@ -369,12 +369,40 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         ):
             ledger.sanitize_text(text, max_chars=None)
 
+    def test_windows_batch_credential_assignment_consumes_outer_quote(self) -> None:
+        for value in ('FIRST_SECRET', 'FIRST_SECRET SECOND_SECRET'):
+            with self.subTest(value=value):
+                text = f'set "DATABASE_PASSWORD={value}"\nkeep=ordinary'
+
+                sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+
+                self.assertEqual(
+                    sanitized,
+                    'set "DATABASE_PASSWORD=<REDACTED>"\nkeep=ordinary',
+                )
+                self.assertEqual(redactions, ('credential',))
+                self.assertNotIn('FIRST_SECRET', sanitized)
+                self.assertNotIn('SECOND_SECRET', sanitized)
+
+    def test_unterminated_windows_batch_credential_quote_fails_closed(self) -> None:
+        text = 'set "DATABASE_PASSWORD=FIRST_SECRET\nP02_UNTERMINATED_BATCH_CANARY'
+
+        with self.assertRaisesRegex(
+            ledger.MemoryPreferenceError,
+            '^memory-credential-container-unverifiable$',
+        ):
+            ledger.sanitize_text(text, max_chars=None)
+
     def test_normal_suffixed_identifiers_are_not_secrets(self) -> None:
         for text in (
             'max_token=4096',
             'expected_claim_token=claim-value',
             'MAX_TOKEN=4096',
             'EXPECTED_CLAIM_TOKEN=claim-value',
+            'set "max_token=4096"',
+            'set "expected_claim_token=claim-value"',
+            'set "MAX_TOKEN=4096"',
+            'set "EXPECTED_CLAIM_TOKEN=claim-value"',
         ):
             with self.subTest(text=text):
                 self.assertEqual(ledger.sanitize_text(text, max_chars=None), (text, ()))

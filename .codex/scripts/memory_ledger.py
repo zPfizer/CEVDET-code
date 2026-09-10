@@ -55,6 +55,14 @@ CREDENTIAL = re.compile(
     r'''(?P=key_quote)\s*[:=]\s*)'''
     r'''(?P<value>[{\[]|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^\s\r\n]+)'''
 )
+BATCH_CREDENTIAL = re.compile(
+    r'''(?im)(?P<prefix>\bset\s+(?P<quote>["']))(?P<key>''' + CREDENTIAL_NAME + r''')\s*=\s*'''
+    r'''(?P<value>(?:\\[\s\S]|(?!(?P=quote))[^\\])*)(?P=quote)'''
+)
+BATCH_CREDENTIAL_START = re.compile(
+    r'''(?im)\bset\s+(?P<quote>["'])(?P<key>''' + CREDENTIAL_NAME + r''')\s*=\s*'''
+)
+BATCH_ASSIGNMENT_PREFIX = re.compile(r'''(?im)\bset\s+["']\Z''')
 TOKEN_PREFIX = re.compile(r"\b(?:sk(?=[-_])|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
 PERSONAL_CREDENTIAL = re.compile(
     r"(?i)\b(?:api\s+anahtarım|parolam|şifrem|tokenım)\b"
@@ -943,6 +951,14 @@ def sanitize_text(
             lambda match: (f'{match.group("prefix")}"Bearer <REDACTED>"' if match.group('key_quote')
                            else "Authorization: Bearer <REDACTED>"),
             "authorization")
+    for match in BATCH_CREDENTIAL_START.finditer(text):
+        if _quoted_credential_value_end(text, match.start('quote')) is None:
+            raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+    replace_outside_json_values(
+        BATCH_CREDENTIAL,
+        lambda match: f'{match.group("prefix")}{match.group("key")}=<REDACTED>{match.group("quote")}',
+        "credential",
+    )
     regions = _json_regions(text)
     json_strings = _json_string_regions(text)
     region: tuple[int, int] | None = None
@@ -950,6 +966,10 @@ def sanitize_text(
     pieces: list[str] = []
     cursor = 0
     while match := CREDENTIAL.search(text, cursor):
+        line_start = text.rfind('\n', 0, match.start()) + 1
+        if BATCH_ASSIGNMENT_PREFIX.search(text[line_start:match.start()]):
+            cursor = match.end()
+            continue
         while json_string is None or json_string[1] <= match.start():
             json_string = next(json_strings, None)
             if json_string is None:
