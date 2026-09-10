@@ -436,6 +436,38 @@ Eylül etiket denetimi.
         self.assertEqual(history[0].entry.path, "🏰 300-Projects/Tansu/Python-eski.md")
         self.assertEqual(current[0].entry.path, "🏰 300-Projects/Tansu/Python-guncel.md")
 
+    def test_current_mixed_query_prefers_active_duplicate_and_keeps_history_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current_body = "# Hook Deployment Checklist\nHook deployment checklist current release.\n"
+            for name, status in (("a-archived", "archived"), ("z-active", "active")):
+                _write(
+                    root,
+                    f"{name}.md",
+                    f"---\ntitle: Hook Deployment Checklist\nstatus: {status}\ntype: note\n---\n"
+                    + current_body,
+                )
+            history = "history.md"
+            _write(
+                root,
+                history,
+                "---\ntitle: Hook Deployment History\nstatus: historical\ntype: research-analysis\n---\n"
+                "# Hook Deployment History\nHook history records prior deployment checklist.\n",
+            )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            for query in (
+                "compare hook history with current deployment checklist",
+                "current deployment checklist compare hook history",
+            ):
+                with self.subTest(query=query):
+                    paths = [
+                        hit.entry.path
+                        for hit in retrieval.search_vault(entries, query, top_k=3)
+                    ]
+                    self.assertIn("z-active.md", paths)
+                    self.assertIn(history, paths)
+                    self.assertNotIn("a-archived.md", paths)
+
     def test_ordinary_history_prefix_match_keeps_active_record_ahead_of_archived_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

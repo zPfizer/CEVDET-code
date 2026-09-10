@@ -151,6 +151,7 @@ HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES = {
     for stem_type, suffixes in HISTORY_QUERY_INFLECTION_SUFFIXES.items()
 }
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
+CURRENT_QUERY_TERMS = frozenset({"current", "guncel"})
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
     "work", "prefer", "response", "reply", "style", "profile",
@@ -1601,6 +1602,7 @@ def _rank(
         return []
 
     include_history = _is_history_query(query_terms, query)
+    current_query = bool(query_terms & CURRENT_QUERY_TERMS)
     personal_query = _is_personal_query(query_terms)
     # ponytail: explicit Vault-system wording only; this is not semantic topic detection.
     vault_system_query = 'vault' in query_terms and bool(query_terms & {
@@ -1695,17 +1697,30 @@ def _rank(
     ranked.sort(key=lambda candidate: (-candidate[0], -candidate[1], candidate[2]))
     selected = ranked[:top_k]
     if top_k <= MAX_CANDIDATES:
-        unique: list[tuple[int, float, str, VaultEntry, tuple[str, ...]]] = []
-        seen_content: set[str] = set()
-        for candidate in ranked:
-            content_key = candidate[3].content_key or candidate[2]
-            if content_key in seen_content:
-                continue
-            seen_content.add(content_key)
-            unique.append(candidate)
-            if len(unique) == top_k:
-                break
-        selected = unique
+        if current_query:
+            representatives: dict[str, tuple[int, float, str, VaultEntry, tuple[str, ...]]] = {}
+            order: list[str] = []
+            for candidate in ranked:
+                content_key = candidate[3].content_key or candidate[2]
+                previous = representatives.get(content_key)
+                if previous is None:
+                    representatives[content_key] = candidate
+                    order.append(content_key)
+                elif candidate[3].status == "active" and previous[3].status != "active":
+                    representatives[content_key] = candidate
+            selected = [representatives[content_key] for content_key in order[:top_k]]
+        else:
+            unique: list[tuple[int, float, str, VaultEntry, tuple[str, ...]]] = []
+            seen_content: set[str] = set()
+            for candidate in ranked:
+                content_key = candidate[3].content_key or candidate[2]
+                if content_key in seen_content:
+                    continue
+                seen_content.add(content_key)
+                unique.append(candidate)
+                if len(unique) == top_k:
+                    break
+            selected = unique
     return [
         VaultHit(
             entry=entry,
