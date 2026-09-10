@@ -57,10 +57,14 @@ CREDENTIAL = re.compile(
 )
 BATCH_CREDENTIAL = re.compile(
     r'''(?im)(?P<prefix>\bset\s+(?P<quote>["']))(?P<key>''' + CREDENTIAL_NAME + r''')\s*=\s*'''
-    r'''(?P<value>(?:\\[\s\S]|(?!(?P=quote))[^\\])*)(?P=quote)'''
+    r'''(?P<value>(?:(?!(?P=quote))[^\r\n])*)(?P=quote)'''
 )
 BATCH_CREDENTIAL_START = re.compile(
     r'''(?im)\bset\s+(?P<quote>["'])(?P<key>''' + CREDENTIAL_NAME + r''')\s*=\s*'''
+)
+BATCH_CREDENTIAL_UNQUOTED = re.compile(
+    r'''(?im)(?P<prefix>\bset[ \t]+)(?P<key>''' + CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
+    r'''(?P<value>[^\r\n]*)'''
 )
 BATCH_ASSIGNMENT_PREFIX = re.compile(r'''(?im)\bset\s+["']\Z''')
 TOKEN_PREFIX = re.compile(r"\b(?:sk(?=[-_])|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
@@ -703,6 +707,19 @@ def _quoted_credential_value_end(text: str, start: int) -> int | None:
     return None
 
 
+def _batch_quoted_credential_value_end(text: str, start: int) -> int | None:
+    quote = text[start:start + 1]
+    if quote not in {'"', "'"}:
+        return None
+    for index in range(start + 1, len(text)):
+        character = text[index]
+        if character in {'\r', '\n'}:
+            return None
+        if character == quote:
+            return index + 1
+    return None
+
+
 def _json_regions(text: str) -> Iterator[tuple[int, int]]:
     """Validated JSON containers and complete top-level JSON strings."""
     decoder = json.JSONDecoder()
@@ -952,11 +969,16 @@ def sanitize_text(
                            else "Authorization: Bearer <REDACTED>"),
             "authorization")
     for match in BATCH_CREDENTIAL_START.finditer(text):
-        if _quoted_credential_value_end(text, match.start('quote')) is None:
+        if _batch_quoted_credential_value_end(text, match.start('quote')) is None:
             raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
     replace_outside_json_values(
         BATCH_CREDENTIAL,
         lambda match: f'{match.group("prefix")}{match.group("key")}=<REDACTED>{match.group("quote")}',
+        "credential",
+    )
+    replace_outside_json_values(
+        BATCH_CREDENTIAL_UNQUOTED,
+        lambda match: f'{match.group("prefix")}{match.group("key")}=<REDACTED>',
         "credential",
     )
     regions = _json_regions(text)

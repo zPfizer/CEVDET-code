@@ -393,6 +393,37 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         ):
             ledger.sanitize_text(text, max_chars=None)
 
+    def test_unquoted_windows_batch_credential_value_consumes_full_line(self) -> None:
+        text = 'set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET\nkeep=ordinary'
+
+        sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+
+        self.assertEqual(
+            sanitized,
+            'set DATABASE_PASSWORD=<REDACTED>\nkeep=ordinary',
+        )
+        self.assertEqual(redactions, ('credential',))
+        self.assertNotIn('FIRST_SECRET', sanitized)
+        self.assertNotIn('SECOND_SECRET', sanitized)
+
+    def test_unterminated_windows_batch_quote_does_not_use_later_line_quote(self) -> None:
+        text = 'set "DATABASE_PASSWORD=FIRST_SECRET\nkeep this decision "quoted" tail'
+
+        with self.assertRaisesRegex(
+            ledger.MemoryPreferenceError,
+            '^memory-credential-container-unverifiable$',
+        ):
+            ledger.sanitize_text(text, max_chars=None)
+
+    def test_windows_batch_quote_treats_backslash_literally(self) -> None:
+        text = r'set "DATABASE_PASSWORD=C:\secret\"'
+
+        sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+
+        self.assertEqual(sanitized, 'set "DATABASE_PASSWORD=<REDACTED>"')
+        self.assertEqual(redactions, ('credential',))
+        self.assertNotIn('C:\\secret\\', sanitized)
+
     def test_unquoted_credential_value_consumes_escaped_whitespace(self) -> None:
         text = r'DATABASE_PASSWORD=FIRST\ SECOND_SECRET'
 
