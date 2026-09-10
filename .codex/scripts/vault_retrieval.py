@@ -179,6 +179,9 @@ HISTORY_OBJECT_CURRENT_CUE = re.compile(
     rf"(?:\W+\w+){{0,2}}\W+(?P<current>{CURRENT_QUERY_CUE})\b"
 )
 CURRENT_HISTORY_CONNECTOR = re.compile(r"(?i)(?:[,;]|\b(?:with|versus|vs|compare|and|or|ve|to|ile|against)\b)")
+SELECTION_EXCLUSION_MARKER = re.compile(
+    r"(?i)\s*(?:not\b(?!\s+only\b)|exclude\b|excluding\b)"
+)
 SCOPE_COMMAND_TERMS = frozenset({"show", "list", "display", "give", "goster", "listele", "ver"})
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
@@ -288,10 +291,6 @@ HISTORY_DATE = re.compile(
     rf"|(?P<my_month>{HISTORY_MONTH_PATTERN})\s+(?P<my_year>\d{{4}})"
     rf"|(?P<year>\d{{4}})"
     rf")(?!\w)"
-)
-HISTORY_DATE_QUESTION = re.compile(
-    r"(?i)\b(?P<date_term>tarih\w*)\b"
-    r"(?:\W+\w+){0,3}\W+(?:nedir|ne|hangi|kac|goster|show|display)\b"
 )
 HISTORY_IDENTIFIER = re.compile(
     r"(?i)(?:#|\b(?:ticket|port|issue|bug|rfc|case|task)\b)[\s#:/-]*+(?:(?P<identifier>\d[\w.-]*))?"
@@ -1535,20 +1534,13 @@ def _has_history_context(query: str) -> bool:
 
 
 def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
+    # ponytail: `tarih` alone is ambiguous date/history wording; explicit history cues widen recall.
     history_terms = query_terms & HISTORY_QUERY_TERMS
-    ambiguous_date_question = bool(
-        query
-        and any(
-            match.group("date_term") == "tarih"
-            or _matches_history_inflection(match.group("date_term"), "tarih")
-            for match in HISTORY_DATE_QUESTION.finditer(_normalize(query))
-        )
-    )
     has_inflected_history = any(
         _matches_history_inflection(term, root)
         for term in query_terms
         for root in HISTORY_QUERY_INFLECTION_ROOTS
-        if root != "onceki" and (root != "tarih" or not ambiguous_date_question)
+        if root not in {"onceki", "tarih"}
     )
     has_previous_inflection = "onceki" in query_terms or any(
         _matches_history_inflection(term, "onceki")
@@ -1559,9 +1551,7 @@ def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
     has_turkish_nominal_change = bool(
         query and HISTORY_TURKISH_NOMINAL_CHANGE_QUERY.search(_normalize(query))
     )
-    unambiguous_history_terms = history_terms - {"before", "past", "previous", "onceki"}
-    if ambiguous_date_question:
-        unambiguous_history_terms -= {"tarih"}
+    unambiguous_history_terms = history_terms - {"before", "past", "previous", "onceki", "tarih"}
     if (
         has_inflected_history
         or has_retrospective_change
@@ -1693,6 +1683,29 @@ def _excerpt(
                     best = 'Metin bütçeye sığmıyor; tam kaynağı oku.'
             best_score = score
     return best
+
+
+def _split_selection_exclusion(query: str) -> tuple[str, str, bool, bool] | None:
+    connectors = tuple(CURRENT_HISTORY_CONNECTOR.finditer(query))
+    for index, connector in enumerate(connectors):
+        marker = SELECTION_EXCLUSION_MARKER.match(query, connector.end())
+        if marker is None:
+            continue
+        if index + 1 != len(connectors):
+            return None
+        left = query[:connector.start()].strip(" ,;:()[]")
+        excluded = query[marker.end():].strip(" ,;:()[]")
+        if not left or not excluded:
+            continue
+        excluded_terms = _retrieval_terms(excluded)
+        excludes_history = _is_history_query(excluded_terms, excluded)
+        excludes_current = bool(
+            excluded_terms & CURRENT_QUERY_TERMS
+            and _has_independent_current_cue(excluded)
+        )
+        if excludes_history or excludes_current:
+            return left, excluded, excludes_history, excludes_current
+    return None
 
 
 def _split_current_history_query(query: str) -> tuple[str, str] | None:
@@ -1961,12 +1974,30 @@ def _rank_query(
     *,
     top_k: int = MAX_CANDIDATES,
 ) -> list[VaultHit]:
+    exclusion = _split_selection_exclusion(query)
+    if exclusion is not None:
+        query, _excluded_query, exclude_historical_material, exclude_current_material = exclusion
+    else:
+        exclude_historical_material = False
+        exclude_current_material = False
     scopes = _split_current_history_query(query)
     if scopes is not None:
         current_query, history_query = scopes
         return _merge_scoped_hits(
-            _rank(entries, current_query, top_k=top_k),
-            _rank(entries, history_query, top_k=top_k),
+            _rank(
+                entries,
+                current_query,
+                top_k=top_k,
+                exclude_historical_material=exclude_historical_material,
+                exclude_current_material=exclude_current_material,
+            ),
+            _rank(
+                entries,
+                history_query,
+                top_k=top_k,
+                exclude_historical_material=exclude_historical_material,
+                exclude_current_material=exclude_current_material,
+            ),
             top_k=top_k,
         )
     terms = _retrieval_terms(query)
@@ -1986,6 +2017,8 @@ def _rank_query(
         query,
         top_k=top_k,
         preserve_current_stale_penalty=preserve_current_stale_penalty,
+        exclude_historical_material=exclude_historical_material,
+        exclude_current_material=exclude_current_material,
     )
 
 
@@ -2011,12 +2044,18 @@ def _is_historical_preference_material(entry: VaultEntry) -> bool:
     )
 
 
+def _is_current_material(entry: VaultEntry) -> bool:
+    return entry.status == "active" and not _is_historical_preference_material(entry)
+
+
 def _rank(
     entries: VaultMap,
     query: str,
     *,
     top_k: int = MAX_CANDIDATES,
     preserve_current_stale_penalty: bool = False,
+    exclude_historical_material: bool = False,
+    exclude_current_material: bool = False,
 ) -> list[VaultHit]:
     query_terms = _retrieval_terms(query)
     query_acronyms = frozenset(_normalize(value) for value in ACRONYM.findall(query))
@@ -2033,6 +2072,11 @@ def _rank(
     })
     eligible_entries = []
     for entry in entries:
+        if (
+            (exclude_historical_material and _is_historical_preference_material(entry))
+            or (exclude_current_material and _is_current_material(entry))
+        ):
+            continue
         historical_material = _is_historical_material(entry)
         named = len(entry.title_terms) >= 2 and entry.title_terms <= query_terms
         if include_history or named or not historical_material:

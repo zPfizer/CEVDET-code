@@ -487,6 +487,54 @@ Eylül etiket denetimi.
                     self.assertNotIn("b-archived.md", paths)
                     self.assertLess(paths.index("z-active.md"), paths.index(history))
 
+    def test_explicit_selection_exclusions_filter_current_and_history_scopes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, status in (
+                ("active.md", "active"),
+                ("historical.md", "historical"),
+                ("archived.md", "archived"),
+                ("superseded.md", "superseded-v1"),
+            ):
+                _write(
+                    root,
+                    name,
+                    f"---\ntitle: Hook Records\nstatus: {status}\ntype: note\n---\n"
+                    "# Hook Records\nHook records historical evidence.\n",
+                )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            cases = {
+                "show current hook records, not historical records": {"active.md"},
+                "show current hook records and exclude historical records": {"active.md"},
+                "show current hook records and exclude only historical records": {"active.md"},
+                "historical records, not current records": {
+                    "historical.md", "archived.md", "superseded.md",
+                },
+                "historical records and exclude current records": {
+                    "historical.md", "archived.md", "superseded.md",
+                },
+            }
+            for query, expected in cases.items():
+                with self.subTest(query=query):
+                    exclusion = retrieval._split_selection_exclusion(query)
+                    self.assertIsNotNone(exclusion)
+                    paths = {
+                        hit.entry.path
+                        for hit in retrieval.search_vault(entries, query, top_k=5)
+                    }
+                    self.assertEqual(paths, expected)
+
+            not_only = "show current hook records and not only historical records"
+            self.assertIsNone(retrieval._split_selection_exclusion(not_only))
+            self.assertEqual(
+                {hit.entry.path for hit in retrieval.search_vault(entries, not_only, top_k=5)},
+                {"active.md", "historical.md", "archived.md", "superseded.md"},
+            )
+            long_query = "show current hook records " + ("and topic " * 2000) + "and not historical records"
+            started = time.perf_counter()
+            self.assertIsNotNone(retrieval._split_selection_exclusion(long_query))
+            self.assertLess(time.perf_counter() - started, 5.0)
+
     def test_current_history_scope_ignores_inner_connectors(self) -> None:
         cases = {
             "compare current checklist with past design and history notes": (
@@ -912,9 +960,16 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "dosyanın tarihi nedir?": False,
             "dosyanın tarih nedir?": False,
             "dosyanın tarihini göster": False,
+            "tarihi hook sözleşmesi": False,
+            "tarihte hook sözleşmesi": False,
+            "tarihten hook sözleşmesi": False,
+            "tarihinde hook sözleşmesi": False,
+            "tarihim hook sözleşmesi": False,
+            "tarihindeki hook sözleşmesi": False,
             "doğum tarihim nedir?": False,
             "doğum tarihimiz nedir?": False,
             "tarihçe kayıtlarını göster": True,
+            "geçmiş tarihi hook sözleşmesi": True,
             "hook contract changed yesterday": True,
             "recent changes to the hook contract": True,
             "hook sözleşmesi dün değişti": True,
@@ -1057,12 +1112,12 @@ title: Hook Protokolü
             entries = retrieval.build_vault_map(root, write_cache=False)
             for marker in (
                 "geçmişte", "geçmişten", "geçmişe", "geçmişi", "geçmişin",
-                "eskiden", "eskiye", "eskiyi", "öncekiler", "tarihi", "tarihte", "tarihten",
+                "eskiden", "eskiye", "eskiyi", "öncekiler",
                 "geçmişinde", "geçmişini", "geçmişimiz", "geçmişimde", "geçmişimizin",
-                "tarihinde", "öncekilerin", "eskisi", "eskisini", "eskisinde", "öncekisi",
+                "öncekilerin", "eskisi", "eskisini", "eskisinde", "öncekisi",
                 "eskim", "eskimiz", "eskilerim", "tarihçesi", "tarihçesinde",
                 "geçmişteki", "geçmiştekiler", "geçmiştekilerden", "tarihçesindekilere",
-                "tarihindeki", "historic", "histories",
+                "historic", "histories",
                 "previously", "historically", "before 2024",
             ):
                 with self.subTest(marker=marker):
