@@ -79,6 +79,14 @@ QUOTED_CONTENT = re.compile(
     r'(?m:^[ \t]*>[^\n]*|^(?: {4}|\t)[^\n]*)|'
     r'`[^`\n]*`|"[^"\n]*"|“[^”]*”|‘[^’]*’|«[^»]*»'
 )
+_QUOTE_PAIRS = (
+    ("'", "'"), ('"', '"'), ("“", "”"), ("‘", "’"),
+    ("`", "`"), ("«", "»"),
+)
+_QUOTED_CASE_SUFFIX = r"(?:['’]?y?[ıiuü])?"
+_QUOTED_DIRECTORY_PREFIX = (
+    r"(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])"
+)
 DO_NOT_SAVE = r'(?:(?:bunu|bu bilgiyi|bu ayrıntıyı)\s+)?(?:kaydetme|saklama|hafızana alma|hafızanda tutma|kaydetmeni istemiyorum)'
 STANDALONE_DO_NOT_SAVE = (
     r'(?:lütfen\s+)?' + DO_NOT_SAVE
@@ -137,22 +145,31 @@ _WRITE_MODULE_TARGET = (
     rf"[\w.-]+\s+modül(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}"
 )
 _QUOTED_PATH = (
-    r'''(?:"[^"\r\n]*\.[A-Za-z0-9_-]+"|'''
-    r"""'[^'\r\n]*\.[A-Za-z0-9_-]+(?:['’]y?[ıiuü]|')|"""
-    r'''“[^“”\r\n]*\.[A-Za-z0-9_-]+”|'''
-    r'''‘[^‘’\r\n]*\.[A-Za-z0-9_-]+(?:’y?[ıiuü]|’))'''
+    "(?:"
+    + "|".join(
+        rf"{re.escape(opening)}[^{re.escape(closing)}\r\n]*\.[A-Za-z0-9_-]+"
+        rf"{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
+        for opening, closing in _QUOTE_PAIRS
+    )
+    + ")"
 )
 _QUOTED_FILENAME = (
-    r'''(?:"[^"\r\n]+"|'''
-    r'''\'[^\'\r\n]+\'|'''
-    r'''“[^“”\r\n]+”|'''
-    r'''‘[^‘’\r\n]+’)'''
+    "(?:"
+    + "|".join(
+        rf"{re.escape(opening)}[^{re.escape(closing)}\r\n]+"
+        rf"{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
+        for opening, closing in _QUOTE_PAIRS
+    )
+    + ")"
 )
 _QUOTED_DIRECTORY = (
-    r'''(?:"(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[^"\r\n]+?"|'''
-    r'''\'(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[^\'\r\n]+?\'|'''
-    r'''“(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[^“”\r\n]+?”|'''
-    r'''‘(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[^‘’\r\n]+?’)'''
+    "(?:"
+    + "|".join(
+        rf"{re.escape(opening)}{_QUOTED_DIRECTORY_PREFIX}"
+        rf"[^{re.escape(closing)}\r\n]+?{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
+        for opening, closing in _QUOTE_PAIRS
+    )
+    + ")"
 )
 _WRITE_FILENAME = r"(?:[\w.-]+\.[A-Za-z0-9_-]+|\.[A-Za-z0-9_-]+)"
 _WRITE_CASE_SUFFIX = r"['’]y?[ıiuü]"
@@ -171,6 +188,7 @@ _WRITE_TARGET = (
 )
 _TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen|ok|okay|tamam)(?:[,;:]\s++|\s++))*"
 _TRAILING_POLITENESS = r"(?:(?:\s*+,\s*+|\s++)lütfen)?"
+# ponytail: only this test-running suffix; broader compound sentences need shared sentence parsing.
 _WRITE_FOLLOWUP = r"(?:\s+ve\s+testleri\s+çalıştır|[.!]\s+sonra\s+testleri\s+çalıştır)?"
 TARGETED_WRITE_COMMAND = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+{_WRITE_MUTATION}"

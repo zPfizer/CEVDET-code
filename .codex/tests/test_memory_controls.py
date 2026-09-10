@@ -33,6 +33,44 @@ class MemoryDirectiveTests(unittest.TestCase):
             timeout=5,
         )
 
+    def test_all_supported_quoted_target_pairs_keep_bounds(self) -> None:
+        path = r"C:\Users\Me\My Project\app.py"
+        directory = r"C:\Program Files (x86)\Project / R&D"
+        for opening, closing in memory_ledger._QUOTE_PAIRS:
+            with self.subTest(opening=opening, closing=closing):
+                for target in ("app.py", path):
+                    self.assertTrue(
+                        memory_ledger.is_explicit_write_intent(
+                            f"{opening}{target}{closing}yi düzelt."
+                        )
+                    )
+                    self.assertTrue(
+                        memory_ledger.is_explicit_write_intent(
+                            f"{opening}{target}{closing} dosyasını düzelt."
+                        )
+                    )
+                self.assertTrue(
+                    memory_ledger.is_explicit_write_intent(
+                        f"{opening}{directory}{closing} klasörünü değiştir."
+                    )
+                )
+                self.assertFalse(
+                    memory_ledger.is_explicit_write_intent(
+                        f"{opening}app.py dosyasını düzelt.{closing}"
+                    )
+                )
+                self.assertFalse(
+                    memory_ledger.is_explicit_write_intent(
+                        f"Onaylıysa {opening}app.py{closing} dosyasını düzelt."
+                    )
+                )
+        for fence in ("```", "~~~"):
+            self.assertFalse(
+                memory_ledger.is_explicit_write_intent(
+                    f"{fence}text\napp.py dosyasını düzelt.\n{fence}"
+                )
+            )
+
     def test_quoted_controls_are_content_but_outer_controls_still_apply(self) -> None:
         ordinary = [
             'Makalede “bu konuşmada kalsın” yazıyor. Bunu değerlendir.',
