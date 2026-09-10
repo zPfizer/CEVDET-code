@@ -290,7 +290,7 @@ HISTORY_DATE = re.compile(
     rf")(?!\w)"
 )
 HISTORY_DATE_QUESTION = re.compile(
-    r"(?i)\btarih(?:i|in|ini|inin|ine|e|te|ten)?\b"
+    r"(?i)\b(?P<date_term>tarih\w*)\b"
     r"(?:\W+\w+){0,3}\W+(?:nedir|ne|hangi|kac|goster|show|display)\b"
 )
 HISTORY_IDENTIFIER = re.compile(
@@ -1536,7 +1536,14 @@ def _has_history_context(query: str) -> bool:
 
 def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
     history_terms = query_terms & HISTORY_QUERY_TERMS
-    ambiguous_date_question = bool(query and HISTORY_DATE_QUESTION.search(_normalize(query)))
+    ambiguous_date_question = bool(
+        query
+        and any(
+            match.group("date_term") == "tarih"
+            or _matches_history_inflection(match.group("date_term"), "tarih")
+            for match in HISTORY_DATE_QUESTION.finditer(_normalize(query))
+        )
+    )
     has_inflected_history = any(
         _matches_history_inflection(term, root)
         for term in query_terms
