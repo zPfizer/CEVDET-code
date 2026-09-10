@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import calendar
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from datetime import date
 import hashlib
+from itertools import zip_longest
 import json
 import math
 import os
@@ -113,15 +117,184 @@ SEMANTIC_SENTINELS = {
 CURRENT_CLAIM = re.compile(r"(?i)^\s*-\s*`gecerli`\s+")
 HTML_COMMENT = re.compile(r"<!--.*?(?:-->|$)", re.DOTALL)
 HISTORY_QUERY_TERMS = frozenset({
-    "gecmis", "tarihce", "tarihsel", "eski", "onceki", "degisim", "karsilastir",
-    "karsilastirma", "history", "historical", "before", "past", "previous", "change", "compare",
+    "gecmis", "tarih", "tarihce", "tarihsel", "eski", "onceki",
+    "history", "historic", "historical", "historically", "histories", "before", "past", "previous", "previously",
 })
-HISTORY_QUERY_PREFIXES = ("gecmis", "tarih", "eski", "onceki", "degis", "karsilastir", "histor", "before", "past", "previous", "change", "compar")
+HISTORY_QUERY_INFLECTION_ROOTS = frozenset({"gecmis", "tarih", "tarihce", "tarihsel", "eski", "onceki"})
+# ponytail: finite Turkish suffix grammar; use a morphology library only when this bounded set stops covering real queries.
+HISTORY_QUERY_INFLECTION_CASE_SUFFIXES = frozenset({
+    "e", "i", "in", "te", "ten", "de", "den", "ye", "yi",
+    "ne", "ni", "nin", "nde", "nden",
+})
+HISTORY_QUERY_INFLECTION_VOWELS = frozenset("aeiou")
+HISTORY_QUERY_INFLECTION_POSSESSIVES = {
+    "vowel": ("", "m", "n", "si", "miz", "niz", "leri"),
+    "consonant": ("", "im", "in", "i", "imiz", "iniz", "leri"),
+}
+HISTORY_QUERY_INFLECTION_SUFFIXES = {
+    stem_type: frozenset(
+        number + possessive + case
+        for number in ("", "ler")
+        for possessive in (
+            HISTORY_QUERY_INFLECTION_POSSESSIVES["vowel"]
+            if stem_type == "vowel" and not number
+            else HISTORY_QUERY_INFLECTION_POSSESSIVES["consonant"]
+        )
+        for case in ("", *HISTORY_QUERY_INFLECTION_CASE_SUFFIXES)
+        if number or possessive or case
+    )
+    for stem_type in ("vowel", "consonant")
+}
+HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES = {
+    stem_type: frozenset(
+        suffix for suffix in suffixes if suffix.endswith(("te", "de", "nde"))
+    )
+    for stem_type, suffixes in HISTORY_QUERY_INFLECTION_SUFFIXES.items()
+}
+HISTORY_FEATURE_OBJECT_TERMS = frozenset({
+    "config", "configuration", "policy", "policies", "retention", "setting", "settings",
+})
+# Shared bounded family for Turkish change nouns. `degisiklig` covers the
+# consonant-softened forms such as `değişikliği` after normalization.
+HISTORY_CHANGE_NOUN_ROOTS = frozenset({"degisiklik", "degisiklig", "degisim"})
+HISTORY_CHANGE_NOUN_SURFACE_TERMS = frozenset(
+    {root for root in HISTORY_CHANGE_NOUN_ROOTS}
+    | {
+        root + suffix
+        for root in HISTORY_CHANGE_NOUN_ROOTS
+        for suffix in HISTORY_QUERY_INFLECTION_SUFFIXES["consonant"]
+    }
+)
+HISTORY_CHANGE_NOUN_PATTERN = "|".join(
+    map(re.escape, sorted(HISTORY_CHANGE_NOUN_SURFACE_TERMS, key=len, reverse=True))
+)
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
+CURRENT_QUERY_TERMS = frozenset({"current", "guncel", "latest", "active", "aktif"})
+CURRENT_QUERY_CUE = r"(?:current|guncel|latest|active|aktif)"
+# In these bounded forms, `current` qualifies the object whose history is
+# requested; it does not create a separate current retrieval scope.
+HISTORY_OBJECT_CURRENT_CUE = re.compile(
+    rf"(?ix)\b(?:history|previous|past)\b"
+    r"(?:\W+\w+){0,3}\W+\bof\b"
+    rf"(?:\W+\w+){{0,2}}\W+(?P<current>{CURRENT_QUERY_CUE})\b"
+)
+CURRENT_HISTORY_CONNECTOR = re.compile(r"(?i)(?:[,;]|\b(?:with|versus|vs|compare|and|or|ve|to|ile|against)\b)")
+SELECTION_EXCLUSION_MARKER = re.compile(
+    r"(?i)\s*(?:not\b(?!\s+only\b)|exclude\b|excluding\b)"
+)
+SCOPE_COMMAND_TERMS = frozenset({"show", "list", "display", "give", "goster", "listele", "ver"})
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
     "work", "prefer", "response", "reply", "style", "profile",
 })
+HISTORY_CHANGE_TEMPORAL = r"(?:today|yesterday|recent|recently|earlier|last\s+(?:day|week|month|year))"
+HISTORY_TURKISH_CHANGE_TEMPORAL = r"(?:dun|gecen\s+(?:hafta|ay|yil))"
+HISTORY_NOMINAL_CHANGE_QUERY = re.compile(
+    rf"(?ix)(?:\bchanged\b\s+{HISTORY_CHANGE_TEMPORAL}\b|\b{HISTORY_CHANGE_TEMPORAL}\b\s+changes?\b)"
+)
+# Turkish `son` plus a change noun asks for the latest completed changes; keep
+# the noun forms bounded so ordinary plans and files stay current.
+HISTORY_TURKISH_NOMINAL_CHANGE_QUERY = re.compile(
+    r"(?ix)\bson\b"
+    r"(?:\W+\w+){0,2}\W+"
+    rf"\b(?:{HISTORY_CHANGE_NOUN_PATTERN})\b"
+)
+HISTORY_CHANGE_TAIL = (
+    rf"(?:\s*(?:[?!.,;:]|$)|\s+{HISTORY_CHANGE_TEMPORAL}\b"
+    r"|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
+)
+HISTORY_CHANGE_QUERY = re.compile(
+    r"(?ix)"
+    r"(?:"
+    r"\bwhat(?:\s+\w+){0,2}\s+changed\b"
+    r"(?!\s+(?:in|to|from|with|about|between|since|after|over|for)\b"
+    r"(?:\s+\w+){0,5}\s+(?:should|must|can|will)\b)"
+    rf"{HISTORY_CHANGE_TAIL}"
+    r"|"
+    r"\b(?:(?:how|why|when|what)\s+)?(?:has|have|had|was|were)\s+(?:\w+\s+){1,5}changed\b"
+    r"(?!\s+(?:in|to|from|with|about|between|since|after|over|for)\b"
+    r"(?:\s+\w+){0,5}\s+(?:should|must|can|will)\b)"
+    rf"{HISTORY_CHANGE_TAIL}"
+    r"|"
+    r"\b(?:(?:how|why|what|when)\s+)?did\s+(?:\w+\s+){1,5}change\b"
+    rf"{HISTORY_CHANGE_TAIL}"
+    r"|"
+    r"\b(?:ne|neler|nasil|neden)\b(?:\s+\w+){0,3}?\s+\bdegisti\b"
+    r"|"
+    rf"\b{HISTORY_TURKISH_CHANGE_TEMPORAL}\b(?:\W+\w+){{0,5}}\W+\bdegisti\b"
+    r")"
+)
+# `past` and `before` describe ordering in ordinary operational questions too.
+# A noun that denotes a stored or completed record makes that ordering historical.
+HISTORY_CONTEXT_TERMS = frozenset({
+    "archive", "archives", "arsiv", "arsivler", "change", "changes", "decision", "decisions",
+    "event", "events", "history", "histories", "kayit", "kayitlar",
+    "log", "logs", "olay", "olaylar", "record", "records", "report", "reports",
+    "timeline", "version", "versions", "release", "releases", "revision", "revisions",
+    "surum", "surumler", "karar", "kararlar", "donem", "donemler",
+    "performance", "experience", "work", "result", "results", "project", "projects",
+    "contract", "contracts", "sozlesme", "sozlesmesi", "sozlesmeler",
+}) | HISTORY_CHANGE_NOUN_ROOTS
+HISTORY_CONTEXT_INFLECTION_ROOTS = frozenset({
+    "kayit", "kayitlar", "kayd", "karar", "kararlar", "surum", "surumler",
+    "olay", "olaylar", "arsiv", "arsivler",
+    "rapor", "raporlar", "donem", "donemler", "proje", "projeler",
+    "sonuc", "sonuclar", "calisma", "calismalar",
+})
+HISTORY_CONTEXT_SURFACE_TERMS = frozenset(
+    set(HISTORY_CONTEXT_TERMS)
+    | HISTORY_CHANGE_NOUN_SURFACE_TERMS
+    | {
+        root + suffix
+        for root in HISTORY_CONTEXT_INFLECTION_ROOTS
+        for suffix in HISTORY_QUERY_INFLECTION_SUFFIXES["vowel" if root[-1] in HISTORY_QUERY_INFLECTION_VOWELS else "consonant"]
+    }
+    | {
+        root + suffix
+        for root in HISTORY_CONTEXT_INFLECTION_ROOTS
+        for suffix in ("u", "ü", "ı")
+    }
+)
+HISTORY_DIRECTIONAL_PAST = re.compile(
+    r"(?i)\bpast(?:\s+(?:(?:the|my|your|his|her|its|our|their)\s+)?(?:due|deadline)s?)\b"
+)
+HISTORY_CLAUSE_SPLIT = re.compile(r"(?i)(?:[,;]|\b(?:and|or|ve)\b)")
+HISTORY_CONTEXT_MARKER = r"(?:past|previous|onceki\w*)"
+HISTORY_CONTEXT_GAP = r"(?:\W+\w+){0,2}(?:\W+(?:and|or|ve)\b(?:\W+\w+){1,2})?"
+# `eskime` is the noun/verb form for tarnishing and must not be read as `eski` + suffix.
+HISTORY_DERIVATIONAL_HOMONYMS = frozenset({"eskime"})
+HISTORY_MONTHS = {
+    month.casefold(): index
+    for index, month in enumerate(calendar.month_name)
+    if month
+}
+HISTORY_MONTHS.update({
+    month.casefold(): index
+    for index, month in enumerate(calendar.month_abbr)
+    if month
+})
+HISTORY_MONTHS.update(dict(zip(
+    (
+        "ocak", "subat", "mart", "nisan", "mayis", "haziran",
+        "temmuz", "agustos", "eylul", "ekim", "kasim", "aralik",
+    ),
+    range(1, 13),
+)))
+HISTORY_MONTH_NAMES = tuple(sorted(HISTORY_MONTHS, key=len, reverse=True))
+HISTORY_MONTH_PATTERN = "|".join(map(re.escape, HISTORY_MONTH_NAMES))
+HISTORY_DATE = re.compile(
+    rf"(?ix)(?<!\w)(?:"
+    rf"(?P<ymd_year>\d{{4}})[-/.](?P<ymd_month>\d{{1,2}})[-/.](?P<ymd_day>\d{{1,2}})"
+    rf"|(?P<dmy_num_day>\d{{1,2}})[-/.](?P<dmy_num_month>\d{{1,2}})[-/.](?P<dmy_num_year>\d{{4}})"
+    rf"|(?P<dmy_day>\d{{1,2}})\s+(?P<dmy_month>{HISTORY_MONTH_PATTERN})\s+(?P<dmy_year>\d{{4}})"
+    rf"|(?P<mdy_month>{HISTORY_MONTH_PATTERN})\s+(?P<mdy_day>\d{{1,2}}),?\s+(?P<mdy_year>\d{{4}})"
+    rf"|(?P<my_month>{HISTORY_MONTH_PATTERN})\s+(?P<my_year>\d{{4}})"
+    rf"|(?P<year>\d{{4}})"
+    rf")(?!\w)"
+)
+HISTORY_IDENTIFIER = re.compile(
+    r"(?i)(?:#|\b(?:ticket|port|issue|bug|rfc|case|task)\b)[\s#:/-]*+(?:(?P<identifier>\d[\w.-]*))?"
+)
 
 
 @dataclass(frozen=True)
@@ -1143,26 +1316,324 @@ def _is_personal_query(query_terms: frozenset[str]) -> bool:
     )
 
 
-def _is_history_query(query_terms: frozenset[str]) -> bool:
-    if query_terms & HISTORY_QUERY_TERMS or any(
-        term.startswith(prefix)
+def _matches_history_inflection(term: str, root: str) -> bool:
+    if term in HISTORY_DERIVATIONAL_HOMONYMS:
+        return False
+    if not term.startswith(root):
+        return False
+    suffix = term[len(root):]
+    stem_type = "vowel" if root[-1] in HISTORY_QUERY_INFLECTION_VOWELS else "consonant"
+    if suffix in HISTORY_QUERY_INFLECTION_SUFFIXES[stem_type]:
+        return True
+    locative, relative, following = suffix.partition("ki")
+    return bool(
+        relative
+        and locative in HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES[stem_type]
+        and (not following or following in HISTORY_QUERY_INFLECTION_SUFFIXES["vowel"])
+    )
+
+
+@dataclass(frozen=True)
+class _HistoryDateReference:
+    start: int
+    end: int
+    start_date: date | None
+    end_date: date | None
+
+
+def _date_value(year: int, month: int = 1, day: int = 1) -> date | None:
+    try:
+        return date(year, month, day)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _date_bounds(year: int, month: int, day: int | None = None) -> tuple[date, date] | None:
+    start = _date_value(year, month, 1 if day is None else day)
+    if start is None:
+        return None
+    if day is not None:
+        return start, start
+    try:
+        end = _date_value(year, month, calendar.monthrange(year, month)[1])
+    except (calendar.IllegalMonthError, ValueError, OverflowError):
+        return None
+    return None if end is None else (start, end)
+
+
+def _date_references(query: str) -> tuple[_HistoryDateReference, ...]:
+    """Parse date-shaped matches while retaining their spans and period bounds."""
+    normalized = HISTORY_IDENTIFIER.sub(
+        lambda match: " " * len(match[0])
+        if match.group("identifier") is not None else match[0],
+        _normalize(query),
+    )
+    references: list[_HistoryDateReference] = []
+    for match in HISTORY_DATE.finditer(normalized):
+        groups = match.groupdict()
+        if groups["ymd_year"] is not None:
+            year, month, day = (
+                int(groups["ymd_year"]), int(groups["ymd_month"]), int(groups["ymd_day"])
+            )
+        elif groups["dmy_num_year"] is not None:
+            first, second = int(groups["dmy_num_day"]), int(groups["dmy_num_month"])
+            if second > 12 and first <= 12:
+                year, month, day = int(groups["dmy_num_year"]), first, second
+            elif first > 12 and second <= 12:
+                year, month, day = int(groups["dmy_num_year"]), second, first
+            elif first <= 12 and second <= 12:
+                year = int(groups["dmy_num_year"])
+                possible = [
+                    bounds
+                    for bounds in (
+                        _date_bounds(year, first, second),
+                        _date_bounds(year, second, first),
+                    )
+                    if bounds is not None
+                ]
+                if not possible:
+                    references.append(_HistoryDateReference(match.start(), match.end(), None, None))
+                    continue
+                bounds = max(possible, key=lambda item: item[1])
+                references.append(_HistoryDateReference(
+                    match.start(), match.end(), *bounds
+                ))
+                continue
+            else:
+                references.append(_HistoryDateReference(match.start(), match.end(), None, None))
+                continue
+        elif groups["dmy_year"] is not None:
+            year, month, day = (
+                int(groups["dmy_year"]), HISTORY_MONTHS[groups["dmy_month"]], int(groups["dmy_day"])
+            )
+        elif groups["mdy_year"] is not None:
+            year, month, day = (
+                int(groups["mdy_year"]), HISTORY_MONTHS[groups["mdy_month"]], int(groups["mdy_day"])
+            )
+        elif groups["my_year"] is not None:
+            year, month, day = int(groups["my_year"]), HISTORY_MONTHS[groups["my_month"]], None
+        else:
+            value = _date_value(int(groups["year"]), 1, 1)
+            bounds = None if value is None else (value, date(value.year, 12, 31))
+            references.append(_HistoryDateReference(
+                match.start(), match.end(), *(bounds or (None, None))
+            ))
+            continue
+        bounds = _date_bounds(year, month, day)
+        references.append(_HistoryDateReference(
+            match.start(), match.end(), *(bounds or (None, None))
+        ))
+    return tuple(references)
+
+
+def _before_date_status(
+    query: str,
+    references: tuple[_HistoryDateReference, ...],
+    today: date,
+) -> bool | None:
+    normalized = _normalize(query)
+    statuses: list[bool] = []
+    cursor = 0
+    for reference in references:
+        prefix = normalized[cursor:reference.start]
+        if re.search(
+            r"\bbefore[\s,;:()\[\]]*(?:and[\s]+after[\s,;:()\[\]]*)?(?:the[\s,;:()\[\]]*)?(?:year[\s,;:()\[\]]*)?\Z",
+            prefix,
+        ):
+            statuses.append(
+                reference.start_date is not None and reference.start_date <= today
+            )
+        cursor = reference.end
+    return None if not statuses else any(statuses)
+
+
+def _before_relative_date_status(query: str) -> bool | None:
+    normalized = _normalize(query)
+    for marker in re.finditer(r"\bbefore\b", normalized):
+        suffix = normalized[marker.end():].lstrip(" ,;:()[]")
+        if re.match(
+            r"today\b(?!['’]s\b|\s+s\b)|yesterday\b|last\s+(?:day|week|month|year)\b",
+            suffix,
+        ):
+            return True
+    return None
+
+
+def _past_date_status(query: str, query_terms: frozenset[str]) -> bool | None:
+    """Return past/future status; None means the query contains no date."""
+    today = date.today()
+    if query:
+        references = _date_references(query)
+        if "before" in query_terms:
+            relative = _before_relative_date_status(query)
+            if relative is not None:
+                return relative
+        if not references:
+            return None
+        if "before" in query_terms:
+            adjacent = _before_date_status(query, references, today)
+            if adjacent is not None:
+                return adjacent
+            return False
+        if any(reference.start_date is None or reference.end_date is None for reference in references):
+            return False
+        return all(reference.end_date < today for reference in references)
+    else:
+        years = [int(term) for term in query_terms if re.fullmatch(r"\d{4}", term)]
+        if not years:
+            return None
+        if len(years) != 1 or any(
+            term in HISTORY_MONTHS or re.fullmatch(r"\d{1,2}", term)
+            for term in query_terms
+        ):
+            return False
+        start = _date_value(years[0], 1, 1)
+        end = _date_value(years[0], 12, 31)
+        if start is None or end is None:
+            return False
+        return start <= today if "before" in query_terms else end < today
+
+
+def _has_history_context(query: str) -> bool:
+    if not query:
+        return False
+    context_terms = "|".join(map(re.escape, sorted(HISTORY_CONTEXT_SURFACE_TERMS, key=len, reverse=True)))
+    query = HISTORY_DIRECTIONAL_PAST.sub(" ", _normalize(query))
+    context = re.compile(
+        rf"(?ix)(?:"
+        rf"\b{HISTORY_CONTEXT_MARKER}\b{HISTORY_CONTEXT_GAP}\W+\b(?:{context_terms})\b"
+        rf"|\b(?:{context_terms})\b{HISTORY_CONTEXT_GAP}\W+\b{HISTORY_CONTEXT_MARKER}\b"
+        rf")"
+    )
+    date_references = _date_references(query)
+    date_starts = tuple(sorted(reference.start for reference in date_references))
+    date_ends = tuple(sorted(reference.end for reference in date_references))
+    delimiters = tuple(
+        delimiter
+        for delimiter in HISTORY_CLAUSE_SPLIT.finditer(query)
+        if not (
+            (date_index := bisect_right(date_starts, delimiter.start()) - 1) >= 0
+            and delimiter.start() < date_ends[date_index]
+        )
+    )
+    delimiter_starts = tuple(delimiter.start() for delimiter in delimiters)
+    delimiter_ends = tuple(delimiter.end() for delimiter in delimiters)
+    clause_status: dict[tuple[int, int], bool | None] = {}
+    for match in context.finditer(query):
+        left = bisect_right(delimiter_ends, match.start()) - 1
+        right = bisect_left(delimiter_starts, match.end())
+        clause_start = 0 if left < 0 else delimiter_ends[left]
+        clause_end = len(query) if right == len(delimiters) else delimiter_starts[right]
+        key = (clause_start, clause_end)
+        if key not in clause_status:
+            clause = query[clause_start:clause_end]
+            clause_status[key] = _past_date_status(clause, _retrieval_terms(clause))
+        if clause_status[key] is not False:
+            return True
+    return False
+
+
+def _has_history_query_cues(query_terms: frozenset[str], query: str = "") -> bool:
+    # ponytail: `tarih` alone is ambiguous date/history wording; explicit history cues widen recall.
+    history_terms = query_terms & HISTORY_QUERY_TERMS
+    has_inflected_history = any(
+        _matches_history_inflection(term, root)
         for term in query_terms
-        for prefix in HISTORY_QUERY_PREFIXES
+        for root in HISTORY_QUERY_INFLECTION_ROOTS
+        if root not in {"onceki", "tarih"}
+    )
+    has_previous_inflection = "onceki" in query_terms or any(
+        _matches_history_inflection(term, "onceki")
+        for term in query_terms
+    )
+    has_retrospective_change = bool(query and HISTORY_CHANGE_QUERY.search(_normalize(query)))
+    has_nominal_change = bool(query and HISTORY_NOMINAL_CHANGE_QUERY.search(_normalize(query)))
+    has_turkish_nominal_change = bool(
+        query and HISTORY_TURKISH_NOMINAL_CHANGE_QUERY.search(_normalize(query))
+    )
+    unambiguous_history_terms = history_terms - {"before", "past", "previous", "onceki", "tarih"}
+    if (
+        has_inflected_history
+        or has_retrospective_change
+        or has_nominal_change
+        or has_turkish_nominal_change
+        or unambiguous_history_terms
     ):
         return True
-    return (
-        any(re.fullmatch(r"\d{4}", term) for term in query_terms)
+    if (
+        ("previous" in history_terms or has_previous_inflection)
+        and (
+            _has_history_context(query)
+            if query
+            else bool(query_terms & HISTORY_CONTEXT_SURFACE_TERMS)
+        )
+    ):
+        return True
+    past_date = _past_date_status(query, query_terms)
+    if history_terms & {"before", "past"}:
+        if past_date is not None:
+            if past_date or "past" not in history_terms:
+                return past_date
+            return _has_history_context(query)
+        return _has_history_context(query)
+    return bool(
+        past_date is True
+        and any(re.fullmatch(r"\d{4}", term) for term in query_terms)
         and _is_personal_query(query_terms)
     )
 
 
-def _entry_lines(entry: VaultEntry, *, include_history: bool) -> tuple[str, ...]:
-    if include_history or not entry.historical_lines:
+def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
+    return _has_history_query_cues(query_terms, query) and not _is_ambiguous_history_feature_query(
+        query,
+        query_terms,
+    )
+
+
+def _entry_lines(
+    entry: VaultEntry,
+    *,
+    include_history: bool,
+    exclude_historical_material: bool = False,
+    exclude_current_material: bool = False,
+) -> tuple[str, ...]:
+    if exclude_historical_material and exclude_current_material:
+        return ()
+    if exclude_current_material and entry.schema.casefold() == "knowledge-v2":
+        if _is_historical_preference_material(entry):
+            return entry.safe_lines
+        return entry.historical_lines
+    if (include_history and not exclude_historical_material) or not entry.historical_lines:
         return entry.safe_lines
-    return tuple(line for line in entry.safe_lines if line not in entry.historical_lines)
+    historical_lines = frozenset(entry.historical_lines)
+    return tuple(line for line in entry.safe_lines if line not in historical_lines)
 
 
-def _entry_terms(entry: VaultEntry, *, include_history: bool) -> frozenset[str]:
+def _entry_content_key(
+    entry: VaultEntry,
+    *,
+    include_history: bool,
+    exclude_historical_material: bool = False,
+    exclude_current_material: bool = False,
+) -> str:
+    lines = _entry_lines(
+        entry,
+        include_history=include_history,
+        exclude_historical_material=exclude_historical_material,
+        exclude_current_material=exclude_current_material,
+    )
+    if lines is entry.safe_lines:
+        return entry.content_key or entry.path
+    return _content_key(lines)
+
+
+def _entry_terms(
+    entry: VaultEntry,
+    *,
+    include_history: bool,
+    exclude_historical_material: bool = False,
+    exclude_current_material: bool = False,
+) -> frozenset[str]:
     terms = set(entry.title_terms)
     terms.update(entry.path_terms)
     terms.update(entry.tag_terms)
@@ -1172,13 +1643,34 @@ def _entry_terms(entry: VaultEntry, *, include_history: bool) -> frozenset[str]:
     terms.update(entry.data_source_terms)
     terms.update(entry.workflow_terms)
     terms.update(entry.heading_terms)
-    terms.update(entry.body_terms)
-    if include_history:
-        terms.update(entry.historical_body_terms)
+    terms.update(
+        _entry_body_terms(
+            entry,
+            include_history=include_history,
+            exclude_historical_material=exclude_historical_material,
+            exclude_current_material=exclude_current_material,
+        )
+    )
     return frozenset(terms)
 
 
-def _entry_body_terms(entry: VaultEntry, *, include_history: bool) -> Counter[str]:
+def _entry_body_terms(
+    entry: VaultEntry,
+    *,
+    include_history: bool,
+    exclude_historical_material: bool = False,
+    exclude_current_material: bool = False,
+) -> Counter[str]:
+    if exclude_historical_material and exclude_current_material:
+        return Counter()
+    if exclude_current_material and entry.schema.casefold() == "knowledge-v2":
+        if _is_historical_preference_material(entry):
+            terms = Counter(entry.body_terms)
+            terms.update(entry.historical_body_terms)
+            return terms
+        return Counter(entry.historical_body_terms)
+    if exclude_historical_material:
+        return entry.body_terms
     if not include_history:
         return entry.body_terms
     terms = Counter(entry.body_terms)
@@ -1214,12 +1706,24 @@ def _excerpt(
     query_terms: frozenset[str],
     *,
     include_history: bool = False,
+    exclude_historical_material: bool = False,
+    exclude_current_material: bool = False,
 ) -> str:
     best = ""
     best_score = (-1, -1)
-    lines = _entry_lines(entry, include_history=include_history)
-    possible = {term for term in query_terms if term in entry.body_terms or
-                (include_history and term in entry.historical_body_terms)}
+    lines = _entry_lines(
+        entry,
+        include_history=include_history,
+        exclude_historical_material=exclude_historical_material,
+        exclude_current_material=exclude_current_material,
+    )
+    body_terms = _entry_body_terms(
+        entry,
+        include_history=include_history,
+        exclude_historical_material=exclude_historical_material,
+        exclude_current_material=exclude_current_material,
+    )
+    possible = {term for term in query_terms if term in body_terms}
     index = 0
     while index < len(lines):
         line = lines[index]
@@ -1258,6 +1762,302 @@ def _excerpt(
     return best
 
 
+def _split_selection_exclusion(query: str) -> tuple[str, str, bool, bool] | None:
+    """Empty positive query means a recognized exclusion has unsupported nesting."""
+    connectors = tuple(CURRENT_HISTORY_CONNECTOR.finditer(query))
+    for index, connector in enumerate(connectors):
+        marker = SELECTION_EXCLUSION_MARKER.match(query, connector.end())
+        if marker is None:
+            continue
+        if index + 1 != len(connectors):
+            return "", "", False, False
+        left = query[:connector.start()].strip(" ,;:()[]")
+        excluded = query[marker.end():].strip(" ,;:()[]")
+        if not left or not excluded:
+            continue
+        excluded_terms = _retrieval_terms(excluded)
+        excludes_history = _is_history_query(excluded_terms, excluded) or any(
+            _is_historical_status(term) for term in excluded_terms
+        )
+        excludes_current = bool(
+            excluded_terms & CURRENT_QUERY_TERMS
+            and _has_independent_current_cue(excluded)
+        )
+        if excludes_history or excludes_current:
+            return left, excluded, excludes_history, excludes_current
+    return None
+
+
+def _split_current_history_query(query: str) -> tuple[str, str] | None:
+    if not re.search(r"(?i)\b(?:current|güncel|guncel|latest|active|aktif)\b", query):
+        return None
+    raw_connectors = tuple(CURRENT_HISTORY_CONNECTOR.finditer(query))
+    if not raw_connectors:
+        return None
+    normalized_parts: list[str] = []
+    connector_spans: list[tuple[int, int, int, int]] = []
+    raw_cursor = 0
+    normalized_cursor = 0
+    for connector in raw_connectors:
+        segment = _normalize(query[raw_cursor:connector.start()])
+        normalized_parts.append(segment)
+        normalized_cursor += len(segment)
+        normalized_connector = _normalize(connector.group())
+        normalized_parts.append(normalized_connector)
+        connector_spans.append((
+            normalized_cursor,
+            normalized_cursor + len(normalized_connector),
+            connector.start(),
+            connector.end(),
+        ))
+        normalized_cursor += len(normalized_connector)
+        raw_cursor = connector.end()
+    normalized_parts.append(_normalize(query[raw_cursor:]))
+    normalized = "".join(normalized_parts)
+    current_spans = tuple(
+        (match.start(), match.end())
+        for match in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized)
+    )
+    if not current_spans:
+        return None
+    connector_starts = tuple(start for start, _end, _raw_start, _raw_end in connector_spans)
+    connector_ends = tuple(end for _start, end, _raw_start, _raw_end in connector_spans)
+    feature_scopes: dict[int, bool] = {}
+    history_spans: set[tuple[int, int]] = set()
+    weak_history_spans: set[tuple[int, int]] = set()
+    for match in re.finditer(r"(?<!\w)[\w]+(?!\w)", normalized):
+        token = match[0]
+        if token == "history":
+            scope_index = bisect_right(connector_ends, match.start())
+            if scope_index not in feature_scopes:
+                start = connector_ends[scope_index - 1] if scope_index else 0
+                end = connector_starts[scope_index] if scope_index < len(connector_starts) else len(normalized)
+                scope = normalized[start:end]
+                feature_scopes[scope_index] = _is_ambiguous_history_feature_query(
+                    scope, _retrieval_terms(scope),
+                )
+            if feature_scopes[scope_index]:
+                continue
+        if token not in HISTORY_QUERY_TERMS and not any(
+            _matches_history_inflection(token, root)
+            for root in HISTORY_QUERY_INFLECTION_ROOTS
+        ):
+            continue
+        span = (match.start(), match.end())
+        history_spans.add(span)
+        if token in {"before", "past", "previous", "onceki", "tarih"} or any(
+            _matches_history_inflection(token, root)
+            for root in {"onceki", "tarih"}
+        ):
+            weak_history_spans.add(span)
+    for pattern in (
+        HISTORY_CHANGE_QUERY,
+        HISTORY_NOMINAL_CHANGE_QUERY,
+        HISTORY_TURKISH_NOMINAL_CHANGE_QUERY,
+    ):
+        history_spans.update((match.start(), match.end()) for match in pattern.finditer(normalized))
+    date_history_spans = {
+        (reference.start, reference.end)
+        for reference in _date_references(normalized)
+        if reference.start_date is not None and reference.end_date is not None
+    }
+    date_starts = tuple(sorted(start for start, _end in date_history_spans))
+    date_ends = tuple(sorted(end for _start, end in date_history_spans))
+    history_spans.update(date_history_spans)
+    if not history_spans:
+        return None
+    current_starts = tuple(sorted(start for start, _end in current_spans))
+    current_ends = tuple(sorted(end for _start, end in current_spans))
+    history_starts = tuple(sorted(start for start, _end in history_spans))
+    history_ends = tuple(sorted(end for _start, end in history_spans))
+    strong_history = history_spans - weak_history_spans - date_history_spans
+    strong_starts = tuple(sorted(start for start, _end in strong_history))
+    strong_ends = tuple(sorted(end for _start, end in strong_history))
+    weak_starts = tuple(sorted(start for start, _end in weak_history_spans))
+    weak_ends = tuple(sorted(end for _start, end in weak_history_spans))
+    candidates: list[tuple[bool, int, int, int, int]] = []
+    for normalized_start, normalized_end, raw_start, raw_end in connector_spans:
+        date_index = bisect_right(date_starts, normalized_start) - 1
+        if date_index >= 0 and normalized_start < date_ends[date_index]:
+            continue
+        current_left = bisect_right(current_ends, normalized_start)
+        current_right = len(current_starts) - bisect_left(current_starts, normalized_end)
+        history_left = bisect_right(history_ends, normalized_start)
+        history_right = len(history_starts) - bisect_left(history_starts, normalized_end)
+        strong_left = bisect_right(strong_ends, normalized_start)
+        strong_right = len(strong_starts) - bisect_left(strong_starts, normalized_end)
+        if current_left and history_right and not current_right and not strong_left:
+            candidates.append((
+                bisect_left(weak_starts, normalized_end) < len(weak_starts),
+                normalized_start,
+                normalized_end,
+                raw_start,
+                raw_end,
+            ))
+        if history_left and current_right and not current_left and not strong_right:
+            candidates.append((
+                bisect_right(weak_ends, normalized_start) > 0,
+                normalized_start,
+                normalized_end,
+                raw_start,
+                raw_end,
+            ))
+    if not candidates:
+        return None
+    _weak_history_side, _normalized_start, _normalized_end, connector_start, connector_end = max(
+        candidates,
+        key=lambda candidate: (candidate[0], candidate[1]),
+    )
+    left = query[:connector_start].strip(" ,;:()[]")
+    right = query[connector_end:].strip(" ,;:()[]")
+    left_terms = _retrieval_terms(left)
+    right_terms = _retrieval_terms(right)
+    left_current = bool(left_terms & CURRENT_QUERY_TERMS)
+    right_current = bool(right_terms & CURRENT_QUERY_TERMS)
+    left_history = _is_history_query(left_terms, left)
+    right_history = _is_history_query(right_terms, right)
+    if left_current and right_history and not right_current and not left_history:
+        current_scope, history_scope = left, right
+    elif right_current and left_history and not left_current and not right_history:
+        current_scope, history_scope = right, left
+    else:
+        return None
+    scope_connector_terms = {
+        "with", "versus", "vs", "compare", "and", "or", "ve", "to", "ile", "against",
+    }
+
+    def topic_terms(scope: str) -> list[str]:
+        scope_terms = _retrieval_terms(scope)
+        terms = []
+        for match in re.finditer(r"(?<!\w)[\w]+(?!\w)", scope):
+            raw_terms = _tokens(match[0])
+            if not raw_terms or not any(term in scope_terms for term in raw_terms):
+                continue
+            if not all(
+                term not in CURRENT_QUERY_TERMS
+                and term not in HISTORY_QUERY_TERMS
+                and term not in scope_connector_terms
+                and term not in SCOPE_COMMAND_TERMS
+                and not term.isdigit()
+                and not any(_matches_history_inflection(term, root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
+                for term in raw_terms
+            ):
+                continue
+            terms.append(match[0])
+        return terms
+
+    current_topic_terms = topic_terms(current_scope)
+    history_topic_terms = topic_terms(history_scope)
+    if current_topic_terms and not history_topic_terms:
+        history_scope = f"{history_scope} {' '.join(current_topic_terms)}"
+        history_terms = _retrieval_terms(history_scope)
+        if history_terms & CURRENT_QUERY_TERMS or not _is_history_query(history_terms, history_scope):
+            return None
+    elif history_topic_terms and not current_topic_terms:
+        current_scope = f"{current_scope} {' '.join(history_topic_terms)}"
+        current_terms = _retrieval_terms(current_scope)
+        if not current_terms & CURRENT_QUERY_TERMS or _is_history_query(current_terms, current_scope):
+            return None
+    elif not current_topic_terms:
+        return None
+    return current_scope, history_scope
+
+
+def _has_independent_current_cue(query: str) -> bool:
+    normalized = _normalize(query)
+    current_spans = tuple(
+        match.span()
+        for match in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized)
+    )
+    if not current_spans:
+        return False
+    related_current_spans = {
+        match.span("current")
+        for match in HISTORY_OBJECT_CURRENT_CUE.finditer(normalized)
+    }
+    words = tuple(re.finditer(r"(?<!\w)[\w]+(?!\w)", normalized))
+    genitive_suffixes = {"in", "nin", "un", "nun"}
+    for current_index, current_word in enumerate(words):
+        if current_word.group() not in CURRENT_QUERY_TERMS:
+            continue
+        for noun_index in range(current_index + 1, min(current_index + 4, len(words))):
+            noun = words[noun_index].group()
+            if not any(noun.endswith(suffix) for suffix in genitive_suffixes):
+                continue
+            for history_index in range(noun_index + 1, min(noun_index + 3, len(words))):
+                history_term = words[history_index].group()
+                if any(
+                    _matches_history_inflection(history_term, root)
+                    for root in ("gecmis", "tarihce")
+                ):
+                    related_current_spans.add(current_word.span())
+                    break
+            if current_word.span() in related_current_spans:
+                break
+    return any(span not in related_current_spans for span in current_spans)
+
+
+def _is_ambiguous_history_feature_query(
+    query: str,
+    query_terms: frozenset[str],
+) -> bool:
+    if "history" not in query_terms:
+        return False
+    normalized = _normalize(query)
+    if re.search(r"(?i)\bhistory\b\W+\bof\b", normalized):
+        return False
+    masked = HISTORY_IDENTIFIER.sub(
+        lambda match: " " * len(match[0])
+        if match.group("identifier") is not None else match[0],
+        normalized,
+    )
+    masked = re.sub(r"(?i)\bhistory\b", lambda match: " " * len(match[0]), masked)
+    if _has_history_query_cues(_retrieval_terms(masked), masked):
+        return False
+    words = tuple(re.finditer(r"(?<!\w)[\w]+(?!\w)", normalized))
+    for index, word in enumerate(words):
+        if word.group() != "history":
+            continue
+        for object_index in range(index + 1, min(index + 3, len(words))):
+            if CURRENT_HISTORY_CONNECTOR.search(normalized, word.end(), words[object_index].start()):
+                break
+            if words[object_index].group() in (query_terms & HISTORY_FEATURE_OBJECT_TERMS):
+                return True
+    return False
+
+
+def _should_preserve_current_stale_penalty(
+    query: str,
+    query_terms: frozenset[str],
+) -> bool:
+    return bool(
+        _has_history_query_cues(query_terms, query)
+        and query_terms & CURRENT_QUERY_TERMS
+        and _has_independent_current_cue(query)
+    )
+
+
+def _merge_scoped_hits(
+    current_hits: list[VaultHit],
+    history_hits: list[VaultHit],
+    *,
+    top_k: int,
+) -> list[VaultHit]:
+    selected: list[VaultHit] = []
+    seen_paths: set[str] = set()
+    for current_hit, history_hit in zip_longest(current_hits, history_hits):
+        for hit in (current_hit, history_hit):
+            if hit is None:
+                continue
+            if hit.entry.path in seen_paths:
+                continue
+            seen_paths.add(hit.entry.path)
+            selected.append(hit)
+            if len(selected) == top_k:
+                return selected
+    return selected
+
+
 def search_vault(
     entries: list[VaultEntry],
     query: str,
@@ -1266,7 +2066,102 @@ def search_vault(
     route: str | None = None,
 ) -> list[VaultHit]:
     """Route filtresi + sıralama; filtreyi zaten uygulayan çağıran `_rank` kullanır."""
-    return _rank(_routed(entries, route), query, top_k=top_k)
+    return _rank_query(_routed(entries, route), query, top_k=top_k)
+
+
+def _rank_query(
+    entries: VaultMap,
+    query: str,
+    *,
+    top_k: int = MAX_CANDIDATES,
+) -> list[VaultHit]:
+    exclusion = _split_selection_exclusion(query)
+    if exclusion is not None:
+        query, _excluded_query, exclude_historical_material, exclude_current_material = exclusion
+    else:
+        exclude_historical_material = False
+        exclude_current_material = False
+    scopes = _split_current_history_query(query)
+    if scopes is not None:
+        current_query, history_query = scopes
+        view_options = {
+            "exclude_historical_material": exclude_historical_material,
+            "exclude_current_material": exclude_current_material,
+        }
+        current_hits = _rank(entries, current_query, top_k=top_k, **view_options)
+        current_paths = {hit.entry.path for hit in current_hits}
+        current_keys = {
+            _entry_content_key(
+                hit.entry,
+                include_history=exclude_current_material and not exclude_historical_material,
+                **view_options,
+            )
+            for hit in current_hits
+        } if top_k <= MAX_CANDIDATES else set()
+        # Remove cross-scope duplicates before the history limit; excerpts stay bounded.
+        history_entries = VaultMap(
+            [
+                entry for entry in entries
+                if entry.path not in current_paths
+                and (
+                    not current_keys
+                    or _entry_content_key(
+                        entry,
+                        include_history=not exclude_historical_material,
+                        **view_options,
+                    ) not in current_keys
+                )
+            ],
+            entries.document_frequency,
+            entries.corpus_size,
+            cache_result=entries.cache_result,
+            unstable_paths=entries.unstable_paths,
+        )
+        history_hits = _rank(history_entries, history_query, top_k=top_k, **view_options)
+        return _merge_scoped_hits(current_hits, history_hits, top_k=top_k)
+    terms = _retrieval_terms(query)
+    preserve_current_stale_penalty = _should_preserve_current_stale_penalty(query, terms)
+    return _rank(
+        entries,
+        query,
+        top_k=top_k,
+        preserve_current_stale_penalty=preserve_current_stale_penalty,
+        exclude_historical_material=exclude_historical_material,
+        exclude_current_material=exclude_current_material,
+    )
+
+
+def _is_historical_material(entry: VaultEntry) -> bool:
+    return (
+        entry.record_type.startswith("historical")
+        or (
+            entry.record_type == "work-packet"
+            and entry.status in {"completed", "closed", "done"}
+        )
+        or (
+            entry.record_type.endswith("analysis")
+            and entry.status == "historical"
+        )
+    )
+
+
+def _is_historical_status(status: str) -> bool:
+    return status in {"archived", "historical"} or status.startswith("superseded")
+
+
+def _is_historical_preference_material(entry: VaultEntry) -> bool:
+    return _is_historical_material(entry) or _is_historical_status(entry.status)
+
+
+def _is_current_material(entry: VaultEntry) -> bool:
+    return (
+        entry.status == "active"
+        and not _is_historical_preference_material(entry)
+        and not (
+            entry.schema.casefold() == "knowledge-v2"
+            and entry.historical_lines
+        )
+    )
 
 
 def _rank(
@@ -1274,13 +2169,24 @@ def _rank(
     query: str,
     *,
     top_k: int = MAX_CANDIDATES,
+    preserve_current_stale_penalty: bool = False,
+    exclude_historical_material: bool = False,
+    exclude_current_material: bool = False,
 ) -> list[VaultHit]:
     query_terms = _retrieval_terms(query)
     query_acronyms = frozenset(_normalize(value) for value in ACRONYM.findall(query))
     if not query_terms or not entries or top_k <= 0:
         return []
 
-    include_history = _is_history_query(query_terms)
+    include_history = (
+        _is_history_query(query_terms, query) or exclude_current_material
+    ) and not exclude_historical_material
+    preserve_current_stale_penalty = (
+        preserve_current_stale_penalty
+        or _should_preserve_current_stale_penalty(query, query_terms)
+    )
+    history_mode = include_history and not preserve_current_stale_penalty
+    current_query = bool(query_terms & CURRENT_QUERY_TERMS) and not history_mode
     personal_query = _is_personal_query(query_terms)
     # ponytail: explicit Vault-system wording only; this is not semantic topic detection.
     vault_system_query = 'vault' in query_terms and bool(query_terms & {
@@ -1288,9 +2194,12 @@ def _rank(
     })
     eligible_entries = []
     for entry in entries:
-        historical_material = (entry.record_type.startswith('historical') or
-                               (entry.record_type == 'work-packet' and entry.status in {'completed', 'closed', 'done'}) or
-                               (entry.record_type.endswith('analysis') and entry.status == 'historical'))
+        if (
+            (exclude_historical_material and _is_historical_preference_material(entry))
+            or (exclude_current_material and _is_current_material(entry))
+        ):
+            continue
+        historical_material = _is_historical_material(entry)
         named = len(entry.title_terms) >= 2 and entry.title_terms <= query_terms
         if include_history or named or not historical_material:
             eligible_entries.append(entry)
@@ -1298,23 +2207,45 @@ def _rank(
     if not include_history:
         document_frequency = Counter(document_frequency)
         for entry in entries:
-            current_terms = _entry_terms(entry, include_history=False)
+            current_terms = _entry_terms(
+                entry,
+                include_history=False,
+                exclude_historical_material=exclude_historical_material,
+                exclude_current_material=exclude_current_material,
+            )
             for term in set(entry.historical_body_terms) - set(entry.body_terms):
                 if term not in current_terms and document_frequency[term] > 0:
                     document_frequency[term] -= 1
     matching_entries = [
         entry for entry in eligible_entries
-        if query_terms & _entry_terms(entry, include_history=include_history)
+        if query_terms & _entry_terms(
+            entry,
+            include_history=include_history,
+            exclude_historical_material=exclude_historical_material,
+            exclude_current_material=exclude_current_material,
+        )
     ]
     # IDF's population must match corpus document_frequency, including other routes.
     total = max(entries.corpus_size, 1)
     average_length = sum(
-        sum(_entry_body_terms(entry, include_history=include_history).values())
+        sum(
+            _entry_body_terms(
+                entry,
+                include_history=include_history,
+                exclude_historical_material=exclude_historical_material,
+                exclude_current_material=exclude_current_material,
+            ).values()
+        )
         for entry in matching_entries
     ) / max(len(matching_entries), 1)
     ranked: list[tuple[int, float, str, VaultEntry, tuple[str, ...]]] = []
     for entry in eligible_entries:
-        matched = query_terms & _entry_terms(entry, include_history=include_history)
+        matched = query_terms & _entry_terms(
+            entry,
+            include_history=include_history,
+            exclude_historical_material=exclude_historical_material,
+            exclude_current_material=exclude_current_material,
+        )
         if not matched:
             continue
         acronym_anchor = query_acronyms & matched
@@ -1334,7 +2265,12 @@ def _rank(
                 and not symbol_anchor and not acronym_anchor and not title_anchor):
             continue
         score = 0.0
-        body_terms = _entry_body_terms(entry, include_history=include_history)
+        body_terms = _entry_body_terms(
+            entry,
+            include_history=include_history,
+            exclude_historical_material=exclude_historical_material,
+            exclude_current_material=exclude_current_material,
+        )
         length_ratio = sum(body_terms.values()) / max(average_length, 1)
         for term in matched:
             inverse_frequency = math.log((total + 1) / (document_frequency[term] + 1)) + 1
@@ -1348,44 +2284,79 @@ def _rank(
                 weight = max(weight, 3)
             score += inverse_frequency ** 2 * weight
         score *= 1 + min(len(matched) / max(len(query_terms), 1), 0.5)
-        if entry.status in {"archived", "historical", "template"} or entry.status.startswith("superseded"):
+        if entry.status == "template" or (
+            (not include_history or preserve_current_stale_penalty)
+            and (
+                entry.status in {"archived", "historical"}
+                or entry.status.startswith("superseded")
+            )
+        ):
             score *= 0.35
         record_type = entry.record_type.casefold()
         priority = int(
             personal_query
             and (
                 (
-                    not include_history
+                    (not include_history or preserve_current_stale_penalty)
                     and entry.path == PROFILE_RELATIVE
                     and record_type == "memory"
                 )
-                or (include_history and record_type.endswith("analysis"))
+                or (
+                    include_history
+                    and not preserve_current_stale_penalty
+                    and record_type.endswith("analysis")
+                )
             )
         )
         # Keep all candidates eligible; incidental prose must not outrank the named system.
         priority += int(vault_system_query and ('vault' in matched or title_anchor))
         ranked.append((priority, score, entry.path, entry, tuple(sorted(matched))))
     # Excerpt render'ı sıralamadan SONRA: yalnız kazanan top_k dilimi ödenir.
-    ranked.sort(key=lambda candidate: (-candidate[0], -candidate[1], candidate[2]))
+    ranked.sort(key=lambda candidate: (
+        -candidate[0],
+        -candidate[1],
+        -int(history_mode and _is_historical_preference_material(candidate[3])),
+        candidate[2],
+    ))
     selected = ranked[:top_k]
     if top_k <= MAX_CANDIDATES:
-        unique: list[tuple[int, float, str, VaultEntry, tuple[str, ...]]] = []
-        seen_content: set[str] = set()
+        unique: dict[str, tuple[int, float, str, VaultEntry, tuple[str, ...]]] = {}
         for candidate in ranked:
-            content_key = candidate[3].content_key or candidate[2]
-            if content_key in seen_content:
+            content_key = _entry_content_key(
+                candidate[3],
+                include_history=include_history,
+                exclude_historical_material=exclude_historical_material,
+                exclude_current_material=exclude_current_material,
+            )
+            previous = unique.get(content_key)
+            if previous is not None:
+                if current_query and candidate[3].status == "active" and previous[3].status != "active":
+                    unique[content_key] = candidate
+                elif (
+                    history_mode
+                    and _is_historical_preference_material(candidate[3])
+                    and not _is_historical_preference_material(previous[3])
+                ):
+                    unique[content_key] = candidate
                 continue
-            seen_content.add(content_key)
-            unique.append(candidate)
-            if len(unique) == top_k:
-                break
-        selected = unique
+            if len(unique) >= top_k:
+                if not (current_query or history_mode):
+                    break
+                continue
+            unique[content_key] = candidate
+        selected = list(unique.values())
     return [
         VaultHit(
             entry=entry,
             score=score,
             matched_terms=matched,
-            excerpt=_excerpt(entry, query_terms, include_history=include_history),
+            excerpt=_excerpt(
+                entry,
+                query_terms,
+                include_history=include_history,
+                exclude_historical_material=exclude_historical_material,
+                exclude_current_material=exclude_current_material,
+            ),
         )
         for _priority, score, _path, entry, matched in selected
     ]
@@ -1422,7 +2393,7 @@ def _fresh_hits(vault_root: Path, candidates: VaultMap, query: str, top_k: int, 
     checked: set[str] = set()
     unstable_paths = set(getattr(candidates, 'unstable_paths', frozenset()))
     while True:
-        hits = _rank(candidates, query, top_k=top_k)
+        hits = _rank_query(candidates, query, top_k=top_k)
         if not hits and unstable_paths:
             raise OSError('vault-retrieval-incomplete')
         replacements: dict[str, VaultEntry | None] = {}
