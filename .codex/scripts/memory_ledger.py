@@ -360,7 +360,7 @@ _NAMED_TARGET = re.compile(
 )
 _NAMED_FILENAME = re.compile(_WRITE_FILENAME)
 _WRITE_FILENAME_WITH_CASE_SUFFIX = re.compile(
-    rf"(?P<filename>{_WRITE_FILENAME}){_WRITE_CASE_SUFFIX}"
+    rf"(?P<filename>{_WRITE_FILENAME})(?:{_WRITE_CASE_SUFFIX}|{_WRITE_LOCATIVE_SUFFIX})"
 )
 _SIMPLE_CONDITIONAL = re.compile(rf"\b\w+{_CONDITIONAL_PERSON}\b")
 
