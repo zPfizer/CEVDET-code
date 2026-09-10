@@ -513,6 +513,7 @@ class ConversationContinuityTests(unittest.TestCase):
     def test_explicit_write_prompt_reopens_read_only_scope(self):
         for prompt in (
             'Ok yap.',
+            'Projedeki ayarı güncelle.',
             'Değiştirebilirsin.',
             'Düzenleyebilirsin.',
             'Uygulayabilirsin.',
@@ -546,6 +547,7 @@ class ConversationContinuityTests(unittest.TestCase):
             'ne.py dosyasını düzelt.',
             'app.v1.py dosyasını düzelt.',
             '"Dockerfile" dosyasını düzelt.',
+            '"Dockerfile" dosyasındaki hatayı düzelt.',
             '“app.py” dosyasını düzelt.',
             '‘app.py’ dosyasını düzelt.',
             '‘C:\\Users\\Me\\My Project\\app.py’yi düzelt.',
@@ -632,6 +634,8 @@ class ConversationContinuityTests(unittest.TestCase):
             'Yoksa dosyayı düzelt.',
             'Varsa dosyayı düzelt.',
             'Onaylansa dosyayı düzelt.',
+            'Onaylansa projedeki ayarı güncelle.',
+            'Hangi projedeki ayarı güncelle.',
             'Gelse dosyayı düzelt.',
             'Onaylanmasa dosyayı düzelt.',
             'Onaylansam dosyayı düzelt.',
