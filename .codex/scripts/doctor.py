@@ -25,6 +25,7 @@ from worker_supervisor import (
     STALE_HOOK_INPUT_SECONDS,
     SUPERVISOR_SCHEMA_VERSION,
     _process_owner_is_active,
+    owner_identity_unreadable,
     inspect_worker_queue,
     has_unverified_process_tree,
 )
@@ -1139,6 +1140,13 @@ def _worker_delayed_job_check(ctx: Context) -> Check:
                     "Worker gecikmiş iş",
                     "FAIL",
                     "running supervisor ownership geçersiz",
+                )
+            if owner_identity_unreadable(receipt):
+                return Check(
+                    "Worker gecikmiş iş",
+                    "WARN",
+                    f"ready-pending={ready_pending}; supervisor=running; "
+                    "ownership kanıtlanamadı",
                 )
     evidence = f"ready-pending={ready_pending}; supervisor={supervisor}"
     if ready_pending and supervisor == "idle":

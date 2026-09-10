@@ -158,6 +158,25 @@ def _process_owner_is_active(job: dict[str, Any]) -> bool:
     return current_identity == expected_identity
 
 
+def owner_identity_unreadable(record: dict[str, Any]) -> bool:
+    """Kaydedilmis dogum kimligi artik okunamiyorsa True.
+
+    Boyle bir kayitta sahiplik kaniti PID'e duser: `_process_owner_is_active`
+    kasitli olarak koruma tarafinda kalir. Kanit zayifladigi icin saglik
+    raporunun bu durumu ayrica gostermesi gerekir. Kimlik hic kaydedilmemisse
+    platform kimlik uretemiyor demektir; gerileme sinyali yoktur.
+    """
+    expected_identity = record.get("owner_identity")
+    if not isinstance(expected_identity, str) or not expected_identity:
+        return False
+    owner_pid = record.get("owner_pid")
+    if not isinstance(owner_pid, int) or isinstance(owner_pid, bool) or owner_pid <= 0:
+        return False
+    if not pid_is_alive(owner_pid):
+        return False
+    return _process_owner_identity(owner_pid) is None
+
+
 INVALID_UNICODE_ESCAPE = re.compile(r"\\u(?![0-9a-fA-F]{4})")
 INVALID_JSON_ESCAPE = re.compile(r'\\(?!["\\/bfnrtu])')
 

@@ -27,6 +27,7 @@ import flush  # noqa: E402
 import hook  # noqa: E402
 import worker_supervisor as workers  # noqa: E402
 import memory_ledger  # noqa: E402
+import process_control  # noqa: E402
 
 
 class DoctorTests(unittest.TestCase):
@@ -321,6 +322,77 @@ class DoctorTests(unittest.TestCase):
             check = doctor._worker_delayed_job_check(
                 doctor.Context(state_dir=state, now=100)
             )
+
+        self.assertEqual(check.status, "OK")
+        self.assertIn("supervisor=running", check.evidence)
+
+    def test_doctor_warns_when_running_supervisor_birth_identity_cannot_be_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            pending = state / "worker-jobs" / "pending"
+            pending.mkdir(parents=True)
+            (pending / "job-ready.json").write_text(
+                json.dumps({"status": "pending", "next_attempt_ts": 90}),
+                encoding="utf-8",
+            )
+            (state / "worker-supervisor.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
+                        "status": "running",
+                        "generation": 1,
+                        "launch_token": "",
+                        "owner_pid": os.getpid(),
+                        "owner_identity": "win32:recorded-at-launch",
+                        "lease_until": 99,
+                        "updated_ts": 100,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                process_control, "process_identity", return_value=None
+            ):
+                check = doctor._worker_delayed_job_check(
+                    doctor.Context(state_dir=state, now=100)
+                )
+
+        self.assertEqual(check.status, "WARN")
+        self.assertIn("ownership", check.evidence)
+        self.assertIn("ready-pending=1", check.evidence)
+
+    def test_doctor_accepts_running_supervisor_with_readable_matching_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            pending = state / "worker-jobs" / "pending"
+            pending.mkdir(parents=True)
+            (pending / "job-ready.json").write_text(
+                json.dumps({"status": "pending", "next_attempt_ts": 90}),
+                encoding="utf-8",
+            )
+            (state / "worker-supervisor.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
+                        "status": "running",
+                        "generation": 1,
+                        "launch_token": "",
+                        "owner_pid": os.getpid(),
+                        "owner_identity": "win32:still-the-same",
+                        "lease_until": 99,
+                        "updated_ts": 100,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                process_control, "process_identity", return_value="win32:still-the-same"
+            ):
+                check = doctor._worker_delayed_job_check(
+                    doctor.Context(state_dir=state, now=100)
+                )
 
         self.assertEqual(check.status, "OK")
         self.assertIn("supervisor=running", check.evidence)
