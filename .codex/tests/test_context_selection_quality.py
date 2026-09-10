@@ -447,6 +447,13 @@ Eylül etiket denetimi.
                     f"---\ntitle: Hook Deployment Checklist\nstatus: {status}\ntype: note\n---\n"
                     + current_body,
                 )
+            for name in ("y-active", "x-active"):
+                _write(
+                    root,
+                    f"{name}.md",
+                    f"---\ntitle: Hook Deployment Checklist\nstatus: active\ntype: note\n---\n"
+                    + current_body.replace("current release", f"current {name} release"),
+                )
             _write(
                 root,
                 "b-archived.md",
@@ -473,7 +480,8 @@ Eylül etiket denetimi.
                     self.assertIn("z-active.md", paths)
                     self.assertIn(history, paths)
                     self.assertNotIn("a-archived.md", paths)
-                    self.assertLess(paths.index("z-active.md"), paths.index("b-archived.md"))
+                    self.assertNotIn("b-archived.md", paths)
+                    self.assertLess(paths.index("z-active.md"), paths.index(history))
 
     def test_ordinary_history_prefix_match_keeps_active_record_ahead_of_archived_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -614,6 +622,7 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "what changed files should we deploy?": False,
             "dosyanın tarihi nedir?": False,
             "dosyanın tarih nedir?": False,
+            "dosyanın tarihini göster": False,
             "hook contract changed yesterday": True,
             "recent changes to the hook contract": True,
             "what changed yesterday in the hook contract?": True,

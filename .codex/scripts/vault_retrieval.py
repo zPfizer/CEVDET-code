@@ -8,6 +8,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import date
 import hashlib
+from itertools import zip_longest
 import json
 import math
 import os
@@ -233,7 +234,7 @@ HISTORY_DATE = re.compile(
 )
 HISTORY_DATE_QUESTION = re.compile(
     r"(?i)\btarih(?:i|in|ini|inin|ine|e|te|ten)?\b"
-    r"(?:\W+\w+){0,3}\W+(?:nedir|ne|hangi|kac)\b"
+    r"(?:\W+\w+){0,3}\W+(?:nedir|ne|hangi|kac|goster|show|display)\b"
 )
 
 
@@ -1595,19 +1596,56 @@ def _excerpt(
 
 def _split_current_history_query(query: str) -> tuple[str, str] | None:
     normalized = _normalize(query)
+    current_spans = tuple(
+        (match.start(), match.end())
+        for match in re.finditer(r"\b(?:current|guncel)\b", normalized)
+    )
+    if not current_spans:
+        return None
+    history_spans = [
+        (match.start(), match.end())
+        for match in re.finditer(r"(?<!\w)[\w]+(?!\w)", normalized)
+        if (
+            match[0] in HISTORY_QUERY_TERMS
+            or any(_matches_history_inflection(match[0], root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
+        )
+    ]
+    history_spans.extend(
+        (match.start(), match.end())
+        for pattern in (HISTORY_CHANGE_QUERY, HISTORY_NOMINAL_CHANGE_QUERY)
+        for match in pattern.finditer(normalized)
+    )
+    if not history_spans:
+        return None
+    current_ends = tuple(end for _start, end in sorted(current_spans))
+    current_starts = tuple(start for start, _end in sorted(current_spans))
+    history_ends = tuple(end for _start, end in sorted(history_spans))
+    history_starts = tuple(start for start, _end in sorted(history_spans))
+    candidate: tuple[int, int] | None = None
     for connector in CURRENT_HISTORY_CONNECTOR.finditer(normalized):
-        left = normalized[:connector.start()].strip(" ,;:()[]")
-        right = normalized[connector.end():].strip(" ,;:()[]")
-        left_terms = _retrieval_terms(left)
-        right_terms = _retrieval_terms(right)
-        left_current = bool(left_terms & CURRENT_QUERY_TERMS)
-        right_current = bool(right_terms & CURRENT_QUERY_TERMS)
-        left_history = _is_history_query(left_terms, left)
-        right_history = _is_history_query(right_terms, right)
-        if left_current and right_history and not right_current and not left_history:
-            return left, right
-        if right_current and left_history and not left_current and not right_history:
-            return right, left
+        current_left = bisect_right(current_ends, connector.start())
+        current_right = len(current_starts) - bisect_left(current_starts, connector.end())
+        history_left = bisect_right(history_ends, connector.start())
+        history_right = len(history_starts) - bisect_left(history_starts, connector.end())
+        if current_left and history_right:
+            candidate = (connector.start(), connector.end())
+        elif history_left and current_right:
+            candidate = (connector.start(), connector.end())
+    if candidate is None:
+        return None
+    connector_start, connector_end = candidate
+    left = normalized[:connector_start].strip(" ,;:()[]")
+    right = normalized[connector_end:].strip(" ,;:()[]")
+    left_terms = _retrieval_terms(left)
+    right_terms = _retrieval_terms(right)
+    left_current = bool(left_terms & CURRENT_QUERY_TERMS)
+    right_current = bool(right_terms & CURRENT_QUERY_TERMS)
+    left_history = _is_history_query(left_terms, left)
+    right_history = _is_history_query(right_terms, right)
+    if left_current and right_history and not right_current and not left_history:
+        return left, right
+    if right_current and left_history and not left_current and not right_history:
+        return right, left
     return None
 
 
@@ -1620,15 +1658,21 @@ def _merge_scoped_hits(
     selected: list[VaultHit] = []
     seen_paths: set[str] = set()
     seen_content: set[str] = set()
-    for hit in (*current_hits, *history_hits):
-        key = hit.entry.content_key or hit.entry.path
-        if hit.entry.path in seen_paths or key in seen_content:
-            continue
-        seen_paths.add(hit.entry.path)
-        seen_content.add(key)
-        selected.append(hit)
-        if len(selected) == top_k:
-            break
+    for current_hit, history_hit in zip_longest(current_hits, history_hits):
+        for hit in (current_hit, history_hit):
+            if hit is None:
+                continue
+            key = hit.entry.content_key or hit.entry.path
+            if hit.entry.path in seen_paths or (
+                top_k <= MAX_CANDIDATES and key in seen_content
+            ):
+                continue
+            seen_paths.add(hit.entry.path)
+            if top_k <= MAX_CANDIDATES:
+                seen_content.add(key)
+            selected.append(hit)
+            if len(selected) == top_k:
+                return selected
     return selected
 
 
