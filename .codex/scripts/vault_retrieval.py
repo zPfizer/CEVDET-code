@@ -1583,13 +1583,31 @@ def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
     )
 
 
-def _entry_lines(entry: VaultEntry, *, include_history: bool) -> tuple[str, ...]:
+def _entry_lines(
+    entry: VaultEntry,
+    *,
+    include_history: bool,
+    exclude_historical_material: bool = False,
+    exclude_current_material: bool = False,
+) -> tuple[str, ...]:
+    if exclude_historical_material and exclude_current_material:
+        return ()
+    if exclude_current_material and entry.schema.casefold() == "knowledge-v2":
+        return entry.historical_lines
+    if exclude_historical_material and entry.historical_lines:
+        return tuple(line for line in entry.safe_lines if line not in entry.historical_lines)
     if include_history or not entry.historical_lines:
         return entry.safe_lines
     return tuple(line for line in entry.safe_lines if line not in entry.historical_lines)
 
 
-def _entry_terms(entry: VaultEntry, *, include_history: bool) -> frozenset[str]:
+def _entry_terms(
+    entry: VaultEntry,
+    *,
+    include_history: bool,
+    exclude_historical_material: bool = False,
+    exclude_current_material: bool = False,
+) -> frozenset[str]:
     terms = set(entry.title_terms)
     terms.update(entry.path_terms)
     terms.update(entry.tag_terms)
@@ -1599,13 +1617,30 @@ def _entry_terms(entry: VaultEntry, *, include_history: bool) -> frozenset[str]:
     terms.update(entry.data_source_terms)
     terms.update(entry.workflow_terms)
     terms.update(entry.heading_terms)
-    terms.update(entry.body_terms)
-    if include_history:
-        terms.update(entry.historical_body_terms)
+    terms.update(
+        _entry_body_terms(
+            entry,
+            include_history=include_history,
+            exclude_historical_material=exclude_historical_material,
+            exclude_current_material=exclude_current_material,
+        )
+    )
     return frozenset(terms)
 
 
-def _entry_body_terms(entry: VaultEntry, *, include_history: bool) -> Counter[str]:
+def _entry_body_terms(
+    entry: VaultEntry,
+    *,
+    include_history: bool,
+    exclude_historical_material: bool = False,
+    exclude_current_material: bool = False,
+) -> Counter[str]:
+    if exclude_historical_material and exclude_current_material:
+        return Counter()
+    if exclude_current_material and entry.schema.casefold() == "knowledge-v2":
+        return Counter(entry.historical_body_terms)
+    if exclude_historical_material:
+        return entry.body_terms
     if not include_history:
         return entry.body_terms
     terms = Counter(entry.body_terms)
@@ -1641,12 +1676,24 @@ def _excerpt(
     query_terms: frozenset[str],
     *,
     include_history: bool = False,
+    exclude_historical_material: bool = False,
+    exclude_current_material: bool = False,
 ) -> str:
     best = ""
     best_score = (-1, -1)
-    lines = _entry_lines(entry, include_history=include_history)
-    possible = {term for term in query_terms if term in entry.body_terms or
-                (include_history and term in entry.historical_body_terms)}
+    lines = _entry_lines(
+        entry,
+        include_history=include_history,
+        exclude_historical_material=exclude_historical_material,
+        exclude_current_material=exclude_current_material,
+    )
+    body_terms = _entry_body_terms(
+        entry,
+        include_history=include_history,
+        exclude_historical_material=exclude_historical_material,
+        exclude_current_material=exclude_current_material,
+    )
+    possible = {term for term in query_terms if term in body_terms}
     index = 0
     while index < len(lines):
         line = lines[index]
@@ -1930,6 +1977,22 @@ def _is_ambiguous_history_feature_query(
     return False
 
 
+def _should_preserve_current_stale_penalty(
+    query: str,
+    query_terms: frozenset[str],
+) -> bool:
+    return bool(
+        _is_history_query(query_terms, query)
+        and (
+            _is_ambiguous_history_feature_query(query, query_terms)
+            or (
+                query_terms & CURRENT_QUERY_TERMS
+                and _has_independent_current_cue(query)
+            )
+        )
+    )
+
+
 def _merge_scoped_hits(
     current_hits: list[VaultHit],
     history_hits: list[VaultHit],
@@ -2001,17 +2064,7 @@ def _rank_query(
             top_k=top_k,
         )
     terms = _retrieval_terms(query)
-    ambiguous_history_feature = _is_ambiguous_history_feature_query(query, terms)
-    preserve_current_stale_penalty = bool(
-        _is_history_query(terms, query)
-        and (
-            ambiguous_history_feature
-            or (
-                terms & CURRENT_QUERY_TERMS
-                and _has_independent_current_cue(query)
-            )
-        )
-    )
+    preserve_current_stale_penalty = _should_preserve_current_stale_penalty(query, terms)
     return _rank(
         entries,
         query,
@@ -2045,7 +2098,14 @@ def _is_historical_preference_material(entry: VaultEntry) -> bool:
 
 
 def _is_current_material(entry: VaultEntry) -> bool:
-    return entry.status == "active" and not _is_historical_preference_material(entry)
+    return (
+        entry.status == "active"
+        and not _is_historical_preference_material(entry)
+        and not (
+            entry.schema.casefold() == "knowledge-v2"
+            and entry.historical_lines
+        )
+    )
 
 
 def _rank(
@@ -2063,6 +2123,10 @@ def _rank(
         return []
 
     include_history = _is_history_query(query_terms, query)
+    preserve_current_stale_penalty = (
+        preserve_current_stale_penalty
+        or _should_preserve_current_stale_penalty(query, query_terms)
+    )
     history_mode = include_history and not preserve_current_stale_penalty
     current_query = bool(query_terms & CURRENT_QUERY_TERMS) and not history_mode
     personal_query = _is_personal_query(query_terms)
@@ -2072,6 +2136,12 @@ def _rank(
     })
     eligible_entries = []
     for entry in entries:
+        if (
+            entry.schema.casefold() == "knowledge-v2"
+            and exclude_current_material
+            and not entry.historical_lines
+        ):
+            continue
         if (
             (exclude_historical_material and _is_historical_preference_material(entry))
             or (exclude_current_material and _is_current_material(entry))
@@ -2085,23 +2155,45 @@ def _rank(
     if not include_history:
         document_frequency = Counter(document_frequency)
         for entry in entries:
-            current_terms = _entry_terms(entry, include_history=False)
+            current_terms = _entry_terms(
+                entry,
+                include_history=False,
+                exclude_historical_material=exclude_historical_material,
+                exclude_current_material=exclude_current_material,
+            )
             for term in set(entry.historical_body_terms) - set(entry.body_terms):
                 if term not in current_terms and document_frequency[term] > 0:
                     document_frequency[term] -= 1
     matching_entries = [
         entry for entry in eligible_entries
-        if query_terms & _entry_terms(entry, include_history=include_history)
+        if query_terms & _entry_terms(
+            entry,
+            include_history=include_history,
+            exclude_historical_material=exclude_historical_material,
+            exclude_current_material=exclude_current_material,
+        )
     ]
     # IDF's population must match corpus document_frequency, including other routes.
     total = max(entries.corpus_size, 1)
     average_length = sum(
-        sum(_entry_body_terms(entry, include_history=include_history).values())
+        sum(
+            _entry_body_terms(
+                entry,
+                include_history=include_history,
+                exclude_historical_material=exclude_historical_material,
+                exclude_current_material=exclude_current_material,
+            ).values()
+        )
         for entry in matching_entries
     ) / max(len(matching_entries), 1)
     ranked: list[tuple[int, float, str, VaultEntry, tuple[str, ...]]] = []
     for entry in eligible_entries:
-        matched = query_terms & _entry_terms(entry, include_history=include_history)
+        matched = query_terms & _entry_terms(
+            entry,
+            include_history=include_history,
+            exclude_historical_material=exclude_historical_material,
+            exclude_current_material=exclude_current_material,
+        )
         if not matched:
             continue
         acronym_anchor = query_acronyms & matched
@@ -2121,7 +2213,12 @@ def _rank(
                 and not symbol_anchor and not acronym_anchor and not title_anchor):
             continue
         score = 0.0
-        body_terms = _entry_body_terms(entry, include_history=include_history)
+        body_terms = _entry_body_terms(
+            entry,
+            include_history=include_history,
+            exclude_historical_material=exclude_historical_material,
+            exclude_current_material=exclude_current_material,
+        )
         length_ratio = sum(body_terms.values()) / max(average_length, 1)
         for term in matched:
             inverse_frequency = math.log((total + 1) / (document_frequency[term] + 1)) + 1
@@ -2196,7 +2293,13 @@ def _rank(
             entry=entry,
             score=score,
             matched_terms=matched,
-            excerpt=_excerpt(entry, query_terms, include_history=include_history),
+            excerpt=_excerpt(
+                entry,
+                query_terms,
+                include_history=include_history,
+                exclude_historical_material=exclude_historical_material,
+                exclude_current_material=exclude_current_material,
+            ),
         )
         for _priority, score, _path, entry, matched in selected
     ]

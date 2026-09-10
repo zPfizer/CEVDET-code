@@ -1307,6 +1307,12 @@ title: Hook Protokolü
                 "archived.md",
                 "---\ntitle: Browser History Retention Policy\nstatus: archived\ntype: note\n---\n" + body,
             )
+            _write(
+                root,
+                "privacy.md",
+                "---\ntitle: Privacy Settings\nstatus: active\ntype: note\n---\n"
+                "# Privacy Settings\nCurrent privacy settings.\n",
+            )
             entries = retrieval.build_vault_map(root, write_cache=False)
             feature = retrieval.search_vault(
                 entries,
@@ -1318,9 +1324,70 @@ title: Hook Protokolü
                 "show the history of the current browser retention policy",
                 top_k=2,
             )
+            mixed = retrieval.search_vault(
+                entries,
+                "compare current privacy settings and browser history retention policy",
+                top_k=3,
+            )
 
         self.assertEqual(feature[0].entry.path, "active.md")
         self.assertEqual(retro[0].entry.path, "archived.md")
+        mixed_paths = [hit.entry.path for hit in mixed]
+        self.assertIn("privacy.md", mixed_paths)
+        self.assertIn("active.md", mixed_paths)
+        self.assertNotIn("archived.md", mixed_paths)
+
+    def test_selection_exclusion_projects_knowledge_v2_claim_rows(self) -> None:
+        historical_claim = (
+            "- `gecmis` `kullanici-dusuncesi` `eski` 2024-01-01 "
+            "[[daily/2024-01-01|Kaynak]] — Historical hook records evidence."
+        )
+        current_claim = (
+            "- `gecerli` `kullanici-dusuncesi` `guncel` 2024-02-01 "
+            "[[daily/2024-02-01|Kaynak]] — Current hook records evidence."
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write(
+                root,
+                "mixed.md",
+                "---\nschema: knowledge-v2\ntitle: Hook Records\nstatus: active\n---\n"
+                f"# Hook Records\n\n## Kayıtlar\n{historical_claim}\n{current_claim}\n",
+            )
+            _write(
+                root,
+                "current-only.md",
+                "---\nschema: knowledge-v2\ntitle: Hook Records\nstatus: active\n---\n"
+                f"# Hook Records\n\n## Kayıtlar\n{current_claim}\n",
+            )
+            _write(
+                root,
+                "archived.md",
+                "---\nschema: knowledge-v2\ntitle: Hook Records\nstatus: archived\n---\n"
+                f"# Hook Records\n\n## Kayıtlar\n{current_claim}\n",
+            )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            history = retrieval.search_vault(
+                entries,
+                "historical hook records, not current records",
+                top_k=5,
+            )
+            current = retrieval.search_vault(
+                entries,
+                "current hook records, not historical records",
+                top_k=5,
+            )
+
+        self.assertEqual([hit.entry.path for hit in history], ["mixed.md"])
+        self.assertIn("Historical hook records evidence", history[0].excerpt)
+        self.assertNotIn("Current hook records evidence", history[0].excerpt)
+        self.assertEqual(
+            {hit.entry.path for hit in current},
+            {"mixed.md", "current-only.md"},
+        )
+        mixed_current = next(hit for hit in current if hit.entry.path == "mixed.md")
+        self.assertIn("Current hook records evidence", mixed_current.excerpt)
+        self.assertNotIn("Historical hook records evidence", mixed_current.excerpt)
 
     def test_unrelated_corpus_growth_does_not_change_target_selection_or_score(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
