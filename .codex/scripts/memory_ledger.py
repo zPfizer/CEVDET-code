@@ -552,22 +552,30 @@ def sanitize_text(
     ) -> None:
         nonlocal text
         spans = [(record[0], record[1]) for record in _json_string_regions(text) if record[2]]
-        if not spans:
-            text, count = pattern.subn(replacement, text)
-        else:
-            pieces: list[str] = []
-            cursor = 0
-            count = 0
-            for start, end in spans:
-                segment, replaced = pattern.subn(replacement, text[cursor:start])
-                pieces.extend((segment, text[start:end]))
-                count += replaced
-                cursor = end
-            segment, replaced = pattern.subn(replacement, text[cursor:])
-            pieces.append(segment)
-            count += replaced
-            text = ''.join(pieces)
-        if count and category not in redactions:
+        pieces: list[str] = []
+        cursor = span_index = 0
+        for match in pattern.finditer(text):
+            if match.start() < cursor:
+                continue
+            while span_index < len(spans) and spans[span_index][1] <= match.start():
+                span_index += 1
+            if span_index < len(spans) and spans[span_index][0] <= match.start():
+                continue
+            end = match.end()
+            opening = re.search(r'[\[{]', match.group())
+            if opening is not None and pattern is not PRIVATE_KEY:
+                value_end = _balanced_value_end(text, match.start() + opening.start())
+                if value_end is None:
+                    raise MemoryPreferenceError('memory-credential-container-unverifiable')
+                end = max(end, value_end)
+                while end < len(text) and not text[end].isspace():
+                    end += 1
+            value = replacement(match) if callable(replacement) else match.expand(replacement)
+            pieces.extend((text[cursor:match.start()], value))
+            cursor = end
+        if pieces:
+            text = ''.join(pieces) + text[cursor:]
+        if pieces and category not in redactions:
             redactions.append(category)
 
     text, decoded_redactions = _redact_decoded_json(text)

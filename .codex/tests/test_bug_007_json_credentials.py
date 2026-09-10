@@ -237,6 +237,19 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         )
         subprocess.run([sys.executable, '-X', 'utf8', '-c', script], check=True, timeout=5)
 
+    def test_labeled_credentials_cross_complete_json_string_spans(self) -> None:
+        for label in ('parolam şu ', 'Authorization: Bearer '):
+            for payload in ({'value': 'LABEL_SECRET'}, ['LABEL_SECRET']):
+                for indent in (None, 2):
+                    with self.subTest(label=label, payload=payload, indent=indent):
+                        text = label + json.dumps(payload, indent=indent) + '\nkeep ordinary'
+                        sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+                        self.assertNotIn('LABEL_SECRET', sanitized)
+                        self.assertIn('keep ordinary', sanitized)
+                        self.assertTrue(redactions)
+            with self.assertRaisesRegex(ledger.MemoryPreferenceError, '^memory-credential-container-unverifiable$'):
+                ledger.sanitize_text(label + '{\n"value": "LABEL_SECRET"', max_chars=None)
+
     def test_json_credential_like_keys_are_rejected_without_collisions(self) -> None:
         first_key = "example 'token': {'a': 1}"
         second_key = "example 'token': {'b': 2}"
