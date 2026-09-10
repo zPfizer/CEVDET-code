@@ -107,6 +107,22 @@ Etkinleştirme yetkisinden sonra, olayın zamanı ve oturum kimliği ile runtime
 kaydını eşleştir. Terminalden elle üretilen receipt App teslimi sayılmaz.
 Zamanı eski, başka köke veya başka oturuma ait kanıtı güncel kabul yerine koyma.
 
+Etkinleştirme yetkisi, mevcut kullanıcı içeriğini veya uzak bir kaynağı
+değiştirme yetkisi değildir. Mutasyon, yarış, corpus büyümesi ve kesinti
+senaryoları varsayılan olarak açıkça seçilmiş, teste ait zararsız kaynaklar,
+süreçler ve kontrolümüzdeki deneme endpoint'leriyle yürütülür. Gerçek korpustan
+seçilen arama dayanakları salt okunur kalır. Gerekli fixture mutasyonu mevcut
+yetkinin kapsamına girmiyorsa önce o somut kapsam yetkilendirilir; geçerli
+verilmiş yetki yeniden istenmez.
+
+Test kaydı fixture yollarını/sahibini, ilk bayt/hash durumunu, beklenen test
+değişikliklerini ve temizleme/geri yükleme sonucunu tutar. Mevcut kullanıcı
+kaynağı veya uzak servis değişikliği kaçınılmazsa ayrı açık hedef ve mutasyon
+yetkisi ile doğrulanmış geri yükleme gerekir. Beklenmeyen kullanıcı değişimi
+varsa eski kopya körlemesine yazılmaz; iki sürüm ve kurtarma kanıtı korunur,
+kabul açık kalır. Makinenin yönettiği çıktılar mevcut kurtarma/gizlilik
+akışından geçer; ham günlük veya kullanıcı kaynağı doğrudan silinmez.
+
 Hedef sürümün hook kaydıyla bir event/matcher kapsama listesi oluşturulur.
 `SessionStart` için `startup`, `resume`, `clear`, `compact`; `PreCompact` için
 `manual`, `auto` ayrı ayrı gerçek host tetiklemeleriyle sınanır. `UserPromptSubmit`,
@@ -155,11 +171,12 @@ seçilen bağımsız ilgili kaynak sonuç kümesinde kalır ve kendi dayanağıy
 | Senaryo | Başarı ölçütü |
 | --- | --- |
 | Yeni zararsız bilgi | Kullanıcı yeni App oturumunda bilgiyi kendisi verir; Stop sonrası kaynaklı günlük/oturum kaydı oluşur. Yayımdan önce gerçek `user` mesajındaki birebir alıntı, mesaj hash'i, kapsam ve `daily/YYYY-MM-DD#user-ID` bağlantısı birlikte doğrulanır; assistant veya alıntılı dış metin kullanıcı kaynağı yerine geçmez. |
+| Her SessionStart tetikleyicisinin bağlamı | `startup`, `resume`, `clear` ve `compact` kendi gerçek `additionalContext` çıktılarıyla ayrı değerlendirilir. Önceden seçilen izinli güncel kimlik/profil ve ilgili oturum kaynakları, provenance ve gizlilik süzmesi doğrulanır; çıktı hedefteki context sınırına uyar ve yarım hüküm üretmez. Eski veya kullanım dışı içerik, ham kaynak yolu ve geçersiz profil enjekte edilmez. Hatalı/okunamayan profil kontrolü teste ait kontrollü kaynakla ayrıca denenir; doğrulama hatası görünür olur, eski/ham bağlama fallback yapılmaz. Sonraki UserPromptSubmit cevabı bu başlangıç çıktısının kanıtı yerine geçmez. |
 | Sonraki oturum | Yeni oturum önceki bilgiye konuşma geçmişinden değil, okunan kalıcı kaynaktan cevap verir; kaynak ve anlam eşleşir. |
 | Güncel profil ve eski analiz | Aynı konuda güncel kanonik profil ile daha eski analiz farklı bilgi taşır. Güncel kişisel soruda kanonik kaynak kullanılır; açık tarihsel soruda eski görüş tarihiyle bulunur. Yanıttaki dayanak kaydı bu ayrımı doğrular. |
 | İki oturum katkısı | İki gerçek App oturumunun ayrı zararsız katkıları aynı günlük/Companion akışına eşzamanlı girer. Tur veya kalıcılık worker aralıklarının gerçekten örtüştüğü olay/iş zamanlarıyla doğrulanır; yalnız sırayla çalıştırma yeterli değildir. İki katkı ve kaynak kimliği de tam birer kez korunur, biri diğerini ezmez. |
 | Bağlantıdan sentez | Paylaşılan bir kaynağın gerçek içeriği okunur; sentez kaynağına bağlanır. Tarihli ve eski bir dış görüş ile onunla çelişen güncel kaynak kullanılır. Kalıcı kayıtta ve sonraki oturum yanıtında kaynak kimliği, yayın tarihi, güncellik ve bilgi türü ayrı ayrı doğrulanır; dış görüş doğrulanmış bilgiye dönüşmez, eski kayıt güncelmiş gibi sunulmaz, çelişki ve Cevo çıkarımı açıkça ayrılır. Kısa alıntı yetmezse tam kaynak ve ilgili iç bağlantılar izlenebilir; okunamayan içerik okunmuş sayılmaz. |
-| Seçimden sonra kaynak değişimi | Gerçek Vault kaynağı ve bağlantılı dış kaynak ayrı ayrı aday bulma ile tam okuma/sentez arasındaki aralıkta değiştirilir. Kaynak kimliği/hash farkı ve App araç akışı kaydedilir; eski cache veya ham kaynak fallback'iyle yanıt, arka plan model girdisi ya da kalıcı yayın üretilmez ve başarı iddiası verilmez. Kaynak yeniden seçilip güncel hali doğrulanmadan işlem sürmez. Dayanak günlük tek başına değiştiğinde de aynı kontrol uygulanır; yarış oluşturulamadıysa satır geçti sayılmaz. |
+| Seçimden sonra kaynak değişimi | Hedef Vault'taki teste ait kontrollü kaynak ile kontrolümüzdeki bağlantı/deneme endpoint'i ayrı ayrı aday bulma ile tam okuma/sentez arasındaki aralıkta değiştirilir. Kaynak kimliği/hash farkı ve App araç akışı kaydedilir; eski cache veya ham kaynak fallback'iyle yanıt, arka plan model girdisi ya da kalıcı yayın üretilmez ve başarı iddiası verilmez. Kaynak yeniden seçilip güncel hali doğrulanmadan işlem sürmez. Teste ait dayanak günlük tek başına değiştiğinde de aynı kontrol uygulanır; yarış oluşturulamadıysa satır geçti sayılmaz. |
 | Eksik bilgi | İlgili adaylar ve kaynaklar yetersizse belirsizlik açıkça söylenir; sınırlı ilk arama sonucu bütün Vault'ta bilgi bulunmadığına dönüştürülmez. |
 | Tekrarlı olay | Aynı içerik için Stop, PreCompact ve SessionEnd tek kayıt üretir; coverage boş yere tekrar özetletmez. |
 | Aynı oturumdan eski işin yeniden gelmesi | Bir oturumun eski işi tutulur; aynı oturumdan daha yeni güncelleme/iptal yayımlandıktan sonra eski iş retry/replay edilir. En yeni durum geri alınmaz, iptal edilen iş dirilmez; bu oturumun ve ikinci oturumun ilgisiz katkıları korunur. Olay sırası, kaynak sürümleri ve son kanonik durum birlikte kaydedilir. |
