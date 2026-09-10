@@ -43,7 +43,8 @@ AUTHORIZATION = re.compile(
     r'''(?:"Bearer\s+(?:\\.|[^"\\\r\n])+"|'''
     r"""'Bearer\s+(?:\\.|[^'\\\r\n])+'|Bearer\s+[^\s\r\n]+)"""
 )
-CREDENTIAL_NAME = r'api[_-]?key|password|secret|token'
+_ENV_CREDENTIAL_NAME = r'(?:[A-Za-z0-9]+_)+(?:api[_-]?key|password|secret(?:_[A-Za-z0-9]+)*|token)'
+CREDENTIAL_NAME = rf'api[_-]?key|password|secret|token|{_ENV_CREDENTIAL_NAME}'
 CREDENTIAL_NAME_RE = re.compile(rf'(?i)^(?:{CREDENTIAL_NAME})$')
 CREDENTIAL = re.compile(
     r'''(?im)(?P<prefix>(?P<key_quote>["']?)\b(?P<key>''' + CREDENTIAL_NAME + r''')'''

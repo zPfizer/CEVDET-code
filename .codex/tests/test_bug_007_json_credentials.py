@@ -313,6 +313,33 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         self.assertIn('keep "password" as an ordinary quoted field name.', sanitized)
         self.assertIn("credential", redactions)
 
+    def test_environment_credential_assignments_are_non_persistent(self) -> None:
+        text = (
+            'DATABASE_PASSWORD="P02_DATABASE_PASSWORD_CANARY"\n'
+            "MY_TOKEN='P02_MY_TOKEN_CANARY'\n"
+            'AWS_SECRET_ACCESS_KEY=P02_AWS_SECRET_ACCESS_KEY_CANARY\n'
+            'keep=ordinary'
+        )
+
+        sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+
+        self.assertEqual(
+            sanitized,
+            'DATABASE_PASSWORD=<REDACTED>\n'
+            'MY_TOKEN=<REDACTED>\n'
+            'AWS_SECRET_ACCESS_KEY=<REDACTED>\n'
+            'keep=ordinary',
+        )
+        self.assertEqual(redactions, ('credential',))
+        self.assertTrue(ledger.contains_secret(text))
+        self.assertEqual(ledger.memory_directive(text).kind, 'secret')
+        self.assertEqual(
+            ledger.persistent_turns(
+                [('user', text), ('assistant', 'P02_MY_TOKEN_CANARY'), ('user', 'Sonraki karar.')]
+            ),
+            [('user', 'Sonraki karar.')],
+        )
+
     def test_quoted_authorization_keys_use_the_existing_authorization_redaction(self) -> None:
         text = (
             'Authorization: Bearer plain-auth; '
