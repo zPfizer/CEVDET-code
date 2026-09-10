@@ -483,6 +483,25 @@ Eylül etiket denetimi.
                     self.assertNotIn("b-archived.md", paths)
                     self.assertLess(paths.index("z-active.md"), paths.index(history))
 
+    def test_current_history_scope_ignores_inner_connectors(self) -> None:
+        cases = {
+            "compare current checklist with past design and history notes": (
+                "compare current checklist",
+                "past design and history notes",
+            ),
+            "compare current design and implementation with hook history": (
+                "compare current design and implementation",
+                "hook history",
+            ),
+            "current checklist before deployment with hook history": (
+                "current checklist before deployment",
+                "hook history",
+            ),
+        }
+        for query, expected in cases.items():
+            with self.subTest(query=query):
+                self.assertEqual(retrieval._split_current_history_query(query), expected)
+
     def test_ordinary_history_prefix_match_keeps_active_record_ahead_of_archived_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -1602,38 +1602,65 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     )
     if not current_spans:
         return None
-    history_spans = [
-        (match.start(), match.end())
-        for match in re.finditer(r"(?<!\w)[\w]+(?!\w)", normalized)
-        if (
-            match[0] in HISTORY_QUERY_TERMS
-            or any(_matches_history_inflection(match[0], root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
-        )
-    ]
-    history_spans.extend(
-        (match.start(), match.end())
-        for pattern in (HISTORY_CHANGE_QUERY, HISTORY_NOMINAL_CHANGE_QUERY)
-        for match in pattern.finditer(normalized)
+    history_spans: set[tuple[int, int]] = set()
+    weak_history_spans: set[tuple[int, int]] = set()
+    for match in re.finditer(r"(?<!\w)[\w]+(?!\w)", normalized):
+        token = match[0]
+        if token not in HISTORY_QUERY_TERMS and not any(
+            _matches_history_inflection(token, root)
+            for root in HISTORY_QUERY_INFLECTION_ROOTS
+        ):
+            continue
+        span = (match.start(), match.end())
+        history_spans.add(span)
+        if token in {"before", "past", "previous", "onceki", "tarih"} or any(
+            _matches_history_inflection(token, root)
+            for root in {"onceki", "tarih"}
+        ):
+            weak_history_spans.add(span)
+    for pattern in (HISTORY_CHANGE_QUERY, HISTORY_NOMINAL_CHANGE_QUERY):
+        history_spans.update((match.start(), match.end()) for match in pattern.finditer(normalized))
+    weak_history_spans.update(
+        (reference.start, reference.end)
+        for reference in _date_references(normalized)
     )
     if not history_spans:
         return None
-    current_ends = tuple(end for _start, end in sorted(current_spans))
-    current_starts = tuple(start for start, _end in sorted(current_spans))
-    history_ends = tuple(end for _start, end in sorted(history_spans))
-    history_starts = tuple(start for start, _end in sorted(history_spans))
-    candidate: tuple[int, int] | None = None
+    current_starts = tuple(sorted(start for start, _end in current_spans))
+    current_ends = tuple(sorted(end for _start, end in current_spans))
+    history_starts = tuple(sorted(start for start, _end in history_spans))
+    history_ends = tuple(sorted(end for _start, end in history_spans))
+    strong_history = history_spans - weak_history_spans
+    strong_starts = tuple(sorted(start for start, _end in strong_history))
+    strong_ends = tuple(sorted(end for _start, end in strong_history))
+    weak_starts = tuple(sorted(start for start, _end in weak_history_spans))
+    weak_ends = tuple(sorted(end for _start, end in weak_history_spans))
+    candidates: list[tuple[bool, int, int]] = []
     for connector in CURRENT_HISTORY_CONNECTOR.finditer(normalized):
         current_left = bisect_right(current_ends, connector.start())
         current_right = len(current_starts) - bisect_left(current_starts, connector.end())
         history_left = bisect_right(history_ends, connector.start())
         history_right = len(history_starts) - bisect_left(history_starts, connector.end())
-        if current_left and history_right:
-            candidate = (connector.start(), connector.end())
-        elif history_left and current_right:
-            candidate = (connector.start(), connector.end())
-    if candidate is None:
+        strong_left = bisect_right(strong_ends, connector.start())
+        strong_right = len(strong_starts) - bisect_left(strong_starts, connector.end())
+        if current_left and history_right and not current_right and not strong_left:
+            candidates.append((
+                bisect_left(weak_starts, connector.end()) < len(weak_starts),
+                connector.start(),
+                connector.end(),
+            ))
+        if history_left and current_right and not current_left and not strong_right:
+            candidates.append((
+                bisect_right(weak_ends, connector.start()) > 0,
+                connector.start(),
+                connector.end(),
+            ))
+    if not candidates:
         return None
-    connector_start, connector_end = candidate
+    _weak_history_side, connector_start, connector_end = max(
+        candidates,
+        key=lambda candidate: (candidate[0], candidate[1]),
+    )
     left = normalized[:connector_start].strip(" ,;:()[]")
     right = normalized[connector_end:].strip(" ,;:()[]")
     left_terms = _retrieval_terms(left)
