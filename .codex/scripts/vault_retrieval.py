@@ -1956,6 +1956,14 @@ def _is_historical_material(entry: VaultEntry) -> bool:
     )
 
 
+def _is_historical_preference_material(entry: VaultEntry) -> bool:
+    return (
+        _is_historical_material(entry)
+        or entry.status in {"archived", "historical"}
+        or entry.status.startswith("superseded")
+    )
+
+
 def _rank(
     entries: VaultMap,
     query: str,
@@ -1969,9 +1977,8 @@ def _rank(
         return []
 
     include_history = _is_history_query(query_terms, query)
-    current_query = bool(query_terms & CURRENT_QUERY_TERMS) and (
-        not include_history or preserve_current_stale_penalty
-    )
+    history_mode = include_history and not preserve_current_stale_penalty
+    current_query = bool(query_terms & CURRENT_QUERY_TERMS) and not history_mode
     personal_query = _is_personal_query(query_terms)
     # ponytail: explicit Vault-system wording only; this is not semantic topic detection.
     vault_system_query = 'vault' in query_terms and bool(query_terms & {
@@ -2065,11 +2072,10 @@ def _rank(
         priority += int(vault_system_query and ('vault' in matched or title_anchor))
         ranked.append((priority, score, entry.path, entry, tuple(sorted(matched))))
     # Excerpt render'ı sıralamadan SONRA: yalnız kazanan top_k dilimi ödenir.
-    history_tie = include_history and not current_query
     ranked.sort(key=lambda candidate: (
         -candidate[0],
         -candidate[1],
-        -int(history_tie and _is_historical_material(candidate[3])),
+        -int(history_mode and _is_historical_preference_material(candidate[3])),
         candidate[2],
     ))
     selected = ranked[:top_k]
@@ -2082,14 +2088,14 @@ def _rank(
                 if current_query and candidate[3].status == "active" and previous[3].status != "active":
                     unique[content_key] = candidate
                 elif (
-                    history_tie
-                    and _is_historical_material(candidate[3])
-                    and not _is_historical_material(previous[3])
+                    history_mode
+                    and _is_historical_preference_material(candidate[3])
+                    and not _is_historical_preference_material(previous[3])
                 ):
                     unique[content_key] = candidate
                 continue
             if len(unique) >= top_k:
-                if not current_query:
+                if not (current_query or history_mode):
                     break
                 continue
             unique[content_key] = candidate
