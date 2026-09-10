@@ -329,7 +329,7 @@ _QUESTION_KAC = (
     r"lar(?:ın|a|ı|da|dan)?(?:ki)?)?|ın|a|ı|ta|tan)?"
 )
 ACTION_QUESTION_WORD = re.compile(
-    rf"\b(?:{_QUESTION_NE}|nasıl|niçin|niye|{_QUESTION_HANGI}|"
+    rf"\b(?:{_QUESTION_NE}|nasıl|niçin|niye|sence|sizce|{_QUESTION_HANGI}|"
     rf"{_QUESTION_KIM}|{_QUESTION_NERE}|{_QUESTION_KAC}|ne\s+zaman)\b"
 )
 _NAMED_TARGET = re.compile(
