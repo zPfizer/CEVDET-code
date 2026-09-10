@@ -134,6 +134,10 @@ _WRITE_QUESTION_VERB = (
 _CONCRETE_WRITE_QUESTION_VERB = (
     r"(?:oluşturabilir|oluşturur|güncelleyebilir|günceller|yazabilir|yazar)"
 )
+_CONCRETE_WRITE_PERMISSION_VERB = (
+    r"(?:düzeltebilir|değiştirebilir|düzenleyebilir|uygulayabilir|onarabilir|"
+    r"oluşturabilir|güncelleyebilir|yazabilir)sin(?:iz)?"
+)
 _TARGETED_WRITE_QUESTION_VERB = (
     rf"(?:{_WRITE_QUESTION_VERB}|{_CONCRETE_WRITE_QUESTION_VERB})"
 )
@@ -214,7 +218,8 @@ _CONCRETE_WRITE_TARGET = re.compile(
     rf"{_QUOTED_FILENAME}\s+{_WRITE_FILE_OBJECT})"
 )
 _CONCRETE_WRITE_VERB = re.compile(
-    rf"(?:{_CONCRETE_WRITE_MUTATION}|{_CONCRETE_WRITE_QUESTION_VERB})"
+    rf"(?:{_CONCRETE_WRITE_MUTATION}|{_CONCRETE_WRITE_QUESTION_VERB}|"
+    rf"{_CONCRETE_WRITE_PERMISSION_VERB})"
 )
 _TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen|ok|okay|tamam|sonra)(?:[,;:]\s++|\s++))*"
 _TRAILING_POLITENESS = r"(?:(?:\s*+,\s*+|\s++)lütfen)?"
@@ -230,6 +235,11 @@ TARGETED_WRITE_QUESTION = re.compile(
     rf"(?P<mutation>{_TARGETED_WRITE_QUESTION_VERB})\s+"
     rf"{_QUESTION_SUFFIX}{_TRAILING_POLITENESS}\?\s*+$"
 )
+TARGETED_WRITE_PERMISSION = re.compile(
+    rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+"
+    rf"(?P<mutation>{_CONCRETE_WRITE_PERMISSION_VERB})"
+    rf"{_TRAILING_POLITENESS}\s*+[.!]*\s*+$"
+)
 BARE_WRITE_QUESTION = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}{_WRITE_QUESTION_VERB}\s+{_QUESTION_SUFFIX}"
     rf"{_TRAILING_POLITENESS}\?\s*+$"
@@ -237,7 +247,7 @@ BARE_WRITE_QUESTION = re.compile(
 NON_COMMITTAL_WRITE = re.compile(
     r"\b(?:eğer|şayet|uygunsa|mümkünse|istersen(?:iz)?|gerekirse|"
     r"olursa|belki|san[ıi]r[ıi]m|sak[ıi]n|asla|hiç(?:bir)?|"
-    r"galiba|muhtemelen)\b"
+    r"galiba|muhtemelen|herhalde)\b"
 )
 _CONDITIONAL_PERSON = (
     r"(?:sa|se|sam|sem|san|sen|sak|sek|salar|seler|sınız|siniz|"
@@ -525,6 +535,7 @@ def is_explicit_write_intent(text: str) -> bool:
     if (
         _targeted_write_matches(TARGETED_WRITE_COMMAND, folded)
         or _targeted_write_matches(TARGETED_WRITE_QUESTION, folded)
+        or _targeted_write_matches(TARGETED_WRITE_PERMISSION, folded)
     ):
         return True
     # Quoted data is never authorization unless the quoted target was accepted above.
