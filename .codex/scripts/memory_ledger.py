@@ -440,6 +440,12 @@ def _redact_decoded_json(text: str) -> tuple[str, tuple[str, ...]]:
                 replacements.append((value_start, value_end, json.dumps("<REDACTED>")))
                 note('credential')
                 skip_until = value_end
+            elif value_start is not None and value_end is not None:
+                probe = 'authorization: ' + text[value_start:value_end]
+                if AUTHORIZATION.fullmatch(probe):
+                    replacements.append((value_start, value_end, json.dumps('Bearer <REDACTED>')))
+                    note('authorization')
+                    skip_until = value_end
             continue
         try:
             nested, nested_redactions = sanitize_text(decoded, max_chars=None)

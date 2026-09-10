@@ -100,6 +100,31 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertNotIn(secret, sanitized)
                 self.assertIn(category, redactions)
 
+    def test_authorization_keys_are_redacted_in_nested_json(self) -> None:
+        cases = (
+            (
+                '{"authorization":"Bearer TOPSECRET","keep":"ordinary"}',
+                {"authorization": "Bearer <REDACTED>", "keep": "ordinary"},
+                "TOPSECRET",
+            ),
+            (
+                r'{"\u0061uthorization":"Bearer ESCAPED_AUTH_SECRET","keep":"ordinary"}',
+                {"authorization": "Bearer <REDACTED>", "keep": "ordinary"},
+                "ESCAPED_AUTH_SECRET",
+            ),
+            (
+                json.dumps({"outer": [{"authorization": "Bearer NESTED_AUTH_SECRET"}], "keep": "ordinary"}),
+                {"outer": [{"authorization": "Bearer <REDACTED>"}], "keep": "ordinary"},
+                "NESTED_AUTH_SECRET",
+            ),
+        )
+        for original, expected, secret in cases:
+            with self.subTest(secret=secret):
+                sanitized, redactions = ledger.sanitize_text(original, max_chars=None)
+                self.assertEqual(json.loads(sanitized), expected)
+                self.assertNotIn(secret, sanitized)
+                self.assertIn("authorization", redactions)
+
     def test_decoded_json_credential_names_are_redacted(self) -> None:
         nested = json.dumps({"api_key": "INNER_SYNTHETIC_SECRET"})
         fragment = "example " + json.dumps({"api_key": "PROSE_JSON_SYNTHETIC_SECRET"}) + " in docs"
