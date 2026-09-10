@@ -87,6 +87,7 @@ _QUOTED_CASE_SUFFIX = r"(?:['’]?y?[ıiuü])?"
 _QUOTED_DIRECTORY_PREFIX = (
     r"(?:[a-z]:[\\/]?|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]?|[\w.-]+[\\/])"
 )
+_WRITE_EXTENSION = r"[\w-]+"
 DO_NOT_SAVE = r'(?:(?:bunu|bu bilgiyi|bu ayrıntıyı)\s+)?(?:kaydetme|saklama|hafızana alma|hafızanda tutma|kaydetmeni istemiyorum)'
 STANDALONE_DO_NOT_SAVE = (
     r'(?:lütfen\s+)?' + DO_NOT_SAVE
@@ -151,13 +152,15 @@ _WRITE_FILE_TARGET = (
     rf"(?:[\w.-]+\s+)?(?:{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_OBJECT})"
 )
 _WRITE_PROJECT_TARGET = rf"[\w.-]+\s+projesindeki\s+{_WRITE_TARGET_OBJECT}"
+_WRITE_PROJECT_OBJECT = r"proje(?:yi|si(?:ni)?|ler(?:i(?:ni)?)?)?"
+_WRITE_PROJECT_OBJECT_TARGET = rf"(?:[\w.-]+\s+)?{_WRITE_PROJECT_OBJECT}"
 _WRITE_MODULE_TARGET = (
     rf"[\w.-]+\s+modül(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}"
 )
 _QUOTED_PATH = (
     "(?:"
     + "|".join(
-        rf"{re.escape(opening)}[^{re.escape(closing)}\r\n]*\.[A-Za-z0-9_-]+"
+        rf"{re.escape(opening)}[^{re.escape(closing)}\r\n]*\.{_WRITE_EXTENSION}"
         rf"{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
         for opening, closing in _QUOTE_PAIRS
     )
@@ -181,7 +184,7 @@ _QUOTED_DIRECTORY = (
     )
     + ")"
 )
-_WRITE_FILENAME = r"(?:[\w.-]+\.[A-Za-z0-9_-]+|\.[A-Za-z0-9_-]+)"
+_WRITE_FILENAME = rf"(?:[\w.-]+\.{_WRITE_EXTENSION}|\.{_WRITE_EXTENSION})"
 _WRITE_CASE_SUFFIX = r"['’]y?[ıiuü]"
 _WRITE_TARGET_SUFFIX = rf"(?:\s+(?:{_WRITE_TARGET_OBJECT}|{_WRITE_FILE_MEMBER})|{_WRITE_CASE_SUFFIX})?"
 _WRITE_PATH = (
@@ -192,6 +195,7 @@ _WRITE_TARGET = (
     rf"(?:bunu|bunları|şunu|şunları|onu|onları|"
     rf"(?:bu|şu|o)\s+{_WRITE_TARGET_OBJECT}|"
     rf"{_WRITE_PROJECT_TARGET}|{_WRITE_MODULE_TARGET}|{_WRITE_FILE_TARGET}|"
+    rf"{_WRITE_PROJECT_OBJECT_TARGET}|"
     rf"{_WRITE_TARGET_OBJECT}|"
     rf"{_WRITE_PATH}"
     rf"{_WRITE_TARGET_SUFFIX}|"
@@ -201,7 +205,9 @@ _WRITE_TARGET = (
     rf"{_QUOTED_FILENAME}\s+{_WRITE_FILE_OBJECT})"
 )
 _CONCRETE_WRITE_TARGET = re.compile(
-    rf"(?:{_WRITE_FILE_TARGET}|{_WRITE_PATH}{_WRITE_TARGET_SUFFIX}|"
+    rf"(?:{_WRITE_PROJECT_TARGET}|{_WRITE_MODULE_TARGET}|"
+    rf"{_WRITE_PROJECT_OBJECT_TARGET}|{_WRITE_FILE_TARGET}|"
+    rf"{_WRITE_PATH}{_WRITE_TARGET_SUFFIX}|"
     rf"{_WRITE_FILENAME}{_WRITE_TARGET_SUFFIX}|"
     rf"{_QUOTED_DIRECTORY}\s+{_WRITE_FOLDER_OBJECT}|"
     rf"{_QUOTED_PATH}{_WRITE_TARGET_SUFFIX}|"
@@ -260,7 +266,8 @@ ACTION_QUESTION_WORD = re.compile(
     r"\b(?:ne|nasıl|neden|niçin|hangi|hangisi|kim|kaç|ne\s+zaman)\b"
 )
 _NAMED_TARGET = re.compile(
-    rf"^(?P<name>[\w.-]+)\s+(?:projesindeki\s+{_WRITE_TARGET_OBJECT}|"
+    rf"^(?P<name>[\w.-]+)\s+(?:{_WRITE_PROJECT_OBJECT}|"
+    rf"projesindeki\s+{_WRITE_TARGET_OBJECT}|"
     rf"modül(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}|"
     rf"{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_OBJECT})$"
 )
