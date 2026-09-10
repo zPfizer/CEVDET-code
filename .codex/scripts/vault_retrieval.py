@@ -154,21 +154,26 @@ PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
     "work", "prefer", "response", "reply", "style", "profile",
 })
+HISTORY_CHANGE_TEMPORAL = r"(?:today|yesterday|recently|earlier|last\s+(?:day|week|month|year))"
+HISTORY_CHANGE_TAIL = (
+    rf"(?:\s*(?:[?!.,;:]|$)|\s+{HISTORY_CHANGE_TEMPORAL}\b"
+    r"|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
+)
 HISTORY_CHANGE_QUERY = re.compile(
     r"(?ix)"
     r"(?:"
     r"\bwhat(?:\s+\w+){0,2}\s+changed\b"
     r"(?!\s+(?:in|to|from|with|about|between|since|after|over|for)\b"
     r"(?:\s+\w+){0,5}\s+(?:should|must|can|will)\b)"
-    r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
+    rf"{HISTORY_CHANGE_TAIL}"
     r"|"
     r"\b(?:(?:how|why|when|what)\s+)?(?:has|have|had|was|were)\s+(?:\w+\s+){1,5}changed\b"
     r"(?!\s+(?:in|to|from|with|about|between|since|after|over|for)\b"
     r"(?:\s+\w+){0,5}\s+(?:should|must|can|will)\b)"
-    r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
+    rf"{HISTORY_CHANGE_TAIL}"
     r"|"
     r"\b(?:(?:how|why|what|when)\s+)?did\s+(?:\w+\s+){1,5}change\b"
-    r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
+    rf"{HISTORY_CHANGE_TAIL}"
     r"|"
     r"\b(?:ne|neler|nasil|neden)\b(?:\s+\w+){0,3}?\s+\bdegisti\b"
     r")"
@@ -182,7 +187,10 @@ HISTORY_CONTEXT_TERMS = frozenset({
     "timeline", "version", "versions", "surum", "surumler", "karar", "kararlar", "donem", "donemler",
     "performance", "experience", "work", "result", "results", "project", "projects",
 })
-HISTORY_DIRECTIONAL_PAST = re.compile(r"(?i)\bpast(?:\s+the)?\s+(?:due|deadline)\b")
+HISTORY_DIRECTIONAL_PAST = re.compile(
+    r"(?i)\bpast(?:\s+(?:(?:the|my|your|his|her|its|our|their)\s+)?(?:due|deadline)s?)\b"
+)
+HISTORY_CLAUSE_SPLIT = re.compile(r"(?i)\s*(?:;|\b(?:and|or|ve)\b)\s*")
 # `eskime` is the noun/verb form for tarnishing and must not be read as `eski` + suffix.
 HISTORY_DERIVATIONAL_HOMONYMS = frozenset({"eskime"})
 HISTORY_MONTHS = {
@@ -1350,7 +1358,10 @@ def _before_relative_date_status(query: str) -> bool | None:
     normalized = _normalize(query)
     for marker in re.finditer(r"\bbefore\b", normalized):
         suffix = normalized[marker.end():].lstrip(" ,;:()[]")
-        if re.match(r"today\b(?!['’]s\b|\s+s\b)|yesterday\b", suffix):
+        if re.match(
+            r"today\b(?!['’]s\b|\s+s\b)|yesterday\b|last\s+(?:day|week|month|year)\b",
+            suffix,
+        ):
             return True
     return None
 
@@ -1395,13 +1406,19 @@ def _has_history_context(query: str) -> bool:
         return False
     context_terms = "|".join(map(re.escape, sorted(HISTORY_CONTEXT_TERMS, key=len, reverse=True)))
     query = HISTORY_DIRECTIONAL_PAST.sub(" ", _normalize(query))
-    return re.search(
+    context = re.compile(
         rf"(?ix)(?:"
         rf"\b(?:past|previous)\b(?:\W+\w+){{0,2}}\W+\b(?:{context_terms})\b"
         rf"|\b(?:{context_terms})\b(?:\W+\w+){{0,2}}\W+\b(?:past|previous)\b"
-        rf")",
-        query,
-    ) is not None
+        rf")"
+    )
+    for clause in HISTORY_CLAUSE_SPLIT.split(query):
+        if not context.search(clause):
+            continue
+        terms = _retrieval_terms(clause)
+        if _past_date_status(clause, terms) is not False:
+            return True
+    return False
 
 
 def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
@@ -1419,7 +1436,9 @@ def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
     past_date = _past_date_status(query, query_terms)
     if history_terms & {"before", "past"}:
         if past_date is not None:
-            return past_date
+            if past_date or "past" not in history_terms:
+                return past_date
+            return _has_history_context(query)
         return _has_history_context(query)
     return bool(
         past_date is True
