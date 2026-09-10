@@ -149,14 +149,6 @@ HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES = {
     )
     for stem_type, suffixes in HISTORY_QUERY_INFLECTION_SUFFIXES.items()
 }
-HISTORY_QUERY_INFLECTION_RELATIVE_SUFFIXES = {
-    stem_type: frozenset(
-        suffix + relative
-        for suffix in locative_suffixes
-        for relative in ("ki", "kiler")
-    )
-    for stem_type, locative_suffixes in HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES.items()
-}
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
@@ -1186,16 +1178,27 @@ def _is_personal_query(query_terms: frozenset[str]) -> bool:
     )
 
 
+def _matches_history_inflection(term: str, root: str) -> bool:
+    if not term.startswith(root):
+        return False
+    suffix = term[len(root):]
+    stem_type = "vowel" if root[-1] in HISTORY_QUERY_INFLECTION_VOWELS else "consonant"
+    if suffix in HISTORY_QUERY_INFLECTION_SUFFIXES[stem_type]:
+        return True
+    locative, relative, following = suffix.partition("ki")
+    return bool(
+        relative
+        and locative in HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES[stem_type]
+        and (not following or following in HISTORY_QUERY_INFLECTION_SUFFIXES["vowel"])
+    )
+
+
 def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
     history_terms = query_terms & HISTORY_QUERY_TERMS
     has_inflected_history = any(
-        term.startswith(root) and (
-            term[len(root):] in HISTORY_QUERY_INFLECTION_SUFFIXES[stem_type]
-            or term[len(root):] in HISTORY_QUERY_INFLECTION_RELATIVE_SUFFIXES[stem_type]
-        )
+        _matches_history_inflection(term, root)
         for term in query_terms
         for root in HISTORY_QUERY_INFLECTION_ROOTS
-        for stem_type in ("vowel" if root[-1] in HISTORY_QUERY_INFLECTION_VOWELS else "consonant",)
     )
     has_retrospective_change = bool(query and HISTORY_CHANGE_QUERY.search(_normalize(query)))
     if has_inflected_history or has_retrospective_change or history_terms - {"before"}:

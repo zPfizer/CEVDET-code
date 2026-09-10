@@ -606,7 +606,8 @@ title: Hook Protokolü
                 "geçmişinde", "geçmişini", "geçmişimiz", "geçmişimde", "geçmişimizin",
                 "tarihinde", "öncekilerin", "eskisi", "eskisini", "eskisinde", "öncekisi",
                 "eskim", "eskimiz", "eskilerim", "tarihçesi", "tarihçesinde",
-                "geçmişteki", "geçmiştekiler", "tarihindeki", "historic", "histories",
+                "geçmişteki", "geçmiştekiler", "geçmiştekilerden", "tarihçesindekilere",
+                "tarihindeki", "historic", "histories",
                 "previously", "historically", "before 2024",
             ):
                 with self.subTest(marker=marker):
