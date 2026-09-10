@@ -85,7 +85,7 @@ _QUOTE_PAIRS = (
 )
 _QUOTED_CASE_SUFFIX = r"(?:['’]?y?[ıiuü])?"
 _QUOTED_DIRECTORY_PREFIX = (
-    r"(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]?|[\w.-]+[\\/])"
+    r"(?:[a-z]:[\\/]?|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]?|[\w.-]+[\\/])"
 )
 DO_NOT_SAVE = r'(?:(?:bunu|bu bilgiyi|bu ayrıntıyı)\s+)?(?:kaydetme|saklama|hafızana alma|hafızanda tutma|kaydetmeni istemiyorum)'
 STANDALONE_DO_NOT_SAVE = (
@@ -118,18 +118,23 @@ EXPLICIT_WRITE_INTENT = re.compile(
     r")\s*[.!]*\s*$"
 )
 
+_CONCRETE_WRITE_MUTATION = (
+    r"(?:oluştur(?:un(?:uz)?)?|güncelle(?:yin(?:iz)?)?|yaz(?:ın(?:ız)?)?)"
+)
 _WRITE_MUTATION = (
     r"(?:düzelt(?:in(?:iz)?)?|değiştir(?:in(?:iz)?)?|"
     r"düzenle(?:yin(?:iz)?)?|uygula(?:yın(?:ız)?)?|onar(?:ın(?:ız)?)?|"
-    r"oluştur(?:un(?:uz)?)?|güncelle(?:yin(?:iz)?)?|yaz(?:ın(?:ız)?)?)"
+    rf"{_CONCRETE_WRITE_MUTATION})"
 )
 _WRITE_QUESTION_VERB = (
     r"(?:düzeltebilir|düzeltir|değiştirebilir|değiştirir|"
     r"düzenleyebilir|düzenler|uygulayabilir|uygular|onarabilir|onarır)"
 )
+_CONCRETE_WRITE_QUESTION_VERB = (
+    r"(?:oluşturabilir|oluşturur|güncelleyebilir|günceller|yazabilir|yazar)"
+)
 _TARGETED_WRITE_QUESTION_VERB = (
-    rf"(?:{_WRITE_QUESTION_VERB}|"
-    r"oluşturabilir|oluşturur|güncelleyebilir|günceller|yazabilir|yazar)"
+    rf"(?:{_WRITE_QUESTION_VERB}|{_CONCRETE_WRITE_QUESTION_VERB})"
 )
 _QUESTION_SUFFIX = r"m[ıiuü]s[ıiuü]n(?:iz|ız|uz|üz)?"
 _WRITE_FOLDER_OBJECT = r"klasör(?:ü|ünü|leri|lerini)?"
@@ -179,29 +184,44 @@ _QUOTED_DIRECTORY = (
 _WRITE_FILENAME = r"(?:[\w.-]+\.[A-Za-z0-9_-]+|\.[A-Za-z0-9_-]+)"
 _WRITE_CASE_SUFFIX = r"['’]y?[ıiuü]"
 _WRITE_TARGET_SUFFIX = rf"(?:\s+(?:{_WRITE_TARGET_OBJECT}|{_WRITE_FILE_MEMBER})|{_WRITE_CASE_SUFFIX})?"
+_WRITE_PATH = (
+    rf"(?:[a-z]:[\\/]?|\.{1,2}[\\/]|[\\/](?![\\/])|"
+    rf"\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w./\\-]+"
+)
 _WRITE_TARGET = (
     rf"(?:bunu|bunları|şunu|şunları|onu|onları|"
     rf"(?:bu|şu|o)\s+{_WRITE_TARGET_OBJECT}|"
     rf"{_WRITE_PROJECT_TARGET}|{_WRITE_MODULE_TARGET}|{_WRITE_FILE_TARGET}|"
     rf"{_WRITE_TARGET_OBJECT}|"
-    rf"(?:[a-z]:[\\/]|\.{{1,2}}[\\/]|[\\/](?![\\/])|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w./\\-]+"
+    rf"{_WRITE_PATH}"
     rf"{_WRITE_TARGET_SUFFIX}|"
     rf"{_WRITE_FILENAME}{_WRITE_TARGET_SUFFIX}|"
     rf"{_QUOTED_DIRECTORY}\s+{_WRITE_FOLDER_OBJECT}|"
     rf"{_QUOTED_PATH}{_WRITE_TARGET_SUFFIX}|"
     rf"{_QUOTED_FILENAME}\s+{_WRITE_FILE_OBJECT})"
 )
+_CONCRETE_WRITE_TARGET = re.compile(
+    rf"(?:{_WRITE_FILE_TARGET}|{_WRITE_PATH}{_WRITE_TARGET_SUFFIX}|"
+    rf"{_WRITE_FILENAME}{_WRITE_TARGET_SUFFIX}|"
+    rf"{_QUOTED_DIRECTORY}\s+{_WRITE_FOLDER_OBJECT}|"
+    rf"{_QUOTED_PATH}{_WRITE_TARGET_SUFFIX}|"
+    rf"{_QUOTED_FILENAME}\s+{_WRITE_FILE_OBJECT})"
+)
+_CONCRETE_WRITE_VERB = re.compile(
+    rf"(?:{_CONCRETE_WRITE_MUTATION}|{_CONCRETE_WRITE_QUESTION_VERB})"
+)
 _TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen|ok|okay|tamam|sonra)(?:[,;:]\s++|\s++))*"
 _TRAILING_POLITENESS = r"(?:(?:\s*+,\s*+|\s++)lütfen)?"
 # ponytail: only this test-running suffix; broader compound sentences need shared sentence parsing.
 _WRITE_FOLLOWUP = r"(?:\s+ve\s+testleri\s+çalıştır|[.!]\s+sonra\s+testleri\s+çalıştır)?"
 TARGETED_WRITE_COMMAND = re.compile(
-    rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+{_WRITE_MUTATION}"
+    rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+"
+    rf"(?P<mutation>{_WRITE_MUTATION})"
     rf"{_TRAILING_POLITENESS}{_WRITE_FOLLOWUP}\s*+[.!]*\s*+$"
 )
 TARGETED_WRITE_QUESTION = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+"
-    rf"{_TARGETED_WRITE_QUESTION_VERB}\s+"
+    rf"(?P<mutation>{_TARGETED_WRITE_QUESTION_VERB})\s+"
     rf"{_QUESTION_SUFFIX}{_TRAILING_POLITENESS}\?\s*+$"
 )
 BARE_WRITE_QUESTION = re.compile(
@@ -266,6 +286,8 @@ def _targeted_write_matches(pattern: re.Pattern[str], folded: str) -> bool:
     match = pattern.fullmatch(folded)
     if match is None:
         return False
+    if _CONCRETE_WRITE_VERB.fullmatch(match.group("mutation")) is not None:
+        return _CONCRETE_WRITE_TARGET.fullmatch(match.group("target")) is not None
     named_target = _NAMED_TARGET.fullmatch(match.group("target"))
     if named_target is None:
         return True

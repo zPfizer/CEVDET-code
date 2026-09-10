@@ -38,6 +38,7 @@ class MemoryDirectiveTests(unittest.TestCase):
     def test_all_supported_quoted_target_pairs_keep_bounds(self) -> None:
         path = r"C:\Users\Me\My Project\app.py"
         directory = r"C:\Program Files (x86)\Project / R&D"
+        drive_relative_directory = r"C:Program Files\Project"
         unc_root = r"\\server\share"
         unc_single_share = r"\\server\x"
         for opening, closing in memory_ledger._QUOTE_PAIRS:
@@ -53,7 +54,12 @@ class MemoryDirectiveTests(unittest.TestCase):
                             f"{opening}{target}{closing} dosyasını düzelt."
                         )
                     )
-                for target in (directory, unc_root, unc_single_share):
+                for target in (
+                    directory,
+                    drive_relative_directory,
+                    unc_root,
+                    unc_single_share,
+                ):
                     self.assertTrue(
                         memory_ledger.is_explicit_write_intent(
                             f"{opening}{target}{closing} klasörünü değiştir."
@@ -84,6 +90,10 @@ class MemoryDirectiveTests(unittest.TestCase):
             "src/new.py dosyasını oluşturabilir misin?",
             "README.md dosyasını güncelleyebilir misin?",
             "src/new.py dosyasını yazabilir misin?",
+            "dosyayı oluştur.",
+            "src klasörünü güncelle.",
+            r"C:src\app.py dosyasını düzelt.",
+            r"C:src\app.py dosyasını oluşturabilir misin?",
             r"\src\app.py dosyasını düzelt.",
             r"/src/app.py dosyasını düzelt.",
         ):
@@ -98,6 +108,13 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Yazabilir misin?",
             "Oluşturabilir misin?",
             "Güncelleyebilir misin?",
+            "Kodu yaz.",
+            "Bunu yaz.",
+            "Şunu oluştur.",
+            "Kodu güncelle.",
+            "Kodu yazabilir misin?",
+            "Bunu yazabilir misin?",
+            "Şunu oluşturabilir misin?",
         ):
             with self.subTest(prompt=prompt):
                 self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
