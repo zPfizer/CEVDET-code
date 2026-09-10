@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack
@@ -186,11 +187,14 @@ HISTORY_CONTEXT_TERMS = frozenset({
     "log", "logs", "olay", "olaylar", "record", "records", "report", "reports",
     "timeline", "version", "versions", "surum", "surumler", "karar", "kararlar", "donem", "donemler",
     "performance", "experience", "work", "result", "results", "project", "projects",
+    "contract", "contracts", "sozlesme", "sozlesmesi", "sozlesmeler",
 })
 HISTORY_DIRECTIONAL_PAST = re.compile(
     r"(?i)\bpast(?:\s+(?:(?:the|my|your|his|her|its|our|their)\s+)?(?:due|deadline)s?)\b"
 )
 HISTORY_CLAUSE_SPLIT = re.compile(r"(?i)(?:;|\b(?:and|or|ve)\b)")
+HISTORY_CONTEXT_MARKER = r"(?:past|previous|onceki\w*)"
+HISTORY_CONTEXT_GAP = r"(?:\W+\w+){0,2}(?:\W+(?:and|or|ve)\b(?:\W+\w+){1,2})?"
 # `eskime` is the noun/verb form for tarnishing and must not be read as `eski` + suffix.
 HISTORY_DERIVATIONAL_HOMONYMS = frozenset({"eskime"})
 HISTORY_MONTHS = {
@@ -1408,15 +1412,24 @@ def _has_history_context(query: str) -> bool:
     query = HISTORY_DIRECTIONAL_PAST.sub(" ", _normalize(query))
     context = re.compile(
         rf"(?ix)(?:"
-        rf"\b(?:past|previous)\b(?:\W+\w+){{0,2}}\W+\b(?:{context_terms})\b"
-        rf"|\b(?:{context_terms})\b(?:\W+\w+){{0,2}}\W+\b(?:past|previous)\b"
+        rf"\b{HISTORY_CONTEXT_MARKER}\b{HISTORY_CONTEXT_GAP}\W+\b(?:{context_terms})\b"
+        rf"|\b(?:{context_terms})\b{HISTORY_CONTEXT_GAP}\W+\b{HISTORY_CONTEXT_MARKER}\b"
         rf")"
     )
-    for clause in HISTORY_CLAUSE_SPLIT.split(query):
-        if not context.search(clause):
-            continue
-        terms = _retrieval_terms(clause)
-        if _past_date_status(clause, terms) is not False:
+    delimiters = tuple(HISTORY_CLAUSE_SPLIT.finditer(query))
+    delimiter_starts = tuple(delimiter.start() for delimiter in delimiters)
+    delimiter_ends = tuple(delimiter.end() for delimiter in delimiters)
+    clause_status: dict[tuple[int, int], bool | None] = {}
+    for match in context.finditer(query):
+        left = bisect_right(delimiter_ends, match.start()) - 1
+        right = bisect_left(delimiter_starts, match.end())
+        clause_start = 0 if left < 0 else delimiter_ends[left]
+        clause_end = len(query) if right == len(delimiters) else delimiter_starts[right]
+        key = (clause_start, clause_end)
+        if key not in clause_status:
+            clause = query[clause_start:clause_end]
+            clause_status[key] = _past_date_status(clause, _retrieval_terms(clause))
+        if clause_status[key] is not False:
             return True
     return False
 
@@ -1427,11 +1440,27 @@ def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
         _matches_history_inflection(term, root)
         for term in query_terms
         for root in HISTORY_QUERY_INFLECTION_ROOTS
+        if root != "onceki"
+    )
+    has_previous_inflection = "onceki" in query_terms or any(
+        _matches_history_inflection(term, "onceki")
+        for term in query_terms
     )
     has_retrospective_change = bool(query and HISTORY_CHANGE_QUERY.search(_normalize(query)))
-    if has_inflected_history or has_retrospective_change or history_terms - {"before", "past", "previous"}:
+    if (
+        has_inflected_history
+        or has_retrospective_change
+        or history_terms - {"before", "past", "previous", "onceki"}
+    ):
         return True
-    if "previous" in history_terms and _has_history_context(query):
+    if (
+        ("previous" in history_terms or has_previous_inflection)
+        and (
+            _has_history_context(query)
+            if query
+            else bool(query_terms & HISTORY_CONTEXT_TERMS)
+        )
+    ):
         return True
     past_date = _past_date_status(query, query_terms)
     if history_terms & {"before", "past"}:
