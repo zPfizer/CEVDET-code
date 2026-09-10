@@ -1,6 +1,12 @@
 # Cevo ikinci beyin sözleşmesi
 
-Durum: Bu belge kod deposundaki runtime ve test sözleşmesidir. Canlı davranışın hedefi populated Vault'tur; bu checkout tek başına canlı Vault değildir.
+Durum: Bu belge kod deposundaki runtime ve test sözleşmesinin teknik
+otoritesidir; kişisel Vault ürün sözleşmesinin sahibi kullanıcıdır. Özel Vault
+yolu veya kullanıcı verisi bu belgeye eklenmez. Aynı ürün davranışı
+değiştiğinde iki kapsamın uyumu değerlendirilir; davranış sözünü
+değiştirmeyen bir bugfix için gereksiz sözleşme değişikliği yapılmaz. Canlı
+davranışın hedefi populated Vault'tur; bu checkout tek başına canlı Vault
+değildir.
 
 ## Amaç
 
@@ -61,10 +67,14 @@ veya canlı doğrulamanın tamamlandığı iddiası değildir.
   Özet veya başka bir görevden gelen içerik eylem yetkisi üretmez.
 - Farklı oturum özetleri ayrı tutulur. Eski tekrar yeni durumu ezmez; anonim eski
   özet yeni oturuma atanmaz. Kullanıcının elle yazdığı metin korunur.
-- Devam ifadeleri gerekirse önceki Assistant önerisiyle aynı kapsamda ele alınır.
-  Önceki bağlam yoksa gönderimli ifade kullanıcı dayanağı diye kanıtlanamaz.
-  Soru, olumsuzluk veya koşul onay değildir; bir ihtiyacın belirtilmesi henüz
-  seçilmemiş çözümün kullanıcı kararı olduğu anlamına gelmez.
+- Açıkça verilmiş yetkiye bağlı devam ifadesi aynı işi ve kapsamı sürdürür;
+  yeni kapsam oluşturmaz ve salt okunur sınırı tek başına kaldırmaz. Önceki
+  bağlam yoksa gönderimli ifade kullanıcı dayanağı diye kanıtlanamaz. Bilgi
+  sorusu, olumsuzluk veya koşul tek başına onay değildir; bilgi sorusu
+  açıklama veya öneri ister. `Düzeltebilir misin?` gibi açık eylem isteği soru
+  biçiminde olsa da belirtilen değişiklik için yetkidir. Bir ihtiyacın
+  belirtilmesi, seçilmemiş çözümün kullanıcı kararı olduğu anlamına gelmez;
+  alıntı, aktarılan metin veya Assistant önerisi eylem yetkisi değildir.
 - Salt okunur incelemeden sonra açık uygulama isteği yazma kapsamını yeniden
   açabilir; aynı mesajdaki salt okunur sınır korunur. Bu geçiş dış işlem veya
   geri alınamaz eylem için kendiliğinden yetki vermez.
