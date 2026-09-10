@@ -505,10 +505,66 @@ Eylül etiket denetimi.
                 "compare current design and 2030 implementation",
                 "hook history",
             ),
+            "compare current checklist to hook history": (
+                "compare current checklist",
+                "hook history",
+            ),
+            "güncel checklist ile geçmiş kayıtlar": (
+                "güncel checklist",
+                "geçmiş kayıtlar",
+            ),
+            "latest checklist with hook history": (
+                "latest checklist",
+                "hook history",
+            ),
+            "active checklist with hook history": (
+                "active checklist",
+                "hook history",
+            ),
+            "compare current IS with historical IS": (
+                "compare current IS",
+                "historical IS",
+            ),
+            "compare current work profile with my work profile 2024": (
+                "compare current work profile",
+                "my work profile 2024",
+            ),
+            "compare current and historical work profiles": (
+                "compare current work profiles",
+                "historical work profiles",
+            ),
         }
         for query, expected in cases.items():
             with self.subTest(query=query):
                 self.assertEqual(retrieval._split_current_history_query(query), expected)
+
+    def test_shared_topic_anchor_recovers_current_profile_without_current_body_term(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write(
+                root,
+                "profile-active.md",
+                "---\ntitle: Work Profiles\nstatus: active\ntype: note\n---\n"
+                "# Work Profiles\nWork profiles tercihleri.\n",
+            )
+            _write(
+                root,
+                "profile-history.md",
+                "---\ntitle: Historical Work Profiles\nstatus: historical\n"
+                "type: research-analysis\n---\n# Historical Work Profiles\n"
+                "Historical work profiles önceki tercihleri.\n",
+            )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            hits = retrieval.search_vault(
+                entries,
+                "compare current and historical work profiles",
+                top_k=3,
+            )
+
+        paths = [hit.entry.path for hit in hits]
+        self.assertIn("profile-active.md", paths)
+        self.assertIn("profile-history.md", paths)
+        self.assertLess(paths.index("profile-active.md"), paths.index("profile-history.md"))
 
     def test_ordinary_history_prefix_match_keeps_active_record_ahead_of_archived_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -674,7 +730,8 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "my work profile 2026 plan": False,
             "my work profile 09/30/2024": True,
             "my work profile 09/09/2024": True,
-            "my work profile 09/10/2024": False,
+            "my work profile 09/10/2024": True,
+            "my work profile 09/10/2026": False,
             "metal eskime testi": False,
             "geçmiş metal eskime testi": True,
             "past records": True,
@@ -690,6 +747,9 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "past records for 2030": False,
             "past records September 10, 2030": False,
             "past research and development projects": True,
+            "önceki kayıtları göster": True,
+            "önceki kaydı göster": True,
+            "önceki sürümü göster": True,
             "past performance hook": True,
             "past experience hook": True,
             "past work hook": True,

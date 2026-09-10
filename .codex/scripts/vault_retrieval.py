@@ -152,8 +152,9 @@ HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES = {
     for stem_type, suffixes in HISTORY_QUERY_INFLECTION_SUFFIXES.items()
 }
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
-CURRENT_QUERY_TERMS = frozenset({"current", "guncel"})
-CURRENT_HISTORY_CONNECTOR = re.compile(r"(?i)\b(?:with|versus|vs|compare|and|or|ve)\b")
+CURRENT_QUERY_TERMS = frozenset({"current", "guncel", "latest", "active", "aktif"})
+CURRENT_QUERY_CUE = r"(?:current|guncel|latest|active|aktif)"
+CURRENT_HISTORY_CONNECTOR = re.compile(r"(?i)\b(?:with|versus|vs|compare|and|or|ve|to|ile)\b")
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
     "work", "prefer", "response", "reply", "style", "profile",
@@ -195,6 +196,25 @@ HISTORY_CONTEXT_TERMS = frozenset({
     "performance", "experience", "work", "result", "results", "project", "projects",
     "contract", "contracts", "sozlesme", "sozlesmesi", "sozlesmeler",
 })
+HISTORY_CONTEXT_INFLECTION_ROOTS = frozenset({
+    "kayit", "kayitlar", "kayd", "karar", "kararlar", "surum", "surumler",
+    "degisim", "degisimler", "olay", "olaylar", "arsiv", "arsivler",
+    "rapor", "raporlar", "donem", "donemler", "proje", "projeler",
+    "sonuc", "sonuclar", "calisma", "calismalar",
+})
+HISTORY_CONTEXT_SURFACE_TERMS = frozenset(
+    set(HISTORY_CONTEXT_TERMS)
+    | {
+        root + suffix
+        for root in HISTORY_CONTEXT_INFLECTION_ROOTS
+        for suffix in HISTORY_QUERY_INFLECTION_SUFFIXES["vowel" if root[-1] in HISTORY_QUERY_INFLECTION_VOWELS else "consonant"]
+    }
+    | {
+        root + suffix
+        for root in HISTORY_CONTEXT_INFLECTION_ROOTS
+        for suffix in ("u", "ü", "ı")
+    }
+)
 HISTORY_DIRECTIONAL_PAST = re.compile(
     r"(?i)\bpast(?:\s+(?:(?:the|my|your|his|her|its|our|their)\s+)?(?:due|deadline)s?)\b"
 )
@@ -1318,8 +1338,24 @@ def _date_references(query: str) -> tuple[_HistoryDateReference, ...]:
                 year, month, day = int(groups["dmy_num_year"]), first, second
             elif first > 12 and second <= 12:
                 year, month, day = int(groups["dmy_num_year"]), second, first
-            elif first == second and first <= 12:
-                year, month, day = int(groups["dmy_num_year"]), first, second
+            elif first <= 12 and second <= 12:
+                year = int(groups["dmy_num_year"])
+                possible = [
+                    bounds
+                    for bounds in (
+                        _date_bounds(year, first, second),
+                        _date_bounds(year, second, first),
+                    )
+                    if bounds is not None
+                ]
+                if not possible:
+                    references.append(_HistoryDateReference(match.start(), match.end(), None, None))
+                    continue
+                bounds = max(possible, key=lambda item: item[1])
+                references.append(_HistoryDateReference(
+                    match.start(), match.end(), *bounds
+                ))
+                continue
             else:
                 references.append(_HistoryDateReference(match.start(), match.end(), None, None))
                 continue
@@ -1418,7 +1454,7 @@ def _past_date_status(query: str, query_terms: frozenset[str]) -> bool | None:
 def _has_history_context(query: str) -> bool:
     if not query:
         return False
-    context_terms = "|".join(map(re.escape, sorted(HISTORY_CONTEXT_TERMS, key=len, reverse=True)))
+    context_terms = "|".join(map(re.escape, sorted(HISTORY_CONTEXT_SURFACE_TERMS, key=len, reverse=True)))
     query = HISTORY_DIRECTIONAL_PAST.sub(" ", _normalize(query))
     context = re.compile(
         rf"(?ix)(?:"
@@ -1595,10 +1631,34 @@ def _excerpt(
 
 
 def _split_current_history_query(query: str) -> tuple[str, str] | None:
-    normalized = _normalize(query)
+    if not re.search(r"(?i)\b(?:current|güncel|guncel|latest|active|aktif)\b", query):
+        return None
+    raw_connectors = tuple(CURRENT_HISTORY_CONNECTOR.finditer(query))
+    if not raw_connectors:
+        return None
+    normalized_parts: list[str] = []
+    connector_spans: list[tuple[int, int, int, int]] = []
+    raw_cursor = 0
+    normalized_cursor = 0
+    for connector in raw_connectors:
+        segment = _normalize(query[raw_cursor:connector.start()])
+        normalized_parts.append(segment)
+        normalized_cursor += len(segment)
+        normalized_connector = _normalize(connector.group())
+        normalized_parts.append(normalized_connector)
+        connector_spans.append((
+            normalized_cursor,
+            normalized_cursor + len(normalized_connector),
+            connector.start(),
+            connector.end(),
+        ))
+        normalized_cursor += len(normalized_connector)
+        raw_cursor = connector.end()
+    normalized_parts.append(_normalize(query[raw_cursor:]))
+    normalized = "".join(normalized_parts)
     current_spans = tuple(
         (match.start(), match.end())
-        for match in re.finditer(r"\b(?:current|guncel)\b", normalized)
+        for match in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized)
     )
     if not current_spans:
         return None
@@ -1620,45 +1680,55 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
             weak_history_spans.add(span)
     for pattern in (HISTORY_CHANGE_QUERY, HISTORY_NOMINAL_CHANGE_QUERY):
         history_spans.update((match.start(), match.end()) for match in pattern.finditer(normalized))
+    date_history_spans = {
+        (reference.start, reference.end)
+        for reference in _date_references(normalized)
+        if reference.start_date is not None and reference.end_date is not None
+    }
+    history_spans.update(date_history_spans)
     if not history_spans:
         return None
     current_starts = tuple(sorted(start for start, _end in current_spans))
     current_ends = tuple(sorted(end for _start, end in current_spans))
     history_starts = tuple(sorted(start for start, _end in history_spans))
     history_ends = tuple(sorted(end for _start, end in history_spans))
-    strong_history = history_spans - weak_history_spans
+    strong_history = history_spans - weak_history_spans - date_history_spans
     strong_starts = tuple(sorted(start for start, _end in strong_history))
     strong_ends = tuple(sorted(end for _start, end in strong_history))
     weak_starts = tuple(sorted(start for start, _end in weak_history_spans))
     weak_ends = tuple(sorted(end for _start, end in weak_history_spans))
-    candidates: list[tuple[bool, int, int]] = []
-    for connector in CURRENT_HISTORY_CONNECTOR.finditer(normalized):
-        current_left = bisect_right(current_ends, connector.start())
-        current_right = len(current_starts) - bisect_left(current_starts, connector.end())
-        history_left = bisect_right(history_ends, connector.start())
-        history_right = len(history_starts) - bisect_left(history_starts, connector.end())
-        strong_left = bisect_right(strong_ends, connector.start())
-        strong_right = len(strong_starts) - bisect_left(strong_starts, connector.end())
+    candidates: list[tuple[bool, int, int, int, int]] = []
+    for normalized_start, normalized_end, raw_start, raw_end in connector_spans:
+        current_left = bisect_right(current_ends, normalized_start)
+        current_right = len(current_starts) - bisect_left(current_starts, normalized_end)
+        history_left = bisect_right(history_ends, normalized_start)
+        history_right = len(history_starts) - bisect_left(history_starts, normalized_end)
+        strong_left = bisect_right(strong_ends, normalized_start)
+        strong_right = len(strong_starts) - bisect_left(strong_starts, normalized_end)
         if current_left and history_right and not current_right and not strong_left:
             candidates.append((
-                bisect_left(weak_starts, connector.end()) < len(weak_starts),
-                connector.start(),
-                connector.end(),
+                bisect_left(weak_starts, normalized_end) < len(weak_starts),
+                normalized_start,
+                normalized_end,
+                raw_start,
+                raw_end,
             ))
         if history_left and current_right and not current_left and not strong_right:
             candidates.append((
-                bisect_right(weak_ends, connector.start()) > 0,
-                connector.start(),
-                connector.end(),
+                bisect_right(weak_ends, normalized_start) > 0,
+                normalized_start,
+                normalized_end,
+                raw_start,
+                raw_end,
             ))
     if not candidates:
         return None
-    _weak_history_side, connector_start, connector_end = max(
+    _weak_history_side, _normalized_start, _normalized_end, connector_start, connector_end = max(
         candidates,
         key=lambda candidate: (candidate[0], candidate[1]),
     )
-    left = normalized[:connector_start].strip(" ,;:()[]")
-    right = normalized[connector_end:].strip(" ,;:()[]")
+    left = query[:connector_start].strip(" ,;:()[]")
+    right = query[connector_end:].strip(" ,;:()[]")
     left_terms = _retrieval_terms(left)
     right_terms = _retrieval_terms(right)
     left_current = bool(left_terms & CURRENT_QUERY_TERMS)
@@ -1666,10 +1736,37 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     left_history = _is_history_query(left_terms, left)
     right_history = _is_history_query(right_terms, right)
     if left_current and right_history and not right_current and not left_history:
-        return left, right
-    if right_current and left_history and not left_current and not right_history:
-        return right, left
-    return None
+        current_scope, history_scope = left, right
+    elif right_current and left_history and not left_current and not right_history:
+        current_scope, history_scope = right, left
+    else:
+        return None
+    scope_connector_terms = {"with", "versus", "vs", "compare", "and", "or", "ve", "to", "ile"}
+    current_anchor = {
+        term for term in _retrieval_terms(current_scope)
+        if term not in CURRENT_QUERY_TERMS
+        and term not in scope_connector_terms
+        and term not in HISTORY_QUERY_TERMS
+        and not term.isdigit()
+        and not any(_matches_history_inflection(term, root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
+    }
+    if current_anchor:
+        return current_scope, history_scope
+    topic_terms = []
+    for match in re.finditer(r"(?<!\w)[\w]+(?!\w)", history_scope):
+        token = _normalize(match[0])
+        if (
+            token in CURRENT_QUERY_TERMS
+            or token in HISTORY_QUERY_TERMS
+            or token in scope_connector_terms
+            or token.isdigit()
+            or any(_matches_history_inflection(token, root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
+        ):
+            continue
+        topic_terms.append(match[0])
+    if not topic_terms:
+        return None
+    return f"{current_scope} {' '.join(topic_terms)}", history_scope
 
 
 def _merge_scoped_hits(
