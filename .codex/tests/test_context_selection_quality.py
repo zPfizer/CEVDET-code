@@ -1109,6 +1109,70 @@ title: Hook Protokolü
             1,
         )
 
+    def test_history_mode_prefers_historical_representative_and_ties(self) -> None:
+        for active_name, history_name in (
+            ("a-active.md", "z-history.md"),
+            ("a-history.md", "z-active.md"),
+        ):
+            with self.subTest(active_name=active_name, history_name=history_name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    body = "# Hook Contract\nHook contract history records.\n"
+                    _write(
+                        root,
+                        active_name,
+                        "---\ntitle: Hook Contract\nstatus: active\ntype: note\n---\n" + body,
+                    )
+                    _write(
+                        root,
+                        history_name,
+                        "---\ntitle: Hook Contract\nstatus: historical\n"
+                        "type: research-analysis\n---\n" + body,
+                    )
+                    entries = retrieval.build_vault_map(root, write_cache=False)
+                    history_queries = (
+                        "show the history of the current hook contract",
+                        "show the previous version of the current hook contract",
+                    )
+                    history = [
+                        retrieval.search_vault(entries, query, top_k=2)
+                        for query in history_queries
+                    ]
+                    current = retrieval.search_vault(entries, "current hook contract", top_k=2)
+                    default = retrieval.search_vault(entries, "hook contract", top_k=2)
+
+                for hits in history:
+                    self.assertEqual(hits[0].entry.path, history_name)
+                self.assertEqual(current[0].entry.path, active_name)
+                self.assertEqual(default[0].entry.path, active_name)
+
+    def test_history_tie_keeps_a_relevant_record_in_top_three(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for index in range(3):
+                _write(
+                    root,
+                    f"active-{index}.md",
+                    "---\ntitle: Hook Records\nstatus: active\ntype: note\n---\n"
+                    f"# Hook Records\nHook records evidence marker {index}.\n",
+                )
+            _write(
+                root,
+                "history-record.md",
+                "---\ntitle: Hook Records\nstatus: historical\n"
+                "type: research-analysis\n---\n# Hook Records\n"
+                "Hook records evidence marker archive.\n",
+            )
+            hits = retrieval.search_vault(
+                retrieval.build_vault_map(root, write_cache=False),
+                "past hook records",
+                top_k=3,
+            )
+
+        paths = [hit.entry.path for hit in hits]
+        self.assertIn("history-record.md", paths)
+        self.assertEqual(sum(path.startswith("active-") for path in paths), 2)
+
     def test_unrelated_corpus_growth_does_not_change_target_selection_or_score(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

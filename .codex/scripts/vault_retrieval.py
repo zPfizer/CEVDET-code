@@ -1942,6 +1942,20 @@ def _rank_query(
     )
 
 
+def _is_historical_material(entry: VaultEntry) -> bool:
+    return (
+        entry.record_type.startswith("historical")
+        or (
+            entry.record_type == "work-packet"
+            and entry.status in {"completed", "closed", "done"}
+        )
+        or (
+            entry.record_type.endswith("analysis")
+            and entry.status == "historical"
+        )
+    )
+
+
 def _rank(
     entries: VaultMap,
     query: str,
@@ -1955,7 +1969,9 @@ def _rank(
         return []
 
     include_history = _is_history_query(query_terms, query)
-    current_query = bool(query_terms & CURRENT_QUERY_TERMS)
+    current_query = bool(query_terms & CURRENT_QUERY_TERMS) and (
+        not include_history or preserve_current_stale_penalty
+    )
     personal_query = _is_personal_query(query_terms)
     # ponytail: explicit Vault-system wording only; this is not semantic topic detection.
     vault_system_query = 'vault' in query_terms and bool(query_terms & {
@@ -1963,9 +1979,7 @@ def _rank(
     })
     eligible_entries = []
     for entry in entries:
-        historical_material = (entry.record_type.startswith('historical') or
-                               (entry.record_type == 'work-packet' and entry.status in {'completed', 'closed', 'done'}) or
-                               (entry.record_type.endswith('analysis') and entry.status == 'historical'))
+        historical_material = _is_historical_material(entry)
         named = len(entry.title_terms) >= 2 and entry.title_terms <= query_terms
         if include_history or named or not historical_material:
             eligible_entries.append(entry)
@@ -2051,7 +2065,13 @@ def _rank(
         priority += int(vault_system_query and ('vault' in matched or title_anchor))
         ranked.append((priority, score, entry.path, entry, tuple(sorted(matched))))
     # Excerpt render'ı sıralamadan SONRA: yalnız kazanan top_k dilimi ödenir.
-    ranked.sort(key=lambda candidate: (-candidate[0], -candidate[1], candidate[2]))
+    history_tie = include_history and not current_query
+    ranked.sort(key=lambda candidate: (
+        -candidate[0],
+        -candidate[1],
+        -int(history_tie and _is_historical_material(candidate[3])),
+        candidate[2],
+    ))
     selected = ranked[:top_k]
     if top_k <= MAX_CANDIDATES:
         unique: dict[str, tuple[int, float, str, VaultEntry, tuple[str, ...]]] = {}
@@ -2060,6 +2080,12 @@ def _rank(
             previous = unique.get(content_key)
             if previous is not None:
                 if current_query and candidate[3].status == "active" and previous[3].status != "active":
+                    unique[content_key] = candidate
+                elif (
+                    history_tie
+                    and _is_historical_material(candidate[3])
+                    and not _is_historical_material(previous[3])
+                ):
                     unique[content_key] = candidate
                 continue
             if len(unique) >= top_k:
