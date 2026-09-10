@@ -1697,30 +1697,20 @@ def _rank(
     ranked.sort(key=lambda candidate: (-candidate[0], -candidate[1], candidate[2]))
     selected = ranked[:top_k]
     if top_k <= MAX_CANDIDATES:
-        if current_query:
-            representatives: dict[str, tuple[int, float, str, VaultEntry, tuple[str, ...]]] = {}
-            order: list[str] = []
-            for candidate in ranked:
-                content_key = candidate[3].content_key or candidate[2]
-                previous = representatives.get(content_key)
-                if previous is None:
-                    representatives[content_key] = candidate
-                    order.append(content_key)
-                elif candidate[3].status == "active" and previous[3].status != "active":
-                    representatives[content_key] = candidate
-            selected = [representatives[content_key] for content_key in order[:top_k]]
-        else:
-            unique: list[tuple[int, float, str, VaultEntry, tuple[str, ...]]] = []
-            seen_content: set[str] = set()
-            for candidate in ranked:
-                content_key = candidate[3].content_key or candidate[2]
-                if content_key in seen_content:
-                    continue
-                seen_content.add(content_key)
-                unique.append(candidate)
-                if len(unique) == top_k:
+        unique: dict[str, tuple[int, float, str, VaultEntry, tuple[str, ...]]] = {}
+        for candidate in ranked:
+            content_key = candidate[3].content_key or candidate[2]
+            previous = unique.get(content_key)
+            if previous is not None:
+                if current_query and candidate[3].status == "active" and previous[3].status != "active":
+                    unique[content_key] = candidate
+                continue
+            if len(unique) >= top_k:
+                if not current_query:
                     break
-            selected = unique
+                continue
+            unique[content_key] = candidate
+        selected = list(unique.values())
     return [
         VaultHit(
             entry=entry,
