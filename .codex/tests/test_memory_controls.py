@@ -114,6 +114,21 @@ class MemoryDirectiveTests(unittest.TestCase):
             "src klasöründeki hatayı düzelt.",
             "src klasöründeki dosyayı güncelle.",
             "src klasöründeki dosyayı yazabilir misin?",
+            "Dosyamı düzelt.",
+            "Dosyanı düzelt.",
+            "Ayarımı değiştir.",
+            "README.md'deki hatayı düzelt.",
+            "README.md'daki hatayı düzelt.",
+            "README.md'teki hatayı düzelt.",
+            "README.md'taki hatayı düzelt.",
+            "README.md’deki hatayı düzelt.",
+            "read-only.py'yi düzelt.",
+            "unut.py'yi düzelt.",
+            "saklama.py'yı düzelt.",
+            r"'C:\Users\O'Brien\app.py' dosyasını düzelt.",
+            r"'C:\Users\O'Brien\app.py'yi düzelt.",
+            r"'O'Brien' klasörünü değiştir.",
+            r"'C:\Users\O'Brien\Project' klasöründeki dosyayı düzelt.",
             "Tamam. Dosyayı düzelt.",
             "Okay. src/app.py dosyasını düzelt.",
             "Tamam! Dosyayı düzelt.",
@@ -228,6 +243,11 @@ class MemoryDirectiveTests(unittest.TestCase):
             r"src/ dosyasını düzelt.",
             r"Onaylansa C:\src\ klasörünü değiştir.",
             'Onaylansa "src" klasöründeki hatayı düzelt.',
+            r"Onaylansa 'C:\Users\O'Brien\app.py' dosyasını düzelt.",
+            r"'C:\Users\O'Brien\app.py' dosyasını düzelt. Do not modify files or settings. 'not'",
+            "Onaylansa README.md'deki hatayı düzelt.",
+            "read-only.py'yi düzelt. Do not modify files or settings.",
+            "Onaylansa read-only.py'yi düzelt.",
             '"Dockerfile"ı düzelt.',
             '“Merhaba”yı düzenle.',
         ):
@@ -269,6 +289,9 @@ class MemoryDirectiveTests(unittest.TestCase):
         for prompt in (
             "unut.py dosyasını düzelt.",
             "saklama.py dosyasını düzelt.",
+            "read-only.py'yi düzelt.",
+            "unut.py'yi düzelt.",
+            "saklama.py'yı düzelt.",
         ):
             with self.subTest(prompt=prompt):
                 self.assertEqual(memory_ledger.memory_directive(prompt).kind, "correct")

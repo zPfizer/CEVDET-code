@@ -164,15 +164,18 @@ _TARGETED_WRITE_QUESTION_VERB = (
 )
 _QUESTION_SUFFIX = r"m[ıiuü]s[ıiuü]n(?:iz|ız|uz|üz)?"
 _WRITE_FOLDER_OBJECT = r"klasör(?:ü|ünü|leri|lerini)?"
+_WRITE_FILE_OBJECT = r"dosya(?:yı|sını|ları|larını|mı|nı)?"
+_WRITE_SETTING_OBJECT = r"ayar(?:ı|ını|ları|larını|ımı)?"
+_WRITE_FILENAME = rf"(?:[\w.-]+\.{_WRITE_EXTENSION}|\.{_WRITE_EXTENSION})"
+_WRITE_LOCATIVE_SUFFIX = r"['’][dt][ae]ki"
 _WRITE_TARGET_OBJECT = (
     r"(?:hata(?:yı|sını|ları)?|sorun(?:u|unu|ları)?|bug(?:ı|u|unu|ları)?|"
-    r"dosya(?:yı|sını|ları|larını)?|"
+    rf"{_WRITE_FILE_OBJECT}|"
     rf"{_WRITE_FOLDER_OBJECT}|"
     r"kod(?:u|unu|ları|larını)?|değişiklik(?:i|ini|leri|lerini)?|"
-    r"ayar(?:ı|ını|ları|larını)?)"
+    rf"{_WRITE_SETTING_OBJECT})"
 )
-_WRITE_FILE_OBJECT = r"(?:dosya(?:yı|sını|ları|larını)?)"
-_WRITE_FILE_MEMBER = rf"dosya(?:daki|deki|sındaki|sindeki)\s+{_WRITE_TARGET_OBJECT}"
+_WRITE_FILE_MEMBER = rf"(?:dosya(?:daki|deki|sındaki|sindeki)|{_WRITE_FILENAME}{_WRITE_LOCATIVE_SUFFIX})\s+{_WRITE_TARGET_OBJECT}"
 _WRITE_FOLDER_MEMBER = rf"klasör(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}"
 _WRITE_FILE_TARGET = (
     rf"(?:[\w.-]+\s+)?(?:{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER}|"
@@ -185,11 +188,17 @@ _WRITE_PROJECT_OBJECT_TARGET = rf"(?:[\w.-]+\s+)?{_WRITE_PROJECT_OBJECT}"
 _WRITE_MODULE_TARGET = (
     rf"[\w.-]+\s+modül(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}"
 )
+_QUOTED_STRAIGHT_BODY = r"(?:[^'\r\n]|(?<=\w)'(?=\w))"
 _QUOTED_PATH = (
     "(?:"
     + "|".join(
-        rf"{re.escape(opening)}[^{re.escape(closing)}\r\n]*\.{_WRITE_EXTENSION}"
-        rf"{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
+        rf"{re.escape(opening)}"
+        + (
+            rf"{_QUOTED_STRAIGHT_BODY}*"
+            if opening == "'"
+            else rf"[^{re.escape(closing)}\r\n]*"
+        )
+        + rf"\.{_WRITE_EXTENSION}{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
         for opening, closing in _QUOTE_PAIRS
     )
     + ")"
@@ -197,8 +206,13 @@ _QUOTED_PATH = (
 _QUOTED_FILENAME = (
     "(?:"
     + "|".join(
-        rf"{re.escape(opening)}[^{re.escape(closing)}\r\n]+"
-        rf"{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
+        rf"{re.escape(opening)}"
+        + (
+            rf"{_QUOTED_STRAIGHT_BODY}+"
+            if opening == "'"
+            else rf"[^{re.escape(closing)}\r\n]+"
+        )
+        + rf"{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
         for opening, closing in _QUOTE_PAIRS
     )
     + ")"
@@ -207,12 +221,16 @@ _QUOTED_DIRECTORY = (
     "(?:"
     + "|".join(
         rf"{re.escape(opening)}{_QUOTED_DIRECTORY_PREFIX}"
-        rf"[^{re.escape(closing)}\r\n]*?{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
+        + (
+            rf"{_QUOTED_STRAIGHT_BODY}*?"
+            if opening == "'"
+            else rf"[^{re.escape(closing)}\r\n]*?"
+        )
+        + rf"{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
         for opening, closing in _QUOTE_PAIRS
     )
     + ")"
 )
-_WRITE_FILENAME = rf"(?:[\w.-]+\.{_WRITE_EXTENSION}|\.{_WRITE_EXTENSION})"
 _WRITE_CASE_SUFFIX = r"['’]y?[ıiuü]"
 _WRITE_TARGET_SUFFIX = rf"(?:\s+(?:{_WRITE_TARGET_OBJECT}|{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_MEMBER})|{_WRITE_CASE_SUFFIX})?"
 _WRITE_PATH_COMPONENT = r"[^\\/\s<>:\"|?*\x00-\x1f]+"
@@ -341,6 +359,9 @@ _NAMED_TARGET = re.compile(
     rf"{_WRITE_FOLDER_OBJECT})$"
 )
 _NAMED_FILENAME = re.compile(_WRITE_FILENAME)
+_WRITE_FILENAME_WITH_CASE_SUFFIX = re.compile(
+    rf"(?P<filename>{_WRITE_FILENAME}){_WRITE_CASE_SUFFIX}"
+)
 _SIMPLE_CONDITIONAL = re.compile(rf"\b\w+{_CONDITIONAL_PERSON}\b")
 
 
@@ -391,10 +412,12 @@ def _mask_bounded_memory_controls(folded: str) -> str:
         final_component = re.split(r"[\\/]", target)[-1]
         if ":" in target and _EXPLICIT_WRITE_PATH_PREFIX.match(target) is None:
             continue
-        if (
-            _NAMED_FILENAME.fullmatch(final_component) is None
-            and _EXPLICIT_WRITE_PATH_PREFIX.match(target) is None
-        ):
+        filename = _NAMED_FILENAME.fullmatch(final_component)
+        if filename is None:
+            with_suffix = _WRITE_FILENAME_WITH_CASE_SUFFIX.fullmatch(final_component)
+            if with_suffix is not None:
+                filename = _NAMED_FILENAME.fullmatch(with_suffix.group("filename"))
+        if filename is None and _EXPLICIT_WRITE_PATH_PREFIX.match(target) is None:
             continue
         for pattern in _MEMORY_CONTROL_PATTERNS:
             for match in pattern.finditer(target):
