@@ -1855,7 +1855,7 @@ def _has_independent_current_cue(query: str) -> bool:
         for match in HISTORY_OBJECT_CURRENT_CUE.finditer(normalized)
     }
     words = tuple(re.finditer(r"(?<!\w)[\w]+(?!\w)", normalized))
-    genitive_suffixes = HISTORY_QUERY_INFLECTION_CASE_SUFFIXES & {"in", "nin"}
+    genitive_suffixes = {"in", "nin", "un", "nun"}
     for current_index, current_word in enumerate(words):
         if current_word.group() not in CURRENT_QUERY_TERMS:
             continue

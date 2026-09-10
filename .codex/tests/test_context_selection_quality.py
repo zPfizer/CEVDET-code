@@ -618,6 +618,8 @@ Eylül etiket denetimi.
         qualified_object_queries = object_queries + (
             "güncel hook sözleşmesinin geçmişi",
             "güncel hook sözleşmesinin geçmişini göster",
+            "güncel modülün geçmişi",
+            "güncel sürümünün geçmişi",
         )
         for query in qualified_object_queries:
             with self.subTest(query=query):
