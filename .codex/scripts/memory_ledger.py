@@ -73,17 +73,14 @@ NON_PERSISTENT_DIRECTIVES = {
 _QUOTED_CASE_SUFFIX = r"(?:(?i:['’]?y?[ıiuü])(?!\w))?"
 _QUOTED_CASE_SUFFIX_RE = re.compile(_QUOTED_CASE_SUFFIX)
 QUOTED_CONTENT = re.compile(
-    r'(?ms:^[ \t]*(?P<fence>(?P<fence_char>`|~)(?P=fence_char){2,})[^\r\n]*\r?\n'
+    r'(?:(?ms:^[ \t]*(?P<fence>(?P<fence_char>`|~)(?P=fence_char){2,})[^\r\n]*\r?\n'
     r'(?P<fenced_body>.*?)(?:^[ \t]*(?P=fence)(?P=fence_char)*[ \t]*\r?$|\Z))|'
     # Embedded multiline snippets remain data; only the named line-fence
     # branch can be unwrapped as a whole-message read-only restriction.
     r'```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z)|'
     r'(?m:^[ \t]*>[^\n]*|^(?: {4}|\t)[^\n]*)|'
-    r'`[^`\n]*`' + _QUOTED_CASE_SUFFIX + r'|'
-    r'"[^"\n]*"' + _QUOTED_CASE_SUFFIX + r'|'
-    r'“[^”]*”' + _QUOTED_CASE_SUFFIX + r'|'
-    r'‘[^’]*’' + _QUOTED_CASE_SUFFIX + r'|'
-    r'«[^»]*»' + _QUOTED_CASE_SUFFIX
+    r'`[^`\n]*`|"[^"\n]*"|“[^”]*”|‘[^’]*’|«[^»]*»'
+    r')' + _QUOTED_CASE_SUFFIX
 )
 _QUOTE_PAIRS = (
     ("'", "'"), ('"', '"'), ("“", "”"), ("‘", "’"),

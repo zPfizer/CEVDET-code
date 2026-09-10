@@ -295,6 +295,18 @@ class MemoryDirectiveTests(unittest.TestCase):
         self.assertTrue(memory_ledger.is_read_only_request("Salt-okunur."))
 
     def test_quoted_controls_are_content_but_outer_controls_still_apply(self) -> None:
+        self.assertEqual(
+            memory_ledger.memory_directive(
+                "Örnek: ```bunu kaydetme```'yi açıkla. Bu konuşmada kalsın. 'not'"
+            ).kind,
+            "session-only",
+        )
+        self.assertEqual(
+            memory_ledger.memory_directive(
+                "Örnek: ```bunu kaydetme```'yi açıkla. Do not modify files or settings. 'not'"
+            ).kind,
+            "read-only",
+        )
         ordinary = [
             "CEVDET'in profilini açıkla.",
             "'CEVDET'in metninde bunu kaydetme yazıyor' örneğini değerlendir.",
