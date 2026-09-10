@@ -373,7 +373,11 @@ def _json_string_regions(
 ) -> Iterator[tuple[int, int, bool, str, int | None, int | None]]:
     """Yield JSON string spans, decoded values, and key value spans."""
     decoder = json.JSONDecoder()
+    previous_end = 0
     for region_start, region_end in _json_regions(text):
+        if _decoded_credential_key(text[previous_end:region_start], escaped_only=True):
+            raise MemoryPreferenceError('memory-credential-container-unverifiable')
+        previous_end = region_end
         cursor = region_start
         while cursor < region_end:
             opening = text.find('"', cursor, region_end)
@@ -404,9 +408,11 @@ def _json_string_regions(
                     continue
             yield opening, end, is_value, value, value_start, value_end
             cursor = tail + 1 if tail < region_end and text[tail] == ':' else tail
+    if _decoded_credential_key(text[previous_end:], escaped_only=True):
+        raise MemoryPreferenceError('memory-credential-container-unverifiable')
 
 
-def _decoded_credential_key(text: str) -> bool:
+def _decoded_credential_key(text: str, *, escaped_only: bool = False) -> bool:
     decoder = json.JSONDecoder()
     cursor = 0
     while cursor < len(text):
@@ -421,7 +427,7 @@ def _decoded_credential_key(text: str) -> bool:
         tail = end
         while tail < len(text) and text[tail].isspace():
             tail += 1
-        if tail < len(text) and text[tail] == ':' and (
+        if (not escaped_only or '\\' in text[opening:end]) and tail < len(text) and text[tail] == ':' and (
             CREDENTIAL_NAME_RE.fullmatch(value) or value.casefold() == 'authorization'
         ):
             return True
@@ -628,16 +634,10 @@ def sanitize_text(
 
 
 def contains_secret(text: str) -> bool:
-    return any(
-        pattern.search(text) is not None
-        for pattern in (
-            PRIVATE_KEY,
-            AUTHORIZATION,
-            CREDENTIAL,
-            TOKEN_PREFIX,
-            PERSONAL_CREDENTIAL,
-        )
-    )
+    try:
+        return bool(sanitize_text(text, max_chars=None)[1])
+    except MemoryPreferenceError:
+        return True
 
 
 def memory_directive(text: str) -> MemoryDirective:

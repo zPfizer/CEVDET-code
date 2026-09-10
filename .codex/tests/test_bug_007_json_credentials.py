@@ -203,7 +203,9 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         for field in (r'"\u0061pi_key":"NESTED_SECRET"',
                       r'"\u0061uthorization":"Bearer NESTED_SECRET"'):
             for original in ('[{' + field + ',"keep":"ordinary"} BROKEN]',
-                             '{' + field + ', BROKEN}'):
+                             '{' + field + ', BROKEN}',
+                             '{BROKEN,' + field + '}',
+                             '{BROKEN,"safe":{},' + field + '}'):
                 with self.subTest(original=original), self.assertRaisesRegex(
                     ledger.MemoryPreferenceError, '^memory-credential-container-unverifiable$'
                 ):
@@ -303,15 +305,18 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         self.assertIn("authorization", redactions)
 
     def test_quoted_json_credential_is_secret_and_does_not_persist(self) -> None:
-        text = '{"password":"LEAK_PROBE_SYNTHETIC"}'
-
-        self.assertEqual(ledger.memory_directive(text).kind, "secret")
-        self.assertEqual(
-            ledger.persistent_turns(
-                [("user", text), ("assistant", "Parolanı gördüm."), ("user", "Kalıcı karar.")]
-            ),
-            [("user", "Kalıcı karar.")],
-        )
+        for text in ('{"password":"LEAK_PROBE_SYNTHETIC"}',
+                     r'{"\u0061pi_key":"LEAK_PROBE_SYNTHETIC"}',
+                     json.dumps({'message': r'{"\u0061pi_key":"LEAK_PROBE_SYNTHETIC"}'}),
+                     r'{BROKEN,"\u0061pi_key":"LEAK_PROBE_SYNTHETIC"}'):
+            with self.subTest(text=text):
+                self.assertEqual(ledger.memory_directive(text).kind, "secret")
+                self.assertEqual(
+                    ledger.persistent_turns(
+                        [("user", text), ("assistant", "LEAK_PROBE_SYNTHETIC"), ("user", "Kalıcı karar.")]
+                    ),
+                    [("user", "Kalıcı karar.")],
+                )
 
     def test_attachment_model_and_saved_source_receive_sanitized_text(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
