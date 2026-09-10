@@ -419,8 +419,14 @@ def _decoded_credential_key(text: str) -> bool:
     return False
 
 
-def _redact_decoded_json(text: str) -> tuple[str, bool]:
+def _redact_decoded_json(text: str) -> tuple[str, tuple[str, ...]]:
     replacements: list[tuple[int, int, str]] = []
+    redactions: list[str] = []
+
+    def note(category: str) -> None:
+        if category not in redactions:
+            redactions.append(category)
+
     skip_until = 0
     for start, end, is_value, decoded, value_start, value_end in _json_string_regions(text):
         if start < skip_until:
@@ -432,18 +438,26 @@ def _redact_decoded_json(text: str) -> tuple[str, bool]:
                 and CREDENTIAL_NAME_RE.fullmatch(decoded)
             ):
                 replacements.append((value_start, value_end, json.dumps("<REDACTED>")))
+                note('credential')
                 skip_until = value_end
             continue
         try:
-            nested, changed = _redact_decoded_json(decoded)
+            nested, nested_redactions = sanitize_text(decoded, max_chars=None)
         except RecursionError:
             raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
-        if changed:
+        except MemoryPreferenceError:
+            replacements.append((start, end, json.dumps("<REDACTED>")))
+            note('credential')
+            continue
+        for category in nested_redactions:
+            note(category)
+        if nested != decoded:
             replacements.append((start, end, json.dumps(nested)))
         elif _decoded_credential_key(decoded) or CREDENTIAL.search(decoded):
             replacements.append((start, end, json.dumps("<REDACTED>")))
+            note('credential')
     if not replacements:
-        return text, False
+        return text, tuple(redactions)
     pieces: list[str] = []
     cursor = 0
     for start, end, replacement in sorted(replacements):
@@ -452,7 +466,7 @@ def _redact_decoded_json(text: str) -> tuple[str, bool]:
         pieces.extend((text[cursor:start], replacement))
         cursor = end
     pieces.append(text[cursor:])
-    return ''.join(pieces), True
+    return ''.join(pieces), tuple(redactions)
 
 
 _MEMORY_VIEW_IDENTIFIER = re.compile(
@@ -499,13 +513,14 @@ def sanitize_text(
             redactions.append(category)
 
     replace(PRIVATE_KEY, "<REDACTED>", "private-key")
+    text, decoded_redactions = _redact_decoded_json(text)
+    for category in decoded_redactions:
+        if category not in redactions:
+            redactions.append(category)
     replace(AUTHORIZATION,
             lambda match: (f'{match.group("prefix")}"Bearer <REDACTED>"' if match.group('key_quote')
                            else "Authorization: Bearer <REDACTED>"),
             "authorization")
-    text, decoded_redacted = _redact_decoded_json(text)
-    if decoded_redacted:
-        redactions.append('credential')
     regions = _json_regions(text)
     json_strings = _json_string_regions(text)
     region: tuple[int, int] | None = None
@@ -520,10 +535,16 @@ def sanitize_text(
         if json_string is not None and json_string[0] < match.start() < json_string[1]:
             if not json_string[2]:
                 raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
-            pieces.extend((text[cursor:json_string[0]], json.dumps("<REDACTED>")))
+            pieces.extend((text[cursor:json_string[0]], text[json_string[0]:json_string[1]]))
             cursor = json_string[1]
             continue
         end = match.end()
+        if text[match.start('value')] not in '{["\'':
+            if end == len(text) or text[end].isspace():
+                value_start = match.start('value')
+                marker_end = value_start + len('<REDACTED>') if text.startswith('<REDACTED>', value_start) else value_start
+                while end > marker_end and not (text[end - 1].isalnum() or text[end - 1] == '_'):
+                    end -= 1
         if text[match.start('value')] in '{[':
             quoted_field = False
             try:

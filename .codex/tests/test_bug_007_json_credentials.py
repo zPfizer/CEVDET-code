@@ -77,6 +77,29 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         )
         self.assertIn("credential", redactions)
 
+    def test_json_value_credentials_preserve_decoded_context(self) -> None:
+        cases = (
+            (
+                "example 'authorization': 'Bearer AUTH_JSON_SYNTHETIC_SECRET'",
+                "example 'authorization': \"Bearer <REDACTED>\"",
+                "AUTH_JSON_SYNTHETIC_SECRET",
+                "authorization",
+            ),
+            (
+                "decision A; token=SCALAR_JSON_SYNTHETIC_SECRET; decision B",
+                "decision A; token=<REDACTED>; decision B",
+                "SCALAR_JSON_SYNTHETIC_SECRET",
+                "credential",
+            ),
+        )
+        for message, expected, secret, category in cases:
+            with self.subTest(secret=secret):
+                original = json.dumps({"message": message, "keep": "ordinary"})
+                sanitized, redactions = ledger.sanitize_text(original, max_chars=None)
+                self.assertEqual(json.loads(sanitized), {"message": expected, "keep": "ordinary"})
+                self.assertNotIn(secret, sanitized)
+                self.assertIn(category, redactions)
+
     def test_decoded_json_credential_names_are_redacted(self) -> None:
         nested = json.dumps({"api_key": "INNER_SYNTHETIC_SECRET"})
         fragment = "example " + json.dumps({"api_key": "PROSE_JSON_SYNTHETIC_SECRET"}) + " in docs"
@@ -213,6 +236,8 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 {"message": "example 'token': {'a': 1} in docs", "nested": json.dumps(
                     {"api_key": "INNER_SYNTHETIC_SECRET"}
                 ), "fragment": "example " + json.dumps({"api_key": "PROSE_JSON_SYNTHETIC_SECRET"}) + " in docs",
+                 "auth": "example 'authorization': 'Bearer AUTH_ATTACHMENT_SYNTHETIC_SECRET'",
+                 "decision": "decision A; token=SCALAR_ATTACHMENT_SYNTHETIC_SECRET; decision B",
                  "password": "LEAK_PROBE_SYNTHETIC", "api_key": "ESCAPED_KEY_SYNTHETIC_SECRET",
                  "keep": "ordinary", "token": {"value": "OBJECT_SECRET", "items": ["ARRAY_SECRET"]}},
                 ensure_ascii=False,
@@ -238,20 +263,28 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertNotIn("key-secret", prompts[0])
                 self.assertNotIn("INNER_SYNTHETIC_SECRET", prompts[0])
                 self.assertNotIn("PROSE_JSON_SYNTHETIC_SECRET", prompts[0])
+                self.assertNotIn("AUTH_ATTACHMENT_SYNTHETIC_SECRET", prompts[0])
+                self.assertNotIn("SCALAR_ATTACHMENT_SYNTHETIC_SECRET", prompts[0])
                 self.assertNotIn("ESCAPED_KEY_SYNTHETIC_SECRET", prompts[0])
                 self.assertNotIn("OBJECT_SECRET", prompts[0])
                 self.assertNotIn("ARRAY_SECRET", prompts[0])
                 self.assertIn('"message": "<REDACTED>"', prompts[0])
+                self.assertIn("decision A", prompts[0])
+                self.assertIn("decision B", prompts[0])
                 note = root / (result[0][0] + ".md")
                 saved = note.read_text(encoding="utf-8")
                 self.assertNotIn("LEAK_PROBE_SYNTHETIC", saved)
                 self.assertNotIn("key-secret", saved)
                 self.assertNotIn("INNER_SYNTHETIC_SECRET", saved)
                 self.assertNotIn("PROSE_JSON_SYNTHETIC_SECRET", saved)
+                self.assertNotIn("AUTH_ATTACHMENT_SYNTHETIC_SECRET", saved)
+                self.assertNotIn("SCALAR_ATTACHMENT_SYNTHETIC_SECRET", saved)
                 self.assertNotIn("ESCAPED_KEY_SYNTHETIC_SECRET", saved)
                 self.assertNotIn("OBJECT_SECRET", saved)
                 self.assertNotIn("ARRAY_SECRET", saved)
                 self.assertIn('"message": "<REDACTED>"', saved)
+                self.assertIn("decision A", saved)
+                self.assertIn("decision B", saved)
                 self.assertIn('"keep": "ordinary"', saved)
                 self.assertEqual(source.read_bytes(), original_bytes)
 
