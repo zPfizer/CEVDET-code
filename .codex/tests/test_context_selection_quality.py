@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
@@ -599,13 +600,21 @@ Eylül etiket denetimi.
         self.assertIn("is-history.md", paths)
 
     def test_identifier_scan_skips_long_unterminated_hash_run(self) -> None:
-        query = "past records " + ("# " * 100_000)
-        started = time.perf_counter()
-        references = retrieval._date_references(query)
-        elapsed = time.perf_counter() - started
-
-        self.assertEqual(references, ())
-        self.assertLess(elapsed, 2.0)
+        scripts_root = str(Path(__file__).resolve().parents[1] / "scripts")
+        for suffix in ("", "x"):
+            script = (
+                f"import sys\n"
+                f"sys.path.insert(0, {scripts_root!r})\n"
+                f"import vault_retrieval\n"
+                f"assert vault_retrieval._date_references('past records ' + ('# ' * 100000) + {suffix!r}) == ()\n"
+            )
+            started = time.perf_counter()
+            subprocess.run(
+                [sys.executable, "-c", script],
+                check=True,
+                timeout=5,
+            )
+            self.assertLess(time.perf_counter() - started, 5.0)
 
     def test_ordinary_history_prefix_match_keeps_active_record_ahead_of_archived_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

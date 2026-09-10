@@ -257,7 +257,7 @@ HISTORY_DATE_QUESTION = re.compile(
     r"(?:\W+\w+){0,3}\W+(?:nedir|ne|hangi|kac|goster|show|display)\b"
 )
 HISTORY_IDENTIFIER_YEAR = re.compile(
-    r"(?i)(?:#|\b(?:ticket|port)\b)[\s#:/-]*+(?P<year>\d{4})?(?!\w)"
+    r"(?i)(?:#|\b(?:ticket|port)\b)[\s#:/-]*+(?:(?P<year>\d{4})(?!\w))?"
 )
 
 
