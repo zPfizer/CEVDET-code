@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack
@@ -36,7 +37,6 @@ MAX_CANDIDATES = 3
 MAX_CONTEXT_CHARS = 2_600
 MAX_EXCERPT_CHARS = 460
 CACHE_VERSION = 17
-CURRENT_YEAR = date.today().year
 CACHE_RELATIVE_PATH = Path(".codex/scripts/.state/vault-retrieval-cache.json")
 SOURCE_READ_ATTEMPTS = 3
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
@@ -155,7 +155,59 @@ PERSONAL_WORK_TERMS = frozenset({
     "work", "prefer", "response", "reply", "style", "profile",
 })
 HISTORY_CHANGE_QUERY = re.compile(
-    r"(?i)\b(?:what|ne|neler|nasil)(?:\W+\w+){0,2}\W+(?:changed|degisti)\b"
+    r"(?ix)"
+    r"(?:"
+    r"\bwhat(?:\s+\w+){0,2}\s+changed\b"
+    r"(?!\s+(?:in|to|from|with|about|between|since|after|over|for)\b"
+    r"(?:\s+\w+){0,5}\s+(?:should|must|can|will)\b)"
+    r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
+    r"|"
+    r"\bhow\s+(?:has|have|had)\s+(?:\w+\s+){1,5}changed\b"
+    r"(?!\s+(?:in|to|from|with|about|between|since|after|over|for)\b"
+    r"(?:\s+\w+){0,5}\s+(?:should|must|can|will)\b)"
+    r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
+    r"|"
+    r"\b(?:ne|neler|nasil)\b(?:\s+\w+){0,3}?\s+\bdegisti\b"
+    r")"
+)
+# `past` and `before` describe ordering in ordinary operational questions too.
+# A noun that denotes a stored or completed record makes that ordering historical.
+HISTORY_CONTEXT_TERMS = frozenset({
+    "archive", "archives", "arsiv", "arsivler", "change", "changes", "decision", "decisions",
+    "degisim", "degisimler", "event", "events", "history", "histories", "kayit", "kayitlar",
+    "log", "logs", "olay", "olaylar", "record", "records", "report", "reports",
+    "timeline", "version", "versions", "surum", "surumler", "karar", "kararlar", "donem", "donemler",
+})
+# `eskime` is the noun/verb form for tarnishing and must not be read as `eski` + suffix.
+HISTORY_DERIVATIONAL_HOMONYMS = frozenset({"eskime"})
+HISTORY_MONTHS = {
+    month.casefold(): index
+    for index, month in enumerate(calendar.month_name)
+    if month
+}
+HISTORY_MONTHS.update({
+    month.casefold(): index
+    for index, month in enumerate(calendar.month_abbr)
+    if month
+})
+HISTORY_MONTHS.update(dict(zip(
+    (
+        "ocak", "subat", "mart", "nisan", "mayis", "haziran",
+        "temmuz", "agustos", "eylul", "ekim", "kasim", "aralik",
+    ),
+    range(1, 13),
+)))
+HISTORY_MONTH_NAMES = tuple(sorted(HISTORY_MONTHS, key=len, reverse=True))
+HISTORY_MONTH_PATTERN = "|".join(map(re.escape, HISTORY_MONTH_NAMES))
+HISTORY_DATE = re.compile(
+    rf"(?ix)(?<!\w)(?:"
+    rf"(?P<ymd_year>\d{{4}})[-/.](?P<ymd_month>\d{{1,2}})[-/.](?P<ymd_day>\d{{1,2}})"
+    rf"|(?P<dmy_num_day>\d{{1,2}})[-/.](?P<dmy_num_month>\d{{1,2}})[-/.](?P<dmy_num_year>\d{{4}})"
+    rf"|(?P<dmy_day>\d{{1,2}})\s+(?P<dmy_month>{HISTORY_MONTH_PATTERN})\s+(?P<dmy_year>\d{{4}})"
+    rf"|(?P<mdy_month>{HISTORY_MONTH_PATTERN})\s+(?P<mdy_day>\d{{1,2}}),?\s+(?P<mdy_year>\d{{4}})"
+    rf"|(?P<my_month>{HISTORY_MONTH_PATTERN})\s+(?P<my_year>\d{{4}})"
+    rf"|(?P<year>\d{{4}})"
+    rf")(?!\w)"
 )
 
 
@@ -1179,6 +1231,8 @@ def _is_personal_query(query_terms: frozenset[str]) -> bool:
 
 
 def _matches_history_inflection(term: str, root: str) -> bool:
+    if term in HISTORY_DERIVATIONAL_HOMONYMS:
+        return False
     if not term.startswith(root):
         return False
     suffix = term[len(root):]
@@ -1193,6 +1247,68 @@ def _matches_history_inflection(term: str, root: str) -> bool:
     )
 
 
+def _date_value(year: int, month: int = 1, day: int = 1) -> date | None:
+    try:
+        return date(year, month, day)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _date_references(query: str) -> tuple[tuple[date, ...], bool]:
+    """Return parsed date references and whether a date-shaped value was invalid."""
+    normalized = _normalize(query)
+    references: list[date] = []
+    invalid = False
+    for match in HISTORY_DATE.finditer(normalized):
+        groups = match.groupdict()
+        if groups["ymd_year"] is not None:
+            year, month, day = (
+                int(groups["ymd_year"]), int(groups["ymd_month"]), int(groups["ymd_day"])
+            )
+        elif groups["dmy_num_year"] is not None:
+            year, month, day = (
+                int(groups["dmy_num_year"]), int(groups["dmy_num_month"]), int(groups["dmy_num_day"])
+            )
+        elif groups["dmy_year"] is not None:
+            year, month, day = (
+                int(groups["dmy_year"]), HISTORY_MONTHS[groups["dmy_month"]], int(groups["dmy_day"])
+            )
+        elif groups["mdy_year"] is not None:
+            year, month, day = (
+                int(groups["mdy_year"]), HISTORY_MONTHS[groups["mdy_month"]], int(groups["mdy_day"])
+            )
+        elif groups["my_year"] is not None:
+            year, month, day = int(groups["my_year"]), HISTORY_MONTHS[groups["my_month"]], 1
+        else:
+            year, month, day = int(groups["year"]), 1, 1
+        value = _date_value(year, month, day)
+        if value is None:
+            invalid = True
+        else:
+            references.append(value)
+    return tuple(references), invalid
+
+
+def _has_past_date(query: str, query_terms: frozenset[str]) -> bool:
+    if query:
+        references, invalid = _date_references(query)
+    else:
+        years = [int(term) for term in query_terms if re.fullmatch(r"\d{4}", term)]
+        if len(years) != 1 or any(
+            term in HISTORY_MONTHS or re.fullmatch(r"\d{1,2}", term)
+            for term in query_terms
+        ):
+            return False
+        value = _date_value(years[0])
+        references, invalid = (() if value is None else (value,)), value is None
+    today = date.today()
+    return bool(references) and not invalid and all(value < today for value in references)
+
+
+def _has_history_context(query_terms: frozenset[str]) -> bool:
+    return bool(query_terms & HISTORY_CONTEXT_TERMS)
+
+
 def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
     history_terms = query_terms & HISTORY_QUERY_TERMS
     has_inflected_history = any(
@@ -1201,16 +1317,14 @@ def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
         for root in HISTORY_QUERY_INFLECTION_ROOTS
     )
     has_retrospective_change = bool(query and HISTORY_CHANGE_QUERY.search(_normalize(query)))
-    if has_inflected_history or has_retrospective_change or history_terms - {"before"}:
+    if has_inflected_history or has_retrospective_change or history_terms - {"before", "past"}:
         return True
-    return (
-        "before" in history_terms
-        and any(
-            re.fullmatch(r"\d{4}", term) and int(term) <= CURRENT_YEAR
-            for term in query_terms
-        )
-    ) or (
-        any(re.fullmatch(r"\d{4}", term) for term in query_terms)
+    has_past_date = _has_past_date(query, query_terms)
+    if history_terms & {"before", "past"}:
+        return has_past_date or _has_history_context(query_terms)
+    return bool(
+        has_past_date
+        and any(re.fullmatch(r"\d{4}", term) for term in query_terms)
         and _is_personal_query(query_terms)
     )
 

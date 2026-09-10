@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import vault_retrieval as retrieval
@@ -553,6 +555,7 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
                 "before 9999 deployment show hook checklist",
                 "how to lint changed files",
                 "show changed files",
+                "what changed files should we deploy?",
                 "changed",
             ):
                 with self.subTest(query=query):
@@ -566,6 +569,33 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
                             "🏰 300-Projects/Tansu/a-archived.md",
                         ],
                     )
+
+    def test_history_markers_require_historical_context_and_past_dates(self) -> None:
+        cases = {
+            "what changed files should we deploy?": False,
+            "how has the hook contract changed?": True,
+            "before December 2026": False,
+            "before": False,
+            "get past the hook failure": False,
+            "past": False,
+            "my work profile 2030 plan": False,
+            "metal eskime testi": False,
+            "geçmiş metal eskime testi": True,
+            "past records": True,
+            "before 2024": True,
+            "before 31 February 2024": False,
+            "28 Ağustos 2024 Levent çalışma profili": True,
+        }
+        class FixedDate(date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 9, 10)
+
+        with mock.patch.object(retrieval, "date", FixedDate):
+            for query, expected in cases.items():
+                with self.subTest(query=query):
+                    terms = retrieval._retrieval_terms(query)
+                    self.assertEqual(retrieval._is_history_query(terms, query), expected)
 
     def test_inflected_history_terms_retrieve_completed_and_historical_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -622,6 +652,7 @@ title: Hook Protokolü
                     self.assertIn("Eski hook sözleşmesi", historical.excerpt)
             for query in (
                 "what changed in the hook contract?",
+                "how has the hook contract changed?",
                 "hook sözleşmesinde ne değişti?",
                 "hook sözleşmesinde neler değişti?",
                 "hook sözleşmesi nasıl değişti?",
