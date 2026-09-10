@@ -121,6 +121,24 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 "authorization",
             ),
             (
+                r'{"authorization":"Bearer\tTAB_AUTH_SECRET","keep":"ordinary"}',
+                {"authorization": "Bearer <REDACTED>", "keep": "ordinary"},
+                "TAB_AUTH_SECRET",
+                "authorization",
+            ),
+            (
+                r'{"authorization":"Bearer\nLINE_AUTH_SECRET","keep":"ordinary"}',
+                {"authorization": "Bearer <REDACTED>", "keep": "ordinary"},
+                "LINE_AUTH_SECRET",
+                "authorization",
+            ),
+            (
+                r'{"authorization":"Bearer\u00a0NBSP_AUTH_SECRET","keep":"ordinary"}',
+                {"authorization": "Bearer <REDACTED>", "keep": "ordinary"},
+                "NBSP_AUTH_SECRET",
+                "authorization",
+            ),
+            (
                 json.dumps({"outer": [{"authorization": "Bearer NESTED_AUTH_SECRET"}], "keep": "ordinary"}),
                 {"outer": [{"authorization": "Bearer <REDACTED>"}], "keep": "ordinary"},
                 "NESTED_AUTH_SECRET",

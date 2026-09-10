@@ -450,8 +450,8 @@ def _redact_decoded_json(text: str) -> tuple[str, tuple[str, ...]]:
                 except (ValueError, RecursionError):
                     continue
                 if decoded_end == value_end and isinstance(decoded_value, str):
-                    probe = 'authorization: ' + json.dumps(decoded_value, ensure_ascii=False)
-                    if AUTHORIZATION.fullmatch(probe):
+                    parts = decoded_value.split(None, 1)
+                    if len(parts) == 2 and parts[0].casefold() == 'bearer':
                         replacements.append((value_start, value_end, json.dumps('Bearer <REDACTED>')))
                         note('authorization')
                         skip_until = value_end
