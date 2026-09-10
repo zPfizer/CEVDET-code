@@ -24,7 +24,8 @@ class MemoryDirectiveTests(unittest.TestCase):
             "assert not ledger.is_explicit_write_intent('src/app.py dosyasını düzelt' + ' ' * 12000 + '?'); "
             "assert ledger.is_explicit_write_intent('src/app.py dosyasını düzelt, ' + ' ' * 12000 + 'lütfen.'); "
             "assert ledger.is_read_only_request('a' * 100000 + ' read-only dosyayı düzelt.'); "
-            "assert not ledger.is_read_only_request(('read-only-' * 10000) + 'file.py dosyasını düzelt.')"
+            "assert not ledger.is_read_only_request(('read-only-' * 10000) + 'file.py dosyasını düzelt.'); "
+            "assert not ledger.is_read_only_request('/' * 100000)"
         )
         subprocess.run(
             [sys.executable, "-X", "utf8", "-c", script],
@@ -118,6 +119,12 @@ class MemoryDirectiveTests(unittest.TestCase):
             '"src" klasörünü değiştir.',
             '“My Project” klasörünü güncelle.',
             r"./read-only dosyayı düzelt.",
+            r"C:\ klasörünü değiştir.",
+            r"C:/ klasörünü değiştir.",
+            r"\ klasörünü değiştir.",
+            r"/ klasörünü değiştir.",
+            r"\\server\share klasörünü değiştir.",
+            r"\\server\share\ klasörünü değiştir.",
             "dosyayı oluştur.",
             "src klasörünü güncelle.",
             r"C:src\app.py dosyasını düzelt.",
@@ -185,6 +192,10 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Lütfen read-only/modda dosyayı düzelt.",
             r"R&D\read-only dosyayı düzelt.",
             r"src/read-only dosyayı düzelt.",
+            r"C:\ dosyasını düzelt.",
+            "C: klasörünü değiştir.",
+            "C: dosyasını düzelt.",
+            r"Onaylansa C:\ klasörünü değiştir.",
         ):
             with self.subTest(prompt=prompt):
                 self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))

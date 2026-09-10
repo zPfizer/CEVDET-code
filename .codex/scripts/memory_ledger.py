@@ -218,18 +218,23 @@ _WRITE_PATH = (
     rf"{_WRITE_PATH_COMPONENT}[\\/])"
     rf"{_WRITE_PATH_COMPONENT}(?:[\\/]{_WRITE_PATH_COMPONENT})*"
 )
+_WRITE_DIRECTORY_ROOT = (
+    rf"(?:[a-z]:[\\/]|[\\/](?![\\/])|"
+    rf"\\\\{_WRITE_PATH_COMPONENT}[\\/]{_WRITE_PATH_COMPONENT}[\\/]?)"
+)
 _EXPLICIT_WRITE_PATH_PREFIX = re.compile(
     r"(?:[a-z]:|\.{1,2}[\\/]|[\\/](?![\\/])|"
     rf"\\\\{_WRITE_PATH_COMPONENT}[\\/]{_WRITE_PATH_COMPONENT}[\\/]?)"
 )
 _MEMORY_TARGET_TOKEN = re.compile(
-    rf"(?:[a-z]:[\\/]?|\.{{1,2}}[\\/]|[\\/]+)?"
+    rf"(?:[a-z]:[\\/]?|\.{{1,2}}[\\/]|[\\/]{{1,2}})?"
     rf"{_WRITE_PATH_COMPONENT}(?:[\\/]{_WRITE_PATH_COMPONENT})*"
 )
 _WRITE_TARGET = (
     rf"(?:bunu|bunları|şunu|şunları|onu|onları|"
     rf"(?:bu|şu|o)\s+{_WRITE_TARGET_OBJECT}|"
     rf"{_WRITE_PROJECT_TARGET}|{_WRITE_MODULE_TARGET}|{_WRITE_FILE_TARGET}|"
+    rf"{_WRITE_DIRECTORY_ROOT}\s+{_WRITE_FOLDER_OBJECT}|"
     rf"{_WRITE_PROJECT_OBJECT_TARGET}|"
     rf"{_WRITE_TARGET_OBJECT}|"
     rf"{_WRITE_PATH}"
@@ -242,6 +247,7 @@ _WRITE_TARGET = (
 )
 _CONCRETE_WRITE_TARGET = re.compile(
     rf"(?:{_WRITE_PROJECT_TARGET}|{_WRITE_MODULE_TARGET}|"
+    rf"{_WRITE_DIRECTORY_ROOT}\s+{_WRITE_FOLDER_OBJECT}|"
     rf"{_WRITE_PROJECT_OBJECT_TARGET}|{_WRITE_FILE_TARGET}|"
     rf"{_WRITE_PATH}{_WRITE_TARGET_SUFFIX}|"
     rf"{_WRITE_FILENAME}{_WRITE_TARGET_SUFFIX}|"
