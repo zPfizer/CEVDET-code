@@ -538,6 +538,8 @@ class ConversationContinuityTests(unittest.TestCase):
             'Borsa.md dosyasını düzelt.',
             'unut.py dosyasını düzelt.',
             'saklama.py dosyasını düzelt.',
+            'src klasöründeki hatayı düzelt.',
+            r'C:\R&D\app.py dosyasını düzelt.',
             'Lütfen src/app.py dosyasını düzelt.',
             'src/app.py dosyasındaki hatayı düzelt.',
             'parse.py dosyasını düzelt.',

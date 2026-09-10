@@ -170,8 +170,10 @@ _WRITE_TARGET_OBJECT = (
 )
 _WRITE_FILE_OBJECT = r"(?:dosya(?:yı|sını|ları|larını)?)"
 _WRITE_FILE_MEMBER = rf"dosya(?:daki|deki|sındaki|sindeki)\s+{_WRITE_TARGET_OBJECT}"
+_WRITE_FOLDER_MEMBER = rf"klasör(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}"
 _WRITE_FILE_TARGET = (
-    rf"(?:[\w.-]+\s+)?(?:{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_OBJECT})"
+    rf"(?:[\w.-]+\s+)?(?:{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER}|"
+    rf"{_WRITE_FOLDER_MEMBER}|{_WRITE_FOLDER_OBJECT})"
 )
 _WRITE_PROJECT_TARGET = rf"[\w.-]+\s+projesindeki\s+{_WRITE_TARGET_OBJECT}"
 _WRITE_PROJECT_OBJECT = r"proje(?:yi|si(?:ni)?|ler(?:i(?:ni)?)?)?"
@@ -208,10 +210,12 @@ _QUOTED_DIRECTORY = (
 )
 _WRITE_FILENAME = rf"(?:[\w.-]+\.{_WRITE_EXTENSION}|\.{_WRITE_EXTENSION})"
 _WRITE_CASE_SUFFIX = r"['’]y?[ıiuü]"
-_WRITE_TARGET_SUFFIX = rf"(?:\s+(?:{_WRITE_TARGET_OBJECT}|{_WRITE_FILE_MEMBER})|{_WRITE_CASE_SUFFIX})?"
+_WRITE_TARGET_SUFFIX = rf"(?:\s+(?:{_WRITE_TARGET_OBJECT}|{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_MEMBER})|{_WRITE_CASE_SUFFIX})?"
+_WRITE_PATH_COMPONENT = r"[^\\/\s<>:\"|?*\x00-\x1f]+"
 _WRITE_PATH = (
-    rf"(?:[a-z]:[\\/]?|\.{1,2}[\\/]|[\\/](?![\\/])|"
-    rf"\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w./\\-]+"
+    rf"(?:[a-z]:[\\/]?|\.{{1,2}}[\\/]|[\\/](?![\\/])|"
+    rf"\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])"
+    rf"{_WRITE_PATH_COMPONENT}(?:[\\/]{_WRITE_PATH_COMPONENT})*"
 )
 _WRITE_TARGET = (
     rf"(?:bunu|bunları|şunu|şunları|onu|onları|"
@@ -307,14 +311,15 @@ _QUESTION_KAC = (
     r"lar(?:ın|a|ı|da|dan)?(?:ki)?)?|ın|a|ı|ta|tan)?"
 )
 ACTION_QUESTION_WORD = re.compile(
-    rf"\b(?:{_QUESTION_NE}|nasıl|niçin|{_QUESTION_HANGI}|"
+    rf"\b(?:{_QUESTION_NE}|nasıl|niçin|niye|{_QUESTION_HANGI}|"
     rf"{_QUESTION_KIM}|{_QUESTION_NERE}|{_QUESTION_KAC}|ne\s+zaman)\b"
 )
 _NAMED_TARGET = re.compile(
     rf"^(?P<name>[\w.-]+)\s+(?:{_WRITE_PROJECT_OBJECT}|"
     rf"projesindeki\s+{_WRITE_TARGET_OBJECT}|"
     rf"modül(?:deki|ündeki)\s+{_WRITE_TARGET_OBJECT}|"
-    rf"{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_OBJECT})$"
+    rf"{_WRITE_FILE_OBJECT}|{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_MEMBER}|"
+    rf"{_WRITE_FOLDER_OBJECT})$"
 )
 _NAMED_FILENAME = re.compile(_WRITE_FILENAME)
 _SIMPLE_CONDITIONAL = re.compile(rf"\b\w+{_CONDITIONAL_PERSON}\b")
