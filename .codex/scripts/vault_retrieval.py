@@ -1349,7 +1349,7 @@ def _before_relative_date_status(query: str) -> bool | None:
     normalized = _normalize(query)
     for marker in re.finditer(r"\bbefore\b", normalized):
         suffix = normalized[marker.end():].lstrip(" ,;:()[]")
-        if re.match(r"(?:today|yesterday)\b(?!['’]s\b|\s+s\b)", suffix):
+        if re.match(r"today\b(?!['’]s\b|\s+s\b)|yesterday\b", suffix):
             return True
     return None
 
@@ -1359,11 +1359,11 @@ def _past_date_status(query: str, query_terms: frozenset[str]) -> bool | None:
     today = date.today()
     if query:
         references = _date_references(query)
+        if "before" in query_terms:
+            relative = _before_relative_date_status(query)
+            if relative is not None:
+                return relative
         if not references:
-            if "before" in query_terms:
-                relative = _before_relative_date_status(query)
-                if relative is not None:
-                    return relative
             return None
         if "before" in query_terms:
             adjacent = _before_date_status(query, references, today)
