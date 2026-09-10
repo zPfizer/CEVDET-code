@@ -4,6 +4,7 @@ from datetime import date
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -596,6 +597,15 @@ Eylül etiket denetimi.
         paths = [hit.entry.path for hit in hits]
         self.assertIn("is-active.md", paths)
         self.assertIn("is-history.md", paths)
+
+    def test_identifier_scan_skips_long_unterminated_hash_run(self) -> None:
+        query = "past records " + ("# " * 100_000)
+        started = time.perf_counter()
+        references = retrieval._date_references(query)
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual(references, ())
+        self.assertLess(elapsed, 2.0)
 
     def test_ordinary_history_prefix_match_keeps_active_record_ahead_of_archived_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

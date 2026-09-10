@@ -257,7 +257,7 @@ HISTORY_DATE_QUESTION = re.compile(
     r"(?:\W+\w+){0,3}\W+(?:nedir|ne|hangi|kac|goster|show|display)\b"
 )
 HISTORY_IDENTIFIER_YEAR = re.compile(
-    r"(?i)(?:#|\b(?:ticket|port)\b)[\s#:/-]*(?P<year>\d{4})(?!\w)"
+    r"(?i)(?:#|\b(?:ticket|port)\b)[\s#:/-]*+(?P<year>\d{4})?(?!\w)"
 )
 
 
@@ -1332,6 +1332,7 @@ def _date_references(query: str) -> tuple[_HistoryDateReference, ...]:
     identifier_year_starts = {
         match.start("year")
         for match in HISTORY_IDENTIFIER_YEAR.finditer(normalized)
+        if match.group("year") is not None
     }
     for match in HISTORY_DATE.finditer(normalized):
         groups = match.groupdict()
