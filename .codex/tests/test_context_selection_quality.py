@@ -497,6 +497,14 @@ Eylül etiket denetimi.
                 "current checklist before deployment",
                 "hook history",
             ),
+            "current checklist with records before and after the 2024 migration history": (
+                "current checklist",
+                "records before and after the 2024 migration history",
+            ),
+            "compare current design and 2030 implementation with hook history": (
+                "compare current design and 2030 implementation",
+                "hook history",
+            ),
         }
         for query, expected in cases.items():
             with self.subTest(query=query):

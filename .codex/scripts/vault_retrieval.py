@@ -1620,10 +1620,6 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
             weak_history_spans.add(span)
     for pattern in (HISTORY_CHANGE_QUERY, HISTORY_NOMINAL_CHANGE_QUERY):
         history_spans.update((match.start(), match.end()) for match in pattern.finditer(normalized))
-    weak_history_spans.update(
-        (reference.start, reference.end)
-        for reference in _date_references(normalized)
-    )
     if not history_spans:
         return None
     current_starts = tuple(sorted(start for start, _end in current_spans))
