@@ -1247,6 +1247,14 @@ def _matches_history_inflection(term: str, root: str) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class _HistoryDateReference:
+    start: int
+    end: int
+    start_date: date | None
+    end_date: date | None
+
+
 def _date_value(year: int, month: int = 1, day: int = 1) -> date | None:
     try:
         return date(year, month, day)
@@ -1254,11 +1262,23 @@ def _date_value(year: int, month: int = 1, day: int = 1) -> date | None:
         return None
 
 
-def _date_references(query: str) -> tuple[tuple[date, ...], bool]:
-    """Return parsed date references and whether a date-shaped value was invalid."""
+def _date_bounds(year: int, month: int, day: int | None = None) -> tuple[date, date] | None:
+    start = _date_value(year, month, 1 if day is None else day)
+    if start is None:
+        return None
+    if day is not None:
+        return start, start
+    try:
+        end = _date_value(year, month, calendar.monthrange(year, month)[1])
+    except (calendar.IllegalMonthError, ValueError, OverflowError):
+        return None
+    return None if end is None else (start, end)
+
+
+def _date_references(query: str) -> tuple[_HistoryDateReference, ...]:
+    """Parse date-shaped matches while retaining their spans and period bounds."""
     normalized = _normalize(query)
-    references: list[date] = []
-    invalid = False
+    references: list[_HistoryDateReference] = []
     for match in HISTORY_DATE.finditer(normalized):
         groups = match.groupdict()
         if groups["ymd_year"] is not None:
@@ -1266,9 +1286,16 @@ def _date_references(query: str) -> tuple[tuple[date, ...], bool]:
                 int(groups["ymd_year"]), int(groups["ymd_month"]), int(groups["ymd_day"])
             )
         elif groups["dmy_num_year"] is not None:
-            year, month, day = (
-                int(groups["dmy_num_year"]), int(groups["dmy_num_month"]), int(groups["dmy_num_day"])
-            )
+            first, second = int(groups["dmy_num_day"]), int(groups["dmy_num_month"])
+            if second > 12 and first <= 12:
+                year, month, day = int(groups["dmy_num_year"]), first, second
+            elif first > 12 and second <= 12:
+                year, month, day = int(groups["dmy_num_year"]), second, first
+            elif first == second and first <= 12:
+                year, month, day = int(groups["dmy_num_year"]), first, second
+            else:
+                references.append(_HistoryDateReference(match.start(), match.end(), None, None))
+                continue
         elif groups["dmy_year"] is not None:
             year, month, day = (
                 int(groups["dmy_year"]), HISTORY_MONTHS[groups["dmy_month"]], int(groups["dmy_day"])
@@ -1278,25 +1305,54 @@ def _date_references(query: str) -> tuple[tuple[date, ...], bool]:
                 int(groups["mdy_year"]), HISTORY_MONTHS[groups["mdy_month"]], int(groups["mdy_day"])
             )
         elif groups["my_year"] is not None:
-            year, month, day = int(groups["my_year"]), HISTORY_MONTHS[groups["my_month"]], 1
+            year, month, day = int(groups["my_year"]), HISTORY_MONTHS[groups["my_month"]], None
         else:
-            year, month, day = int(groups["year"]), 1, 1
-        value = _date_value(year, month, day)
-        if value is None:
-            invalid = True
-        else:
-            references.append(value)
-    return tuple(references), invalid
+            value = _date_value(int(groups["year"]), 1, 1)
+            bounds = None if value is None else (value, date(value.year, 12, 31))
+            references.append(_HistoryDateReference(
+                match.start(), match.end(), *(bounds or (None, None))
+            ))
+            continue
+        bounds = _date_bounds(year, month, day)
+        references.append(_HistoryDateReference(
+            match.start(), match.end(), *(bounds or (None, None))
+        ))
+    return tuple(references)
+
+
+def _before_date_status(
+    query: str,
+    references: tuple[_HistoryDateReference, ...],
+    today: date,
+) -> bool | None:
+    normalized = _normalize(query)
+    statuses: list[bool] = []
+    cursor = 0
+    for reference in references:
+        prefix = normalized[cursor:reference.start]
+        if re.search(r"\bbefore[\s,;:()\[\]]*\Z", prefix):
+            statuses.append(
+                reference.start_date is not None and reference.start_date <= today
+            )
+        cursor = reference.end
+    return None if not statuses else any(statuses)
 
 
 def _past_date_status(query: str, query_terms: frozenset[str]) -> bool | None:
     """Return past/future status; None means the query contains no date."""
+    today = date.today()
     if query:
-        references, invalid = _date_references(query)
-        if invalid:
-            return False
+        references = _date_references(query)
         if not references:
             return None
+        if "before" in query_terms:
+            adjacent = _before_date_status(query, references, today)
+            if adjacent is not None:
+                return adjacent
+            return False
+        if any(reference.start_date is None or reference.end_date is None for reference in references):
+            return False
+        return all(reference.end_date < today for reference in references)
     else:
         years = [int(term) for term in query_terms if re.fullmatch(r"\d{4}", term)]
         if not years:
@@ -1306,12 +1362,11 @@ def _past_date_status(query: str, query_terms: frozenset[str]) -> bool | None:
             for term in query_terms
         ):
             return False
-        value = _date_value(years[0])
-        if value is None:
+        start = _date_value(years[0], 1, 1)
+        end = _date_value(years[0], 12, 31)
+        if start is None or end is None:
             return False
-        references = (value,)
-    today = date.today()
-    return all(value < today for value in references)
+        return start <= today if "before" in query_terms else end < today
 
 
 def _has_history_context(query_terms: frozenset[str]) -> bool:
