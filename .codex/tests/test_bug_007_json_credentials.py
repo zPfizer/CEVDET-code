@@ -87,7 +87,7 @@ class Bug007JsonCredentialTests(unittest.TestCase):
             ),
             (
                 "decision A; token=SCALAR_JSON_SYNTHETIC_SECRET; decision B",
-                "decision A; token=<REDACTED>; decision B",
+                "decision A; token=<REDACTED> decision B",
                 "SCALAR_JSON_SYNTHETIC_SECRET",
                 "credential",
             ),

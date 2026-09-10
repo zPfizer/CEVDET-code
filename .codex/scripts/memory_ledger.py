@@ -502,22 +502,37 @@ def sanitize_text(
 ) -> tuple[str, tuple[str, ...]]:
     redactions: list[str] = []
 
-    def replace(
+    def replace_outside_json_values(
         pattern: re.Pattern[str],
         replacement: str | Callable[[re.Match[str]], str],
         category: str,
     ) -> None:
         nonlocal text
-        text, count = pattern.subn(replacement, text)
+        spans = [(record[0], record[1]) for record in _json_string_regions(text) if record[2]]
+        if not spans:
+            text, count = pattern.subn(replacement, text)
+        else:
+            pieces: list[str] = []
+            cursor = 0
+            count = 0
+            for start, end in spans:
+                segment, replaced = pattern.subn(replacement, text[cursor:start])
+                pieces.extend((segment, text[start:end]))
+                count += replaced
+                cursor = end
+            segment, replaced = pattern.subn(replacement, text[cursor:])
+            pieces.append(segment)
+            count += replaced
+            text = ''.join(pieces)
         if count and category not in redactions:
             redactions.append(category)
 
-    replace(PRIVATE_KEY, "<REDACTED>", "private-key")
     text, decoded_redactions = _redact_decoded_json(text)
     for category in decoded_redactions:
         if category not in redactions:
             redactions.append(category)
-    replace(AUTHORIZATION,
+    replace_outside_json_values(PRIVATE_KEY, "<REDACTED>", "private-key")
+    replace_outside_json_values(AUTHORIZATION,
             lambda match: (f'{match.group("prefix")}"Bearer <REDACTED>"' if match.group('key_quote')
                            else "Authorization: Bearer <REDACTED>"),
             "authorization")
@@ -539,12 +554,6 @@ def sanitize_text(
             cursor = json_string[1]
             continue
         end = match.end()
-        if text[match.start('value')] not in '{["\'':
-            if end == len(text) or text[end].isspace():
-                value_start = match.start('value')
-                marker_end = value_start + len('<REDACTED>') if text.startswith('<REDACTED>', value_start) else value_start
-                while end > marker_end and not (text[end - 1].isalnum() or text[end - 1] == '_'):
-                    end -= 1
         if text[match.start('value')] in '{[':
             quoted_field = False
             try:
@@ -574,8 +583,8 @@ def sanitize_text(
         text = ''.join(pieces) + text[cursor:]
     if pieces and 'credential' not in redactions:
         redactions.append('credential')
-    replace(TOKEN_PREFIX, "<REDACTED>", "credential")
-    replace(PERSONAL_CREDENTIAL, "<REDACTED>", "credential")
+    replace_outside_json_values(TOKEN_PREFIX, "<REDACTED>", "credential")
+    replace_outside_json_values(PERSONAL_CREDENTIAL, "<REDACTED>", "credential")
 
     if max_chars is not None and max_chars < 1:
         raise ValueError("max-event-chars-invalid")
