@@ -151,6 +151,9 @@ HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES = {
     )
     for stem_type, suffixes in HISTORY_QUERY_INFLECTION_SUFFIXES.items()
 }
+HISTORY_FEATURE_OBJECT_TERMS = frozenset({
+    "config", "configuration", "policy", "policies", "retention", "setting", "settings",
+})
 # Shared bounded family for Turkish change nouns. `degisiklig` covers the
 # consonant-softened forms such as `değişikliği` after normalization.
 HISTORY_CHANGE_NOUN_ROOTS = frozenset({"degisiklik", "degisiklig", "degisim"})
@@ -1876,6 +1879,33 @@ def _has_independent_current_cue(query: str) -> bool:
     return any(span not in related_current_spans for span in current_spans)
 
 
+def _is_ambiguous_history_feature_query(
+    query: str,
+    query_terms: frozenset[str],
+) -> bool:
+    if "history" not in query_terms:
+        return False
+    normalized = _normalize(query)
+    if re.search(r"(?i)\bhistory\b\W+\bof\b", normalized):
+        return False
+    masked = HISTORY_IDENTIFIER.sub(
+        lambda match: " " * len(match[0])
+        if match.group("identifier") is not None else match[0],
+        normalized,
+    )
+    masked = re.sub(r"(?i)\bhistory\b", lambda match: " " * len(match[0]), masked)
+    if _is_history_query(_retrieval_terms(masked), masked):
+        return False
+    words = tuple(re.finditer(r"(?<!\w)[\w]+(?!\w)", normalized))
+    for index, word in enumerate(words):
+        if word.group() != "history":
+            continue
+        for object_index in range(index + 1, min(index + 3, len(words))):
+            if words[object_index].group() in (query_terms & HISTORY_FEATURE_OBJECT_TERMS):
+                return True
+    return False
+
+
 def _merge_scoped_hits(
     current_hits: list[VaultHit],
     history_hits: list[VaultHit],
@@ -1929,10 +1959,16 @@ def _rank_query(
             top_k=top_k,
         )
     terms = _retrieval_terms(query)
+    ambiguous_history_feature = _is_ambiguous_history_feature_query(query, terms)
     preserve_current_stale_penalty = bool(
-        terms & CURRENT_QUERY_TERMS
-        and _is_history_query(terms, query)
-        and _has_independent_current_cue(query)
+        _is_history_query(terms, query)
+        and (
+            ambiguous_history_feature
+            or (
+                terms & CURRENT_QUERY_TERMS
+                and _has_independent_current_cue(query)
+            )
+        )
     )
     return _rank(
         entries,

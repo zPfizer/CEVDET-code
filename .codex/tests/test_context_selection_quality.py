@@ -1209,6 +1209,55 @@ title: Hook Protokolü
         self.assertIn("z-history-clone.md", paths)
         self.assertNotIn("a-active-clone.md", paths)
 
+    def test_ambiguous_history_feature_keeps_active_representative(self) -> None:
+        for query in (
+            "show browser history retention policy",
+            "show browser history retention policy of Chrome",
+            "show history settings",
+        ):
+            with self.subTest(query=query):
+                self.assertTrue(
+                    retrieval._is_ambiguous_history_feature_query(
+                        query,
+                        retrieval._retrieval_terms(query),
+                    )
+                )
+        for query in ("show hook history records", "show deployment history records"):
+            with self.subTest(query=query):
+                self.assertFalse(
+                    retrieval._is_ambiguous_history_feature_query(
+                        query,
+                        retrieval._retrieval_terms(query),
+                    )
+                )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            body = "# Browser History Retention Policy\nBrowser history retention policy settings.\n"
+            _write(
+                root,
+                "active.md",
+                "---\ntitle: Browser History Retention Policy\nstatus: active\ntype: note\n---\n" + body,
+            )
+            _write(
+                root,
+                "archived.md",
+                "---\ntitle: Browser History Retention Policy\nstatus: archived\ntype: note\n---\n" + body,
+            )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            feature = retrieval.search_vault(
+                entries,
+                "show browser history retention policy",
+                top_k=2,
+            )
+            retro = retrieval.search_vault(
+                entries,
+                "show the history of the current browser retention policy",
+                top_k=2,
+            )
+
+        self.assertEqual(feature[0].entry.path, "active.md")
+        self.assertEqual(retro[0].entry.path, "archived.md")
+
     def test_unrelated_corpus_growth_does_not_change_target_selection_or_score(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
