@@ -530,10 +530,73 @@ Eylül etiket denetimi.
                 {hit.entry.path for hit in retrieval.search_vault(entries, not_only, top_k=5)},
                 {"active.md", "historical.md", "archived.md", "superseded.md"},
             )
+            feature_exclusion = "Hook Records, not browser history settings"
+            self.assertIsNone(retrieval._split_selection_exclusion(feature_exclusion))
+            self.assertIn(
+                "archived.md",
+                {hit.entry.path for hit in retrieval.search_vault(entries, feature_exclusion, top_k=5)},
+            )
             long_query = "show current hook records " + ("and topic " * 2000) + "and not historical records"
             started = time.perf_counter()
             self.assertIsNotNone(retrieval._split_selection_exclusion(long_query))
             self.assertLess(time.perf_counter() - started, 5.0)
+
+    def test_exclusion_deduplicates_visible_claim_rows(self) -> None:
+        old = (
+            "- `gecmis` `kullanici-dusuncesi` `eski` 2024-01-01 "
+            "[[daily/2024-01-01|Kaynak]] — Historical hook records evidence."
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for index in range(3):
+                _write(
+                    root, f"copy-{index}.md",
+                    "---\nschema: knowledge-v2\ntitle: Hook Records\nstatus: active\n---\n"
+                    f"# Hook Records\n{old}\n"
+                    "- `gecerli` `kullanici-dusuncesi` `guncel` 2026-01-01 "
+                    f"[[daily/2026-01-01|Kaynak]] — Current value {index}.\n",
+                )
+            _write(
+                root, "z-independent.md",
+                "---\nschema: knowledge-v2\ntitle: Hook Records\nstatus: active\n---\n"
+                f"# Hook Records\n{old} Independent " + "detail " * 100 + "detail.\n",
+            )
+            hits = retrieval.search_vault(
+                retrieval.build_vault_map(root, write_cache=False),
+                "historical hook records, not current records",
+                top_k=3,
+            )
+        paths = {hit.entry.path for hit in hits}
+        self.assertEqual(len(paths), 2)
+        self.assertIn("z-independent.md", paths)
+
+    def test_scoped_dedup_reaches_independent_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for index in range(3):
+                body = f"# Hook Records\nHook records evidence marker {index}.\n"
+                for kind, status in (("active", "active"), ("past", "historical")):
+                    record_type = "note" if kind == "active" else "historical-record"
+                    _write(
+                        root, f"{kind}-{index}.md",
+                        f"---\ntitle: Hook Records\nstatus: {status}\ntype: {record_type}\n---\n" + body,
+                    )
+            _write(
+                root, "z-independent.md",
+                "---\ntitle: Independent Evidence\nstatus: historical\ntype: historical-record\n---\n"
+                "# Independent Evidence\nHook records evidence " + "detail " * 100 + "\n",
+            )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            with mock.patch.object(retrieval, "_excerpt", wraps=retrieval._excerpt) as render:
+                hits = retrieval.search_vault(
+                    entries,
+                    "compare current hook records and historical hook records",
+                    top_k=3,
+                )
+        self.assertEqual(len(hits), 3)
+        self.assertIn("z-independent.md", {hit.entry.path for hit in hits})
+        self.assertTrue(any(hit.entry.status == "active" for hit in hits))
+        self.assertLessEqual(render.call_count, 6)
 
     def test_current_history_scope_ignores_inner_connectors(self) -> None:
         cases = {
@@ -969,6 +1032,7 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "doğum tarihim nedir?": False,
             "doğum tarihimiz nedir?": False,
             "tarihçe kayıtlarını göster": True,
+            "show hook history and policy records": True,
             "geçmiş tarihi hook sözleşmesi": True,
             "hook contract changed yesterday": True,
             "recent changes to the hook contract": True,
@@ -1387,6 +1451,13 @@ title: Hook Protokolü
                 "---\ntitle: Privacy Settings\nstatus: active\ntype: note\n---\n"
                 "# Privacy Settings\nCurrent privacy settings.\n",
             )
+            _write(
+                root,
+                "old-record.md",
+                "---\ntitle: Archived Snapshot\nstatus: historical\n"
+                "type: historical-record\n---\n# Archived Snapshot\n"
+                "Hook records evidence from 2024.\n",
+            )
             entries = retrieval.build_vault_map(root, write_cache=False)
             history = retrieval.search_vault(
                 entries,
@@ -1401,10 +1472,11 @@ title: Hook Protokolü
 
         self.assertEqual(
             {hit.entry.path for hit in history},
-            {"mixed.md", "archived.md"},
+            {"mixed.md", "archived.md", "old-record.md"},
         )
-        self.assertIn("Historical hook records evidence", history[0].excerpt)
-        self.assertNotIn("Current hook records evidence", history[0].excerpt)
+        mixed_history = next(hit for hit in history if hit.entry.path == "mixed.md")
+        self.assertIn("Historical hook records evidence", mixed_history.excerpt)
+        self.assertNotIn("Current hook records evidence", mixed_history.excerpt)
         archived_history = next(hit for hit in history if hit.entry.path == "archived.md")
         self.assertIn("Current hook records evidence", archived_history.excerpt)
         self.assertEqual(
@@ -1421,7 +1493,7 @@ title: Hook Protokolü
         )
         self.assertEqual(
             {hit.entry.path for hit in history_without_marker},
-            {"mixed.md", "archived.md"},
+            {"mixed.md", "archived.md", "old-record.md"},
         )
         self.assertIn(
             "Historical hook records evidence",
@@ -1443,6 +1515,15 @@ title: Hook Protokolü
         )
         policy_history_hit = next(hit for hit in policy_history if hit.entry.path == "policy.md")
         self.assertIn("old value", policy_history_hit.excerpt)
+        feature_and_history = retrieval.search_vault(
+            entries,
+            "compare current browser history retention policy and previous hook records",
+            top_k=5,
+        )
+        current_policy = next(hit for hit in feature_and_history if hit.entry.path == "policy.md")
+        self.assertIn("Retention is now disabled", current_policy.excerpt)
+        self.assertNotIn("old value", current_policy.excerpt)
+        self.assertIn("old-record.md", {hit.entry.path for hit in feature_and_history})
 
     def test_unrelated_corpus_growth_does_not_change_target_selection_or_score(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

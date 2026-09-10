@@ -1603,11 +1603,28 @@ def _entry_lines(
         if _is_historical_preference_material(entry):
             return entry.safe_lines
         return entry.historical_lines
-    if exclude_historical_material and entry.historical_lines:
-        return tuple(line for line in entry.safe_lines if line not in entry.historical_lines)
-    if include_history or not entry.historical_lines:
+    if (include_history and not exclude_historical_material) or not entry.historical_lines:
         return entry.safe_lines
-    return tuple(line for line in entry.safe_lines if line not in entry.historical_lines)
+    historical_lines = frozenset(entry.historical_lines)
+    return tuple(line for line in entry.safe_lines if line not in historical_lines)
+
+
+def _entry_content_key(
+    entry: VaultEntry,
+    *,
+    include_history: bool,
+    exclude_historical_material: bool = False,
+    exclude_current_material: bool = False,
+) -> str:
+    lines = _entry_lines(
+        entry,
+        include_history=include_history,
+        exclude_historical_material=exclude_historical_material,
+        exclude_current_material=exclude_current_material,
+    )
+    if lines is entry.safe_lines:
+        return entry.content_key or entry.path
+    return _content_key(lines)
 
 
 def _entry_terms(
@@ -1800,10 +1817,24 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     )
     if not current_spans:
         return None
+    connector_starts = tuple(start for start, _end, _raw_start, _raw_end in connector_spans)
+    connector_ends = tuple(end for _start, end, _raw_start, _raw_end in connector_spans)
+    feature_scopes: dict[int, bool] = {}
     history_spans: set[tuple[int, int]] = set()
     weak_history_spans: set[tuple[int, int]] = set()
     for match in re.finditer(r"(?<!\w)[\w]+(?!\w)", normalized):
         token = match[0]
+        if token == "history":
+            scope_index = bisect_right(connector_ends, match.start())
+            if scope_index not in feature_scopes:
+                start = connector_ends[scope_index - 1] if scope_index else 0
+                end = connector_starts[scope_index] if scope_index < len(connector_starts) else len(normalized)
+                scope = normalized[start:end]
+                feature_scopes[scope_index] = _is_ambiguous_history_feature_query(
+                    scope, _retrieval_terms(scope),
+                )
+            if feature_scopes[scope_index]:
+                continue
         if token not in HISTORY_QUERY_TERMS and not any(
             _matches_history_inflection(token, root)
             for root in HISTORY_QUERY_INFLECTION_ROOTS
@@ -1880,8 +1911,8 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     right_terms = _retrieval_terms(right)
     left_current = bool(left_terms & CURRENT_QUERY_TERMS)
     right_current = bool(right_terms & CURRENT_QUERY_TERMS)
-    left_history = _has_history_query_cues(left_terms, left)
-    right_history = _has_history_query_cues(right_terms, right)
+    left_history = _is_history_query(left_terms, left)
+    right_history = _is_history_query(right_terms, right)
     if left_current and right_history and not right_current and not left_history:
         current_scope, history_scope = left, right
     elif right_current and left_history and not left_current and not right_history:
@@ -1917,12 +1948,12 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     if current_topic_terms and not history_topic_terms:
         history_scope = f"{history_scope} {' '.join(current_topic_terms)}"
         history_terms = _retrieval_terms(history_scope)
-        if history_terms & CURRENT_QUERY_TERMS or not _has_history_query_cues(history_terms, history_scope):
+        if history_terms & CURRENT_QUERY_TERMS or not _is_history_query(history_terms, history_scope):
             return None
     elif history_topic_terms and not current_topic_terms:
         current_scope = f"{current_scope} {' '.join(history_topic_terms)}"
         current_terms = _retrieval_terms(current_scope)
-        if not current_terms & CURRENT_QUERY_TERMS or _has_history_query_cues(current_terms, current_scope):
+        if not current_terms & CURRENT_QUERY_TERMS or _is_history_query(current_terms, current_scope):
             return None
     elif not current_topic_terms:
         return None
@@ -1985,6 +2016,8 @@ def _is_ambiguous_history_feature_query(
         if word.group() != "history":
             continue
         for object_index in range(index + 1, min(index + 3, len(words))):
+            if CURRENT_HISTORY_CONNECTOR.search(normalized, word.end(), words[object_index].start()):
+                break
             if words[object_index].group() in (query_terms & HISTORY_FEATURE_OBJECT_TERMS):
                 return True
     return False
@@ -2009,19 +2042,13 @@ def _merge_scoped_hits(
 ) -> list[VaultHit]:
     selected: list[VaultHit] = []
     seen_paths: set[str] = set()
-    seen_content: set[str] = set()
     for current_hit, history_hit in zip_longest(current_hits, history_hits):
         for hit in (current_hit, history_hit):
             if hit is None:
                 continue
-            key = hit.entry.content_key or hit.entry.path
-            if hit.entry.path in seen_paths or (
-                top_k <= MAX_CANDIDATES and key in seen_content
-            ):
+            if hit.entry.path in seen_paths:
                 continue
             seen_paths.add(hit.entry.path)
-            if top_k <= MAX_CANDIDATES:
-                seen_content.add(key)
             selected.append(hit)
             if len(selected) == top_k:
                 return selected
@@ -2054,23 +2081,41 @@ def _rank_query(
     scopes = _split_current_history_query(query)
     if scopes is not None:
         current_query, history_query = scopes
-        return _merge_scoped_hits(
-            _rank(
-                entries,
-                current_query,
-                top_k=top_k,
-                exclude_historical_material=exclude_historical_material,
-                exclude_current_material=exclude_current_material,
-            ),
-            _rank(
-                entries,
-                history_query,
-                top_k=top_k,
-                exclude_historical_material=exclude_historical_material,
-                exclude_current_material=exclude_current_material,
-            ),
-            top_k=top_k,
+        view_options = {
+            "exclude_historical_material": exclude_historical_material,
+            "exclude_current_material": exclude_current_material,
+        }
+        current_hits = _rank(entries, current_query, top_k=top_k, **view_options)
+        current_paths = {hit.entry.path for hit in current_hits}
+        current_keys = {
+            _entry_content_key(
+                hit.entry,
+                include_history=exclude_current_material and not exclude_historical_material,
+                **view_options,
+            )
+            for hit in current_hits
+        } if top_k <= MAX_CANDIDATES else set()
+        # Remove cross-scope duplicates before the history limit; excerpts stay bounded.
+        history_entries = VaultMap(
+            [
+                entry for entry in entries
+                if entry.path not in current_paths
+                and (
+                    not current_keys
+                    or _entry_content_key(
+                        entry,
+                        include_history=not exclude_historical_material,
+                        **view_options,
+                    ) not in current_keys
+                )
+            ],
+            entries.document_frequency,
+            entries.corpus_size,
+            cache_result=entries.cache_result,
+            unstable_paths=entries.unstable_paths,
         )
+        history_hits = _rank(history_entries, history_query, top_k=top_k, **view_options)
+        return _merge_scoped_hits(current_hits, history_hits, top_k=top_k)
     terms = _retrieval_terms(query)
     preserve_current_stale_penalty = _should_preserve_current_stale_penalty(query, terms)
     return _rank(
@@ -2130,7 +2175,9 @@ def _rank(
     if not query_terms or not entries or top_k <= 0:
         return []
 
-    include_history = _is_history_query(query_terms, query)
+    include_history = (
+        _is_history_query(query_terms, query) or exclude_current_material
+    ) and not exclude_historical_material
     preserve_current_stale_penalty = (
         preserve_current_stale_penalty
         or _should_preserve_current_stale_penalty(query, query_terms)
@@ -2272,7 +2319,12 @@ def _rank(
     if top_k <= MAX_CANDIDATES:
         unique: dict[str, tuple[int, float, str, VaultEntry, tuple[str, ...]]] = {}
         for candidate in ranked:
-            content_key = candidate[3].content_key or candidate[2]
+            content_key = _entry_content_key(
+                candidate[3],
+                include_history=include_history,
+                exclude_historical_material=exclude_historical_material,
+                exclude_current_material=exclude_current_material,
+            )
             previous = unique.get(content_key)
             if previous is not None:
                 if current_query and candidate[3].status == "active" and previous[3].status != "active":
