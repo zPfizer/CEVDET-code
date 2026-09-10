@@ -53,7 +53,7 @@ CREDENTIAL_NAME_RE = re.compile(rf'(?i)^(?:{CREDENTIAL_NAME})$')
 CREDENTIAL = re.compile(
     r'''(?im)(?P<prefix>(?P<key_quote>["']?)\b(?P<key>''' + CREDENTIAL_NAME + r''')'''
     r'''(?P=key_quote)\s*[:=]\s*)'''
-    r'''(?P<value>[{\[]|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^\s\r\n]+)'''
+    r'''(?P<value>[{\[]|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|(?:\\[\s\S]|[^\s\\])+)'''
 )
 BATCH_CREDENTIAL = re.compile(
     r'''(?im)(?P<prefix>\bset\s+(?P<quote>["']))(?P<key>''' + CREDENTIAL_NAME + r''')\s*=\s*'''
@@ -965,10 +965,11 @@ def sanitize_text(
     json_string: tuple[int, int, bool, str, int | None, int | None] | None = None
     pieces: list[str] = []
     cursor = 0
-    while match := CREDENTIAL.search(text, cursor):
+    search_cursor = 0
+    while match := CREDENTIAL.search(text, search_cursor):
         line_start = text.rfind('\n', 0, match.start()) + 1
         if BATCH_ASSIGNMENT_PREFIX.search(text[line_start:match.start()]):
-            cursor = match.end()
+            search_cursor = match.end()
             continue
         while json_string is None or json_string[1] <= match.start():
             json_string = next(json_strings, None)
@@ -979,6 +980,7 @@ def sanitize_text(
                 raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
             pieces.extend((text[cursor:json_string[0]], text[json_string[0]:json_string[1]]))
             cursor = json_string[1]
+            search_cursor = json_string[1]
             continue
         end = match.end()
         if text[match.start('value')] in {'"', "'"}:
@@ -1011,6 +1013,7 @@ def sanitize_text(
                        else f"{match.group('key')}=<REDACTED>")
         pieces.extend((text[cursor:match.start()], replacement))
         cursor = end
+        search_cursor = end
     if pieces:
         text = ''.join(pieces) + text[cursor:]
     if pieces and 'credential' not in redactions:

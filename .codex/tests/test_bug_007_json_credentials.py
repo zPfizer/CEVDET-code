@@ -393,6 +393,29 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         ):
             ledger.sanitize_text(text, max_chars=None)
 
+    def test_unquoted_credential_value_consumes_escaped_whitespace(self) -> None:
+        text = r'DATABASE_PASSWORD=FIRST\ SECOND_SECRET'
+
+        sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+
+        self.assertEqual(sanitized, 'DATABASE_PASSWORD=<REDACTED>')
+        self.assertEqual(redactions, ('credential',))
+        self.assertNotIn('SECOND_SECRET', sanitized)
+
+    def test_batch_skip_keeps_buffered_context_from_earlier_credential(self) -> None:
+        text = 'password=foo\nkeep this decision\nset "DATABASE_PASSWORD=bar"\nimportant tail'
+
+        sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+
+        self.assertEqual(
+            sanitized,
+            'password=<REDACTED>\n'
+            'keep this decision\n'
+            'set "DATABASE_PASSWORD=<REDACTED>"\n'
+            'important tail',
+        )
+        self.assertEqual(redactions, ('credential',))
+
     def test_normal_suffixed_identifiers_are_not_secrets(self) -> None:
         for text in (
             'max_token=4096',
