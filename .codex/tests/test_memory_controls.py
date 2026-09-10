@@ -95,6 +95,7 @@ class MemoryDirectiveTests(unittest.TestCase):
             '"C:\\Temp\\rapor.şablon"yi düzelt.',
             "kimin.py dosyasını düzelt.",
             r"src/kimin dosyasını düzelt.",
+            "Kimya dosyasını düzeltebilir misin?",
             "Projeyi düzelt.",
             "Atlas projesini güncelle.",
             "Atlas projesini güncelleyebilir misin?",
@@ -136,10 +137,15 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Hiç Atlas projesindeki ayarı güncelle.",
             "Onaylansa Atlas modülündeki dosyayı yazabilir misin?",
             "Kimin dosyasını düzeltebilir misin?",
+            "Kimlerin dosyasını düzeltebilir misin?",
             "Neredeki dosyayı düzeltebilir misin?",
+            "Nerelerdeki dosyayı düzeltebilir misin?",
             "Kaçıncı dosyayı düzeltebilir misin?",
+            "Kaçıncısının dosyasını düzeltebilir misin?",
             "Hangisinin dosyasını düzeltebilir misin?",
+            "Hangilerinin dosyasını düzeltebilir misin?",
             "Neyin dosyasını düzeltebilir misin?",
+            "Nelerin dosyasını düzeltebilir misin?",
         ):
             with self.subTest(prompt=prompt):
                 self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))

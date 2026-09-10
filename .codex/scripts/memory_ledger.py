@@ -256,14 +256,31 @@ CONDITIONAL_WRITE = re.compile(
     rf"\b\w+m[ae]{_CONDITIONAL_PERSON}\b|"
     r"\b(?:takdirde|halinde|durumunda|sonra|kadar)\b"
 )
+_QUESTION_PLURAL_SUFFIX = (
+    r"ler(?:inin|ine|ini|inde|inden|indeki|in(?:de|den)?|e|i|de|den)?"
+)
+_QUESTION_NE = (
+    rf"ne(?:yin|ye|yi|de|den|{_QUESTION_PLURAL_SUFFIX}(?:ki)?|"
+    r"si(?:nin|ne|ni|nde|nden|ndeki)?)?"
+)
+_QUESTION_HANGI = (
+    rf"hangi(?:si(?:nin|ne|ni|nde|nden|ndeki)?|"
+    rf"{_QUESTION_PLURAL_SUFFIX}(?:ki)?|nin|ne|yi|de|den|deki)?"
+)
+_QUESTION_KIM = (
+    rf"kim(?:in|e|i|de|den|{_QUESTION_PLURAL_SUFFIX}(?:ki)?)?(?:ki)?"
+)
+_QUESTION_NERE = (
+    rf"nere(?:si(?:nin|ne|ni|nde|nden|ndeki)?|"
+    rf"{_QUESTION_PLURAL_SUFFIX}(?:ki)?|nin|ye|yi|de|den|deki)?"
+)
+_QUESTION_KAC = (
+    r"kaç(?:ıncı(?:sı(?:nın|na|nı|nda|ndan|ndaki)?|"
+    r"lar(?:ın|a|ı|da|dan)?(?:ki)?)?|ın|a|ı|ta|tan)?"
+)
 ACTION_QUESTION_WORD = re.compile(
-    r"\b(?:"
-    r"ne(?:yin|ye|yi|de|den)?|nasıl|niçin|"
-    r"hangi(?:si(?:nin|ne|ni|nde|nden)?|nin|ne|yi|de|den|deki)?|"
-    r"kim(?:in|e|i|de|den)?|"
-    r"nere(?:si|nin|ye|yi|de|den|deki)?|"
-    r"kaç(?:ıncı|ın|a|ı|ta|tan)?|ne\s+zaman"
-    r")\b"
+    rf"\b(?:{_QUESTION_NE}|nasıl|niçin|{_QUESTION_HANGI}|"
+    rf"{_QUESTION_KIM}|{_QUESTION_NERE}|{_QUESTION_KAC}|ne\s+zaman)\b"
 )
 _NAMED_TARGET = re.compile(
     rf"^(?P<name>[\w.-]+)\s+(?:{_WRITE_PROJECT_OBJECT}|"
