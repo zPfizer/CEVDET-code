@@ -27,6 +27,8 @@ SOURCE_DIR = Path('📥 000-Inbox/Paylaşılan Kaynaklar')
 MAX_SOURCE_BYTES = 256 * 1024
 MAX_SOURCE_CHARS = 100_000
 MAX_SOURCES = 30
+# Keep in sync with additionalContextLimit in .codex/hooks.json.
+MAX_SUMMARY_CHARS = 8_000
 MAPPING_SCHEMA_VERSION = 1
 ATTACHMENT_ID = re.compile(r'[0-9a-fA-F-]{36}\Z')
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
@@ -200,7 +202,7 @@ def _summary_from_model(summarize: Callable[[str], str], source: str) -> str | N
     )
     if summary == 'FLUSH_BOS':
         return None
-    if not isinstance(summary, str) or len(summary) > 8000:
+    if not isinstance(summary, str) or len(summary) > MAX_SUMMARY_CHARS:
         raise ValueError('attachment-summary-invalid')
     return sanitize_text(summary)[0]
 

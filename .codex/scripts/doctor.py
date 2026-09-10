@@ -66,6 +66,12 @@ MACHINE_CHECKPOINT_SCOPES = ("daily/", "knowledge/")
 HOOK_RUNTIME_MAX_AGE_SECONDS = 2 * 60 * 60
 SESSION_START_PROMPT_GRACE_SECONDS = 5 * 60
 FLUSH_INFLIGHT_MAX_AGE_SECONDS = 5 * 60
+# State retention warning thresholds (_state_retention_check).
+STATE_TOTAL_BYTES_WARN = 32 * 1024 * 1024
+STATE_SESSION_FILES_WARN = 256
+STATE_RUNTIME_FILES_WARN = 512
+STATE_LOCK_FILES_WARN = 512
+STATE_OLDEST_AGE_WARN_SECONDS = 30 * 24 * 60 * 60
 SESSION_START_REQUIRED_SECTIONS = {
     *(f"Hafıza: {title}" for title in SESSION_SECTION_TARGET_CHARS),
     "Hafıza Protokolü",
@@ -1178,11 +1184,11 @@ def _state_retention_check(ctx: Context) -> Check:
     if cache_bytes > MAX_CACHE_BYTES:
         return Check("State retention", "FAIL", evidence)
     if (
-        total_bytes > 32 * 1024 * 1024
-        or registry > 256
-        or runtime > 512
-        or locks > 512
-        or oldest_age > 30 * 24 * 60 * 60
+        total_bytes > STATE_TOTAL_BYTES_WARN
+        or registry > STATE_SESSION_FILES_WARN
+        or runtime > STATE_RUNTIME_FILES_WARN
+        or locks > STATE_LOCK_FILES_WARN
+        or oldest_age > STATE_OLDEST_AGE_WARN_SECONDS
     ):
         return Check("State retention", "WARN", evidence)
     return Check("State retention", "OK", evidence)
