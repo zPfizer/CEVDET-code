@@ -155,6 +155,7 @@ PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisis
 CURRENT_QUERY_TERMS = frozenset({"current", "guncel", "latest", "active", "aktif"})
 CURRENT_QUERY_CUE = r"(?:current|guncel|latest|active|aktif)"
 CURRENT_HISTORY_CONNECTOR = re.compile(r"(?i)(?:[,;]|\b(?:with|versus|vs|compare|and|or|ve|to|ile|against)\b)")
+SCOPE_COMMAND_TERMS = frozenset({"show", "list", "display", "give", "goster", "listele", "ver"})
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
     "work", "prefer", "response", "reply", "style", "profile",
@@ -218,7 +219,7 @@ HISTORY_CONTEXT_SURFACE_TERMS = frozenset(
 HISTORY_DIRECTIONAL_PAST = re.compile(
     r"(?i)\bpast(?:\s+(?:(?:the|my|your|his|her|its|our|their)\s+)?(?:due|deadline)s?)\b"
 )
-HISTORY_CLAUSE_SPLIT = re.compile(r"(?i)(?:;|\b(?:and|or|ve)\b)")
+HISTORY_CLAUSE_SPLIT = re.compile(r"(?i)(?:[,;]|\b(?:and|or|ve)\b)")
 HISTORY_CONTEXT_MARKER = r"(?:past|previous|onceki\w*)"
 HISTORY_CONTEXT_GAP = r"(?:\W+\w+){0,2}(?:\W+(?:and|or|ve)\b(?:\W+\w+){1,2})?"
 # `eskime` is the noun/verb form for tarnishing and must not be read as `eski` + suffix.
@@ -256,8 +257,8 @@ HISTORY_DATE_QUESTION = re.compile(
     r"(?i)\btarih(?:i|in|ini|inin|ine|e|te|ten)?\b"
     r"(?:\W+\w+){0,3}\W+(?:nedir|ne|hangi|kac|goster|show|display)\b"
 )
-HISTORY_IDENTIFIER_YEAR = re.compile(
-    r"(?i)(?:#|\b(?:ticket|port)\b)[\s#:/-]*+(?:(?P<year>\d{4})(?!\w))?"
+HISTORY_IDENTIFIER = re.compile(
+    r"(?i)(?:#|\b(?:ticket|port|issue|bug|rfc|case|task)\b)[\s#:/-]*+(?:(?P<identifier>\d[\w.-]*))?"
 )
 
 
@@ -1327,13 +1328,12 @@ def _date_bounds(year: int, month: int, day: int | None = None) -> tuple[date, d
 
 def _date_references(query: str) -> tuple[_HistoryDateReference, ...]:
     """Parse date-shaped matches while retaining their spans and period bounds."""
-    normalized = _normalize(query)
+    normalized = HISTORY_IDENTIFIER.sub(
+        lambda match: " " * len(match[0])
+        if match.group("identifier") is not None else match[0],
+        _normalize(query),
+    )
     references: list[_HistoryDateReference] = []
-    identifier_year_starts = {
-        match.start("year")
-        for match in HISTORY_IDENTIFIER_YEAR.finditer(normalized)
-        if match.group("year") is not None
-    }
     for match in HISTORY_DATE.finditer(normalized):
         groups = match.groupdict()
         if groups["ymd_year"] is not None:
@@ -1378,8 +1378,6 @@ def _date_references(query: str) -> tuple[_HistoryDateReference, ...]:
         elif groups["my_year"] is not None:
             year, month, day = int(groups["my_year"]), HISTORY_MONTHS[groups["my_month"]], None
         else:
-            if match.start() in identifier_year_starts:
-                continue
             value = _date_value(int(groups["year"]), 1, 1)
             bounds = None if value is None else (value, date(value.year, 12, 31))
             references.append(_HistoryDateReference(
@@ -1472,7 +1470,17 @@ def _has_history_context(query: str) -> bool:
         rf"|\b(?:{context_terms})\b{HISTORY_CONTEXT_GAP}\W+\b{HISTORY_CONTEXT_MARKER}\b"
         rf")"
     )
-    delimiters = tuple(HISTORY_CLAUSE_SPLIT.finditer(query))
+    date_references = _date_references(query)
+    date_starts = tuple(sorted(reference.start for reference in date_references))
+    date_ends = tuple(sorted(reference.end for reference in date_references))
+    delimiters = tuple(
+        delimiter
+        for delimiter in HISTORY_CLAUSE_SPLIT.finditer(query)
+        if not (
+            (date_index := bisect_right(date_starts, delimiter.start()) - 1) >= 0
+            and delimiter.start() < date_ends[date_index]
+        )
+    )
     delimiter_starts = tuple(delimiter.start() for delimiter in delimiters)
     delimiter_ends = tuple(delimiter.end() for delimiter in delimiters)
     clause_status: dict[tuple[int, int], bool | None] = {}
@@ -1761,6 +1769,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
         term for term in _retrieval_terms(current_scope)
         if term not in CURRENT_QUERY_TERMS
         and term not in scope_connector_terms
+        and term not in SCOPE_COMMAND_TERMS
         and term not in HISTORY_QUERY_TERMS
         and not term.isdigit()
         and not any(_matches_history_inflection(term, root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
@@ -1774,6 +1783,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
             token in CURRENT_QUERY_TERMS
             or token in HISTORY_QUERY_TERMS
             or token in scope_connector_terms
+            or token in SCOPE_COMMAND_TERMS
             or token.isdigit()
             or any(_matches_history_inflection(token, root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
         ):

@@ -545,6 +545,10 @@ Eylül etiket denetimi.
                 "compare current work profiles",
                 "historical work profiles",
             ),
+            "show current and historical work profiles": (
+                "show current work profiles",
+                "historical work profiles",
+            ),
         }
         for query, expected in cases.items():
             with self.subTest(query=query):
@@ -863,6 +867,13 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "past records": True,
             "past records for ticket #2030": True,
             "past records for port 8080": True,
+            "past records for issue #2030": True,
+            "past records for bug 2030": True,
+            "past records for issue 2030-09-10": True,
+            "past hook records, 2030 roadmap": True,
+            "my work profile issue 2024": False,
+            "my work profile RFC 2024": False,
+            "my work profile issue 2024-09-10": False,
             "show work that is past due": False,
             "show projects past deadline": False,
             "show projects past their deadline": False,
