@@ -1533,7 +1533,7 @@ def _has_history_context(query: str) -> bool:
     return False
 
 
-def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
+def _has_history_query_cues(query_terms: frozenset[str], query: str = "") -> bool:
     # ponytail: `tarih` alone is ambiguous date/history wording; explicit history cues widen recall.
     history_terms = query_terms & HISTORY_QUERY_TERMS
     has_inflected_history = any(
@@ -1583,6 +1583,13 @@ def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
     )
 
 
+def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
+    return _has_history_query_cues(query_terms, query) and not _is_ambiguous_history_feature_query(
+        query,
+        query_terms,
+    )
+
+
 def _entry_lines(
     entry: VaultEntry,
     *,
@@ -1593,6 +1600,8 @@ def _entry_lines(
     if exclude_historical_material and exclude_current_material:
         return ()
     if exclude_current_material and entry.schema.casefold() == "knowledge-v2":
+        if _is_historical_preference_material(entry):
+            return entry.safe_lines
         return entry.historical_lines
     if exclude_historical_material and entry.historical_lines:
         return tuple(line for line in entry.safe_lines if line not in entry.historical_lines)
@@ -1638,6 +1647,10 @@ def _entry_body_terms(
     if exclude_historical_material and exclude_current_material:
         return Counter()
     if exclude_current_material and entry.schema.casefold() == "knowledge-v2":
+        if _is_historical_preference_material(entry):
+            terms = Counter(entry.body_terms)
+            terms.update(entry.historical_body_terms)
+            return terms
         return Counter(entry.historical_body_terms)
     if exclude_historical_material:
         return entry.body_terms
@@ -1867,8 +1880,8 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     right_terms = _retrieval_terms(right)
     left_current = bool(left_terms & CURRENT_QUERY_TERMS)
     right_current = bool(right_terms & CURRENT_QUERY_TERMS)
-    left_history = _is_history_query(left_terms, left)
-    right_history = _is_history_query(right_terms, right)
+    left_history = _has_history_query_cues(left_terms, left)
+    right_history = _has_history_query_cues(right_terms, right)
     if left_current and right_history and not right_current and not left_history:
         current_scope, history_scope = left, right
     elif right_current and left_history and not left_current and not right_history:
@@ -1904,12 +1917,12 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     if current_topic_terms and not history_topic_terms:
         history_scope = f"{history_scope} {' '.join(current_topic_terms)}"
         history_terms = _retrieval_terms(history_scope)
-        if history_terms & CURRENT_QUERY_TERMS or not _is_history_query(history_terms, history_scope):
+        if history_terms & CURRENT_QUERY_TERMS or not _has_history_query_cues(history_terms, history_scope):
             return None
     elif history_topic_terms and not current_topic_terms:
         current_scope = f"{current_scope} {' '.join(history_topic_terms)}"
         current_terms = _retrieval_terms(current_scope)
-        if not current_terms & CURRENT_QUERY_TERMS or _is_history_query(current_terms, current_scope):
+        if not current_terms & CURRENT_QUERY_TERMS or _has_history_query_cues(current_terms, current_scope):
             return None
     elif not current_topic_terms:
         return None
@@ -1965,7 +1978,7 @@ def _is_ambiguous_history_feature_query(
         normalized,
     )
     masked = re.sub(r"(?i)\bhistory\b", lambda match: " " * len(match[0]), masked)
-    if _is_history_query(_retrieval_terms(masked), masked):
+    if _has_history_query_cues(_retrieval_terms(masked), masked):
         return False
     words = tuple(re.finditer(r"(?<!\w)[\w]+(?!\w)", normalized))
     for index, word in enumerate(words):
@@ -1982,14 +1995,9 @@ def _should_preserve_current_stale_penalty(
     query_terms: frozenset[str],
 ) -> bool:
     return bool(
-        _is_history_query(query_terms, query)
-        and (
-            _is_ambiguous_history_feature_query(query, query_terms)
-            or (
-                query_terms & CURRENT_QUERY_TERMS
-                and _has_independent_current_cue(query)
-            )
-        )
+        _has_history_query_cues(query_terms, query)
+        and query_terms & CURRENT_QUERY_TERMS
+        and _has_independent_current_cue(query)
     )
 
 
@@ -2136,12 +2144,6 @@ def _rank(
     })
     eligible_entries = []
     for entry in entries:
-        if (
-            entry.schema.casefold() == "knowledge-v2"
-            and exclude_current_material
-            and not entry.historical_lines
-        ):
-            continue
         if (
             (exclude_historical_material and _is_historical_preference_material(entry))
             or (exclude_current_material and _is_current_material(entry))
