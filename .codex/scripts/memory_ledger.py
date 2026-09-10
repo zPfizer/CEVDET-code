@@ -287,7 +287,8 @@ def _targeted_write_matches(pattern: re.Pattern[str], folded: str) -> bool:
     if match is None:
         return False
     if _CONCRETE_WRITE_VERB.fullmatch(match.group("mutation")) is not None:
-        return _CONCRETE_WRITE_TARGET.fullmatch(match.group("target")) is not None
+        if _CONCRETE_WRITE_TARGET.fullmatch(match.group("target")) is None:
+            return False
     named_target = _NAMED_TARGET.fullmatch(match.group("target"))
     if named_target is None:
         return True

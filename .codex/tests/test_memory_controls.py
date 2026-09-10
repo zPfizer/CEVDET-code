@@ -115,6 +115,12 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Kodu yazabilir misin?",
             "Bunu yazabilir misin?",
             "Şunu oluşturabilir misin?",
+            "Onaylansa dosyayı oluştur.",
+            "Gelse dosyasını yaz.",
+            "Hiç dosyayı güncelle.",
+            "Onaylansa dosyayı oluşturabilir misin?",
+            "Gelse dosyasını yazabilir misin?",
+            "Hiç dosyayı güncelleyebilir misin?",
         ):
             with self.subTest(prompt=prompt):
                 self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
