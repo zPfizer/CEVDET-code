@@ -151,6 +151,20 @@ HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES = {
     )
     for stem_type, suffixes in HISTORY_QUERY_INFLECTION_SUFFIXES.items()
 }
+# Shared bounded family for Turkish change nouns. `degisiklig` covers the
+# consonant-softened forms such as `değişikliği` after normalization.
+HISTORY_CHANGE_NOUN_ROOTS = frozenset({"degisiklik", "degisiklig", "degisim"})
+HISTORY_CHANGE_NOUN_SURFACE_TERMS = frozenset(
+    {root for root in HISTORY_CHANGE_NOUN_ROOTS}
+    | {
+        root + suffix
+        for root in HISTORY_CHANGE_NOUN_ROOTS
+        for suffix in HISTORY_QUERY_INFLECTION_SUFFIXES["consonant"]
+    }
+)
+HISTORY_CHANGE_NOUN_PATTERN = "|".join(
+    map(re.escape, sorted(HISTORY_CHANGE_NOUN_SURFACE_TERMS, key=len, reverse=True))
+)
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
 CURRENT_QUERY_TERMS = frozenset({"current", "guncel", "latest", "active", "aktif"})
 CURRENT_QUERY_CUE = r"(?:current|guncel|latest|active|aktif)"
@@ -163,6 +177,13 @@ PERSONAL_WORK_TERMS = frozenset({
 HISTORY_CHANGE_TEMPORAL = r"(?:today|yesterday|recent|recently|earlier|last\s+(?:day|week|month|year))"
 HISTORY_NOMINAL_CHANGE_QUERY = re.compile(
     rf"(?ix)(?:\bchanged\b\s+{HISTORY_CHANGE_TEMPORAL}\b|\b{HISTORY_CHANGE_TEMPORAL}\b\s+changes?\b)"
+)
+# Turkish `son` plus a change noun asks for the latest completed changes; keep
+# the noun forms bounded so ordinary plans and files stay current.
+HISTORY_TURKISH_NOMINAL_CHANGE_QUERY = re.compile(
+    r"(?ix)\bson\b"
+    r"(?:\W+\w+){0,2}\W+"
+    rf"\b(?:{HISTORY_CHANGE_NOUN_PATTERN})\b"
 )
 HISTORY_CHANGE_TAIL = (
     rf"(?:\s*(?:[?!.,;:]|$)|\s+{HISTORY_CHANGE_TEMPORAL}\b"
@@ -191,20 +212,21 @@ HISTORY_CHANGE_QUERY = re.compile(
 # A noun that denotes a stored or completed record makes that ordering historical.
 HISTORY_CONTEXT_TERMS = frozenset({
     "archive", "archives", "arsiv", "arsivler", "change", "changes", "decision", "decisions",
-    "degisim", "degisimler", "event", "events", "history", "histories", "kayit", "kayitlar",
+    "event", "events", "history", "histories", "kayit", "kayitlar",
     "log", "logs", "olay", "olaylar", "record", "records", "report", "reports",
     "timeline", "version", "versions", "surum", "surumler", "karar", "kararlar", "donem", "donemler",
     "performance", "experience", "work", "result", "results", "project", "projects",
     "contract", "contracts", "sozlesme", "sozlesmesi", "sozlesmeler",
-})
+}) | HISTORY_CHANGE_NOUN_ROOTS
 HISTORY_CONTEXT_INFLECTION_ROOTS = frozenset({
     "kayit", "kayitlar", "kayd", "karar", "kararlar", "surum", "surumler",
-    "degisim", "degisimler", "olay", "olaylar", "arsiv", "arsivler",
+    "olay", "olaylar", "arsiv", "arsivler",
     "rapor", "raporlar", "donem", "donemler", "proje", "projeler",
     "sonuc", "sonuclar", "calisma", "calismalar",
 })
 HISTORY_CONTEXT_SURFACE_TERMS = frozenset(
     set(HISTORY_CONTEXT_TERMS)
+    | HISTORY_CHANGE_NOUN_SURFACE_TERMS
     | {
         root + suffix
         for root in HISTORY_CONTEXT_INFLECTION_ROOTS
@@ -1513,6 +1535,9 @@ def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
     )
     has_retrospective_change = bool(query and HISTORY_CHANGE_QUERY.search(_normalize(query)))
     has_nominal_change = bool(query and HISTORY_NOMINAL_CHANGE_QUERY.search(_normalize(query)))
+    has_turkish_nominal_change = bool(
+        query and HISTORY_TURKISH_NOMINAL_CHANGE_QUERY.search(_normalize(query))
+    )
     unambiguous_history_terms = history_terms - {"before", "past", "previous", "onceki"}
     if ambiguous_date_question:
         unambiguous_history_terms -= {"tarih"}
@@ -1520,6 +1545,7 @@ def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
         has_inflected_history
         or has_retrospective_change
         or has_nominal_change
+        or has_turkish_nominal_change
         or unambiguous_history_terms
     ):
         return True
@@ -1528,7 +1554,7 @@ def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
         and (
             _has_history_context(query)
             if query
-            else bool(query_terms & HISTORY_CONTEXT_TERMS)
+            else bool(query_terms & HISTORY_CONTEXT_SURFACE_TERMS)
         )
     ):
         return True
@@ -1696,7 +1722,11 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
             for root in {"onceki", "tarih"}
         ):
             weak_history_spans.add(span)
-    for pattern in (HISTORY_CHANGE_QUERY, HISTORY_NOMINAL_CHANGE_QUERY):
+    for pattern in (
+        HISTORY_CHANGE_QUERY,
+        HISTORY_NOMINAL_CHANGE_QUERY,
+        HISTORY_TURKISH_NOMINAL_CHANGE_QUERY,
+    ):
         history_spans.update((match.start(), match.end()) for match in pattern.finditer(normalized))
     date_history_spans = {
         (reference.start, reference.end)

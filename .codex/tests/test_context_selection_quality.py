@@ -833,6 +833,15 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
     def test_history_markers_require_historical_context_and_past_dates(self) -> None:
         cases = {
             "what changed files should we deploy?": False,
+            "son değişiklik": True,
+            "son değişim": True,
+            "son değişiklikler": True,
+            "son değişiklikleri": True,
+            "son değişimleri": True,
+            "son değişikliği": True,
+            "önceki değişiklikleri göster": True,
+            "değişiklik planı": False,
+            "değişim dosyası": False,
             "dosyanın tarihi nedir?": False,
             "dosyanın tarih nedir?": False,
             "dosyanın tarihini göster": False,
@@ -951,7 +960,7 @@ type: work-packet
 status: completed
 ---
 # Hook Contract Conformance
-Hook sözleşmesi tamamlanmış uygulama kaydı; sözleşmesinde değişen kurallar burada tutulur.
+Hook sözleşmesi tamamlanmış uygulama kaydı; sözleşmesindeki son değişiklikleri gösteren paket; sözleşmesinde değişen kurallar burada tutulur.
 """,
             )
             _write(
@@ -964,7 +973,7 @@ title: Hook Protokolü
 # Hook Protokolü
 
 ## Kayıtlar
-- `gecmis` `kullanici-dusuncesi` `eski` 2026-09-01 [[daily/2026-09-01|Kaynak]] — Eski hook sözleşmesi (hook contract) geçmişte uygulanan kayıttır; sözleşmesinde eski kural vardı.
+- `gecmis` `kullanici-dusuncesi` `eski` 2026-09-01 [[daily/2026-09-01|Kaynak]] — Eski hook sözleşmesi (hook contract) geçmişte uygulanan kayıttır; sözleşmesindeki son değişiklikleri gösteren eski kural sözleşmesinde tutulur.
 - `gecmis` `kullanici-dusuncesi` `eski` 2026-09-02 [[daily/2026-09-02|Kaynak]] — Eski hook sözleşmesi geçmişten devralınan kayıttır.
 - `gecmis` `kullanici-dusuncesi` `eski` 2026-09-03 [[daily/2026-09-03|Kaynak]] — Eski hook sözleşmesi eskiden uygulanan kayıttır.
 """,
@@ -998,6 +1007,7 @@ title: Hook Protokolü
                 "hook sözleşmesinde ne değişti?",
                 "hook sözleşmesinde neler değişti?",
                 "hook sözleşmesi nasıl değişti?",
+                "hook sözleşmesindeki son değişiklikleri göster",
             ):
                 with self.subTest(query=query):
                     terms = retrieval._retrieval_terms(query)
