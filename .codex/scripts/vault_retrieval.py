@@ -256,7 +256,9 @@ HISTORY_DATE_QUESTION = re.compile(
     r"(?i)\btarih(?:i|in|ini|inin|ine|e|te|ten)?\b"
     r"(?:\W+\w+){0,3}\W+(?:nedir|ne|hangi|kac|goster|show|display)\b"
 )
-HISTORY_IDENTIFIER_YEAR = re.compile(r"(?i)(?:#|\b(?:ticket|port)\b)[\s#:/-]*$")
+HISTORY_IDENTIFIER_YEAR = re.compile(
+    r"(?i)(?:#|\b(?:ticket|port)\b)[\s#:/-]*(?P<year>\d{4})(?!\w)"
+)
 
 
 @dataclass(frozen=True)
@@ -1327,6 +1329,10 @@ def _date_references(query: str) -> tuple[_HistoryDateReference, ...]:
     """Parse date-shaped matches while retaining their spans and period bounds."""
     normalized = _normalize(query)
     references: list[_HistoryDateReference] = []
+    identifier_year_starts = {
+        match.start("year")
+        for match in HISTORY_IDENTIFIER_YEAR.finditer(normalized)
+    }
     for match in HISTORY_DATE.finditer(normalized):
         groups = match.groupdict()
         if groups["ymd_year"] is not None:
@@ -1371,7 +1377,7 @@ def _date_references(query: str) -> tuple[_HistoryDateReference, ...]:
         elif groups["my_year"] is not None:
             year, month, day = int(groups["my_year"]), HISTORY_MONTHS[groups["my_month"]], None
         else:
-            if HISTORY_IDENTIFIER_YEAR.search(normalized[:match.start()]):
+            if match.start() in identifier_year_starts:
                 continue
             value = _date_value(int(groups["year"]), 1, 1)
             bounds = None if value is None else (value, date(value.year, 12, 31))
@@ -1688,6 +1694,8 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
         for reference in _date_references(normalized)
         if reference.start_date is not None and reference.end_date is not None
     }
+    date_starts = tuple(sorted(start for start, _end in date_history_spans))
+    date_ends = tuple(sorted(end for _start, end in date_history_spans))
     history_spans.update(date_history_spans)
     if not history_spans:
         return None
@@ -1702,7 +1710,8 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     weak_ends = tuple(sorted(end for _start, end in weak_history_spans))
     candidates: list[tuple[bool, int, int, int, int]] = []
     for normalized_start, normalized_end, raw_start, raw_end in connector_spans:
-        if any(start < normalized_start < end for start, end in date_history_spans):
+        date_index = bisect_right(date_starts, normalized_start) - 1
+        if date_index >= 0 and normalized_start < date_ends[date_index]:
             continue
         current_left = bisect_right(current_ends, normalized_start)
         current_right = len(current_starts) - bisect_left(current_starts, normalized_end)
