@@ -4,9 +4,11 @@ from dataclasses import dataclass, field
 from contextlib import contextmanager
 import datetime as dt
 import hashlib
+import io
 import json
 from pathlib import Path, PurePosixPath
 import re
+import tokenize
 from typing import Callable, Iterator, Sequence
 import unicodedata
 
@@ -37,14 +39,16 @@ PRIVATE_KEY = re.compile(
     re.DOTALL,
 )
 AUTHORIZATION = re.compile(
-    r'''(?im)(?P<key_quote>["']?)\bauthorization(?P=key_quote)\s*:\s*'''
+    r'''(?im)(?P<prefix>(?P<key_quote>["']?)\bauthorization(?P=key_quote)\s*:\s*)'''
     r'''(?:"Bearer\s+(?:\\.|[^"\\\r\n])+"|'''
     r"""'Bearer\s+(?:\\.|[^'\\\r\n])+'|Bearer\s+[^\s\r\n]+)"""
 )
+CREDENTIAL_NAME = r'api[_-]?key|password|secret|token'
+CREDENTIAL_NAME_RE = re.compile(rf'(?i)^(?:{CREDENTIAL_NAME})$')
 CREDENTIAL = re.compile(
-    r'''(?im)(?P<key_quote>["']?)\b(?P<key>api[_-]?key|password|secret|token)'''
-    r'''(?P=key_quote)\s*[:=]\s*'''
-    r'''(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s\r\n]+)'''
+    r'''(?im)(?P<prefix>(?P<key_quote>["']?)\b(?P<key>''' + CREDENTIAL_NAME + r''')'''
+    r'''(?P=key_quote)\s*[:=]\s*)'''
+    r'''(?P<value>[{\[]|"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s\r\n]+)'''
 )
 TOKEN_PREFIX = re.compile(r"\b(?:sk(?=[-_])|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
 PERSONAL_CREDENTIAL = re.compile(
@@ -306,6 +310,208 @@ def memory_view_relative_path(relative: str) -> str:
     return f'.codex/private-memory/views/{_sha256_text(relative)}.md'
 
 
+def _balanced_value_end(text: str, start: int) -> int | None:
+    """Use the stdlib lexer for non-JSON brace values; never evaluate them."""
+    pairs = {')': '(', ']': '[', '}': '{'}
+    length = min(256, len(text) - start)
+    while True:
+        # Grow only the value window, not the remaining document for every field.
+        fragment = text[start:start + length]
+        stack: list[str] = []
+        try:
+            for token in tokenize.generate_tokens(io.StringIO(fragment).readline):
+                if token.type == tokenize.ERRORTOKEN and token.string in {'"', "'", '\\'}:
+                    break
+                if token.type != tokenize.OP:
+                    continue
+                if token.string in '([{':
+                    stack.append(token.string)
+                elif token.string in pairs:
+                    if not stack or stack.pop() != pairs[token.string]:
+                        return None
+                    if not stack:
+                        line, column = token.end
+                        return start + sum(len(part) + 1 for part in fragment.split('\n')[:line - 1]) + column
+        except (tokenize.TokenError, SyntaxError):
+            pass
+        if start + length >= len(text):
+            return None
+        length = min(length * 2, len(text) - start)
+
+
+def _json_regions(text: str) -> Iterator[tuple[int, int]]:
+    """Validated JSON containers and complete top-level JSON strings."""
+    decoder = json.JSONDecoder()
+    start = len(text) - len(text.lstrip())
+    if text[start:start + 1] == '"':
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except (ValueError, RecursionError):
+            pass
+        else:
+            if isinstance(value, str) and not text[end:].strip():
+                yield start, end
+                return
+    offset = 0
+    # ponytail: bound malformed-input retries to linear parse work; a streaming
+    # parser is only needed if legitimate inputs exhaust this budget.
+    remaining = 8 * len(text)
+    for opening in re.finditer(r'[\[{]', text):
+        if opening.start() < offset:
+            continue
+        try:
+            _, end = decoder.raw_decode(text, opening.start())
+        except json.JSONDecodeError as exc:
+            remaining -= max(1, exc.pos - opening.start())
+            if remaining < 0 or _decoded_credential_key(text[opening.start():exc.pos]):
+                raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+            offset = opening.start() + 1
+            continue
+        except (ValueError, RecursionError):
+            raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+        offset = end
+        boundary = end
+        while (boundary < len(text) and not text[boundary].isspace()
+               and not (text[boundary].isalnum() or text[boundary] == '_')):
+            boundary += 1
+        if boundary == len(text) or text[boundary].isspace():
+            yield opening.start(), end
+
+
+def _json_string_regions(
+    text: str,
+) -> Iterator[tuple[int, int, bool, str, int | None, int | None]]:
+    """Yield JSON string spans, decoded values, and key value spans."""
+    decoder = json.JSONDecoder()
+    previous_end = 0
+    for region_start, region_end in _json_regions(text):
+        if _decoded_credential_key(text[previous_end:region_start], escaped_only=True):
+            raise MemoryPreferenceError('memory-credential-container-unverifiable')
+        previous_end = region_end
+        cursor = region_start
+        while cursor < region_end:
+            opening = text.find('"', cursor, region_end)
+            if opening < 0:
+                break
+            try:
+                value, end = decoder.raw_decode(text, opening)
+            except (ValueError, RecursionError):
+                cursor = opening + 1
+                continue
+            if end > region_end:
+                break
+            tail = end
+            while tail < region_end and text[tail].isspace():
+                tail += 1
+            is_value = tail >= region_end or text[tail] != ':'
+            value_start = value_end = None
+            # Only credential fields need their complete value span. Decoding
+            # every ordinary key's subtree repeats work at each nesting level.
+            if not is_value and (CREDENTIAL_NAME_RE.fullmatch(value) or value.casefold() == 'authorization'):
+                value_start = tail + 1
+                while value_start < region_end and text[value_start].isspace():
+                    value_start += 1
+                try:
+                    _, value_end = decoder.raw_decode(text, value_start)
+                except (ValueError, RecursionError):
+                    cursor = tail + 1
+                    continue
+            yield opening, end, is_value, value, value_start, value_end
+            cursor = tail + 1 if tail < region_end and text[tail] == ':' else tail
+    if _decoded_credential_key(text[previous_end:], escaped_only=True):
+        raise MemoryPreferenceError('memory-credential-container-unverifiable')
+
+
+def _decoded_credential_key(text: str, *, escaped_only: bool = False) -> bool:
+    decoder = json.JSONDecoder()
+    cursor = 0
+    while cursor < len(text):
+        opening = text.find('"', cursor)
+        if opening < 0:
+            return False
+        try:
+            value, end = decoder.raw_decode(text, opening)
+        except (ValueError, RecursionError):
+            cursor = opening + 1
+            continue
+        tail = end
+        while tail < len(text) and text[tail].isspace():
+            tail += 1
+        if (not escaped_only or '\\' in text[opening:end]) and tail < len(text) and text[tail] == ':' and (
+            CREDENTIAL_NAME_RE.fullmatch(value) or value.casefold() == 'authorization'
+        ):
+            return True
+        if '\\' in text[opening:end] and contains_secret(value):
+            return True
+        cursor = end
+    return False
+
+
+def _redact_decoded_json(text: str) -> tuple[str, tuple[str, ...]]:
+    replacements: list[tuple[int, int, str]] = []
+    redactions: list[str] = []
+
+    def note(category: str) -> None:
+        if category not in redactions:
+            redactions.append(category)
+
+    skip_until = 0
+    for start, end, is_value, decoded, value_start, value_end in _json_string_regions(text):
+        if start < skip_until:
+            continue
+        if not is_value:
+            if (
+                value_start is not None
+                and value_end is not None
+                and CREDENTIAL_NAME_RE.fullmatch(decoded)
+            ):
+                replacements.append((value_start, value_end, json.dumps("<REDACTED>")))
+                note('credential')
+                skip_until = value_end
+            elif (
+                value_start is not None
+                and value_end is not None
+                and decoded.casefold() == 'authorization'
+            ):
+                try:
+                    decoded_value, decoded_end = json.JSONDecoder().raw_decode(text, value_start)
+                except (ValueError, RecursionError):
+                    continue
+                if decoded_end == value_end and isinstance(decoded_value, str):
+                    parts = decoded_value.split(None, 1)
+                    if len(parts) == 2 and parts[0].casefold() == 'bearer':
+                        replacements.append((value_start, value_end, json.dumps('Bearer <REDACTED>')))
+                        note('authorization')
+                        skip_until = value_end
+            continue
+        try:
+            nested, nested_redactions = sanitize_text(decoded, max_chars=None)
+        except RecursionError:
+            raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+        except MemoryPreferenceError:
+            replacements.append((start, end, json.dumps("<REDACTED>")))
+            note('credential')
+            continue
+        for category in nested_redactions:
+            note(category)
+        if nested != decoded:
+            replacements.append((start, end, json.dumps(nested)))
+        elif _decoded_credential_key(decoded) or CREDENTIAL.search(decoded):
+            replacements.append((start, end, json.dumps("<REDACTED>")))
+            note('credential')
+    if not replacements:
+        return text, tuple(redactions)
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, replacement in sorted(replacements):
+        if start < cursor:
+            continue
+        pieces.extend((text[cursor:start], replacement))
+        cursor = end
+    pieces.append(text[cursor:])
+    return ''.join(pieces), tuple(redactions)
+
+
 _MEMORY_VIEW_IDENTIFIER = re.compile(
     r'^\.codex/private-memory/views/(?P<digest>[0-9a-f]{64})\.md$'
 )
@@ -339,21 +545,97 @@ def sanitize_text(
 ) -> tuple[str, tuple[str, ...]]:
     redactions: list[str] = []
 
-    def replace(
+    def replace_outside_json_values(
         pattern: re.Pattern[str],
         replacement: str | Callable[[re.Match[str]], str],
         category: str,
     ) -> None:
         nonlocal text
-        text, count = pattern.subn(replacement, text)
-        if count and category not in redactions:
+        spans = [(record[0], record[1]) for record in _json_string_regions(text) if record[2]]
+        pieces: list[str] = []
+        cursor = span_index = 0
+        for match in pattern.finditer(text):
+            if match.start() < cursor:
+                continue
+            while span_index < len(spans) and spans[span_index][1] <= match.start():
+                span_index += 1
+            if span_index < len(spans) and spans[span_index][0] <= match.start():
+                continue
+            end = match.end()
+            opening = re.search(r'[\[{]', match.group())
+            if opening is not None and pattern is not PRIVATE_KEY:
+                value_end = _balanced_value_end(text, match.start() + opening.start())
+                if value_end is None:
+                    raise MemoryPreferenceError('memory-credential-container-unverifiable')
+                end = max(end, value_end)
+                while end < len(text) and not text[end].isspace():
+                    end += 1
+            value = replacement(match) if callable(replacement) else match.expand(replacement)
+            pieces.extend((text[cursor:match.start()], value))
+            cursor = end
+        if pieces:
+            text = ''.join(pieces) + text[cursor:]
+        if pieces and category not in redactions:
             redactions.append(category)
 
-    replace(PRIVATE_KEY, "<REDACTED>", "private-key")
-    replace(AUTHORIZATION, "Authorization: Bearer <REDACTED>", "authorization")
-    replace(CREDENTIAL, lambda match: f"{match.group('key')}=<REDACTED>", "credential")
-    replace(TOKEN_PREFIX, "<REDACTED>", "credential")
-    replace(PERSONAL_CREDENTIAL, "<REDACTED>", "credential")
+    text, decoded_redactions = _redact_decoded_json(text)
+    for category in decoded_redactions:
+        if category not in redactions:
+            redactions.append(category)
+    replace_outside_json_values(PRIVATE_KEY, "<REDACTED>", "private-key")
+    replace_outside_json_values(AUTHORIZATION,
+            lambda match: (f'{match.group("prefix")}"Bearer <REDACTED>"' if match.group('key_quote')
+                           else "Authorization: Bearer <REDACTED>"),
+            "authorization")
+    regions = _json_regions(text)
+    json_strings = _json_string_regions(text)
+    region: tuple[int, int] | None = None
+    json_string: tuple[int, int, bool, str, int | None, int | None] | None = None
+    pieces: list[str] = []
+    cursor = 0
+    while match := CREDENTIAL.search(text, cursor):
+        while json_string is None or json_string[1] <= match.start():
+            json_string = next(json_strings, None)
+            if json_string is None:
+                break
+        if json_string is not None and json_string[0] < match.start() < json_string[1]:
+            if not json_string[2]:
+                raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+            pieces.extend((text[cursor:json_string[0]], text[json_string[0]:json_string[1]]))
+            cursor = json_string[1]
+            continue
+        end = match.end()
+        if text[match.start('value')] in '{[':
+            quoted_field = False
+            try:
+                _, end = json.JSONDecoder().raw_decode(text, match.start('value'))
+            except (ValueError, RecursionError):
+                end = _balanced_value_end(text, match.start('value'))
+                if end is None:
+                    raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+            else:
+                while region is None or region[1] <= match.start():
+                    region = next(regions, None)
+                    if region is None:
+                        break
+                quoted_field = (region is not None and region[0] <= match.start() and end <= region[1]
+                                and match.group('key_quote') == '"' and match.group('prefix').rstrip().endswith(':'))
+            if (not quoted_field and match.group('key_quote')
+                    and match.group('prefix').rstrip().endswith(':') and text[end:].strip()):
+                raise MemoryPreferenceError('memory-credential-container-unverifiable')
+            if not quoted_field:
+                while end < len(text) and not text[end].isspace():
+                    end += 1
+        replacement = (f'{match.group("prefix")}"<REDACTED>"' if match.group('key_quote')
+                       else f"{match.group('key')}=<REDACTED>")
+        pieces.extend((text[cursor:match.start()], replacement))
+        cursor = end
+    if pieces:
+        text = ''.join(pieces) + text[cursor:]
+    if pieces and 'credential' not in redactions:
+        redactions.append('credential')
+    replace_outside_json_values(TOKEN_PREFIX, "<REDACTED>", "credential")
+    replace_outside_json_values(PERSONAL_CREDENTIAL, "<REDACTED>", "credential")
 
     if max_chars is not None and max_chars < 1:
         raise ValueError("max-event-chars-invalid")
@@ -372,16 +654,10 @@ def sanitize_text(
 
 
 def contains_secret(text: str) -> bool:
-    return any(
-        pattern.search(text) is not None
-        for pattern in (
-            PRIVATE_KEY,
-            AUTHORIZATION,
-            CREDENTIAL,
-            TOKEN_PREFIX,
-            PERSONAL_CREDENTIAL,
-        )
-    )
+    try:
+        return bool(sanitize_text(text, max_chars=None)[1])
+    except MemoryPreferenceError:
+        return True
 
 
 def memory_directive(text: str) -> MemoryDirective:
