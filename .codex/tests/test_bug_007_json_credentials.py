@@ -106,24 +106,43 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 '{"authorization":"Bearer TOPSECRET","keep":"ordinary"}',
                 {"authorization": "Bearer <REDACTED>", "keep": "ordinary"},
                 "TOPSECRET",
+                "authorization",
             ),
             (
                 r'{"\u0061uthorization":"Bearer ESCAPED_AUTH_SECRET","keep":"ordinary"}',
                 {"authorization": "Bearer <REDACTED>", "keep": "ordinary"},
                 "ESCAPED_AUTH_SECRET",
+                "authorization",
+            ),
+            (
+                r'{"authorization":"Be\u0061rer\u0020ESCAPED_BEARER_SECRET","keep":"ordinary"}',
+                {"authorization": "Bearer <REDACTED>", "keep": "ordinary"},
+                "ESCAPED_BEARER_SECRET",
+                "authorization",
             ),
             (
                 json.dumps({"outer": [{"authorization": "Bearer NESTED_AUTH_SECRET"}], "keep": "ordinary"}),
                 {"outer": [{"authorization": "Bearer <REDACTED>"}], "keep": "ordinary"},
                 "NESTED_AUTH_SECRET",
+                "authorization",
+            ),
+            (
+                json.dumps({"book": "Bearer of good news", "keep": "ordinary"}),
+                {"book": "Bearer of good news", "keep": "ordinary"},
+                None,
+                None,
             ),
         )
-        for original, expected, secret in cases:
+        for original, expected, secret, category in cases:
             with self.subTest(secret=secret):
                 sanitized, redactions = ledger.sanitize_text(original, max_chars=None)
                 self.assertEqual(json.loads(sanitized), expected)
-                self.assertNotIn(secret, sanitized)
-                self.assertIn("authorization", redactions)
+                if secret is not None:
+                    self.assertNotIn(secret, sanitized)
+                if category is None:
+                    self.assertEqual(redactions, ())
+                else:
+                    self.assertIn(category, redactions)
 
     def test_decoded_json_credential_names_are_redacted(self) -> None:
         nested = json.dumps({"api_key": "INNER_SYNTHETIC_SECRET"})
