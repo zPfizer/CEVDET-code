@@ -138,7 +138,7 @@ _WRITE_MODULE_TARGET = (
 )
 _QUOTED_PATH = (
     r'''(?:"[^"\r\n]*\.[A-Za-z0-9_-]+"|'''
-    r'''\'[^\'\r\n]*\.[A-Za-z0-9_-]+\')'''
+    r"""'[^'\r\n]*\.[A-Za-z0-9_-]+(?:['’]y?[ıiuü]|'))"""
 )
 _QUOTED_FILENAME = (
     r'''(?:"[^"\r\n]+"|'''

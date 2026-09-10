@@ -291,6 +291,7 @@ class MemoryDirectiveTests(unittest.TestCase):
             '"LICENSE" dosyasını düzenle.',
             '"C:\\Users\\Me\\My Project" klasörünü değiştir.',
             '"C:\\Users\\Me\\My Project\\app.py"\'yi düzelt.',
+            r"'C:\Users\Me\My Project\app.py'yi düzelt.",
             '"C:\\Users\\Me\\My Project\\app.py" dosyasını düzelt.',
             '"app.py" dosyasını düzelt.',
             '"My File.py" dosyasını düzelt.',

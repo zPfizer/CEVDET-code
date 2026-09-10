@@ -550,6 +550,7 @@ class ConversationContinuityTests(unittest.TestCase):
             'Okay, src/app.py dosyasını düzelt.',
             'Lütfen, src/app.py dosyasını düzelt.',
             '"C:\\Users\\Me\\My Project\\app.py"\'yi düzelt.',
+            r"'C:\Users\Me\My Project\app.py'yi düzelt.",
             '"C:\\Users\\Me\\My Project\\app.py" dosyasını düzelt.',
             '"app.py" dosyasını düzelt.',
             '"My File.py" dosyasını düzelt.',
