@@ -50,8 +50,10 @@ from state_store import (
     atomic_write_bytes,
     clear_health as clear_component_health,
     REPLACE_RETRY_SECONDS,
+    ReplacementConflict,
     replace_with_retry,
     sha256_file as _sha256,
+    sha256_file_locked as _sha256_locked,
     write_health as write_component_health,
 )
 from tag_taxonomy import TaxonomyError, load_taxonomy, normalize_tree
@@ -66,6 +68,7 @@ TRIGGER_NAME = re.compile(r"compile-trigger-\d{4}-\d{2}-\d{2}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 PUBLICATION_OPERATION = re.compile(r"[0-9a-f]{32}\Z")
 PUBLICATION_STAGE = re.compile(r"compile-stage-[A-Za-z0-9._-]+\Z")
+_EXPECTED_DESTINATION_UNSET = object()
 _MAX_SOURCE_SNAPSHOT_BYTES = 64 * 1024 * 1024
 _SOURCE_PREFIX_CHUNK_BYTES = 1024 * 1024
 DIRECTIVE_SHAPED = re.compile(
@@ -960,6 +963,13 @@ def _validate_publication_journal(
             raise PolicyError("publication-journal-invalid")
         if not isinstance(target.get("completed"), bool):
             raise PolicyError("publication-journal-invalid")
+        if "conflict" in target and not isinstance(target["conflict"], bool):
+            raise PolicyError("publication-journal-invalid")
+        if (
+            "backup_relative" in target
+            and target["backup_relative"] != _publication_backup_relative(relative, operation)
+        ):
+            raise PolicyError("publication-journal-invalid")
     return journal
 
 
@@ -984,10 +994,16 @@ def _publication_record(
     suppression_digest: str,
     targets: list[dict[str, object]],
 ) -> dict[str, object]:
+    operation_id = uuid.uuid4().hex
+    for target in targets:
+        relative = target.get("relative")
+        if not isinstance(relative, str):
+            raise PolicyError("publication-journal-invalid")
+        target["backup_relative"] = _publication_backup_relative(relative, operation_id)
     return {
         "schema_version": compile_state.PUBLICATION_SCHEMA_VERSION,
         "status": "pending",
-        "operation_id": uuid.uuid4().hex,
+        "operation_id": operation_id,
         "timestamp": timestamp,
         "source_relative": source_relative,
         "source_digest": source_digest,
@@ -998,12 +1014,92 @@ def _publication_record(
     }
 
 
+def _publication_backup_relative(relative: str, operation_id: str) -> str:
+    relative_digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()
+    return f".codex/scripts/.state/.cevo-publication-{operation_id}-{relative_digest}.bak"
+
+
+def _publication_backup_path(
+    vault_root: Path,
+    relative: str,
+    operation_id: str,
+    backup_relative: object,
+) -> Path:
+    expected = _publication_backup_relative(relative, operation_id)
+    if backup_relative != expected:
+        raise PolicyError("publication-journal-invalid")
+    path = vault_root / expected
+    if path.resolve(strict=False).parent != (vault_root / ".codex/scripts/.state").resolve(strict=False):
+        raise PolicyError("publication-journal-invalid")
+    return path
+
+
+def _clear_publication_backup(
+    vault_root: Path,
+    relative: str,
+    before: str | None,
+    operation_id: str,
+    backup_relative: object,
+) -> None:
+    backup = _publication_backup_path(vault_root, relative, operation_id, backup_relative)
+    backup_digest = _publication_backup_digest(
+        vault_root,
+        relative,
+        operation_id,
+        backup_relative,
+    )
+    if backup_digest is None:
+        return
+    if before is None:
+        if not _publication_backup_is_destination(
+            vault_root,
+            relative,
+            operation_id,
+            backup_relative,
+        ):
+            raise PolicyError(f"publication-conflict-backup-changed:{relative}")
+    elif backup_digest != before:
+        raise PolicyError(f"publication-conflict-backup-changed:{relative}")
+    backup.unlink()
+
+
+def _publication_backup_digest(
+    vault_root: Path,
+    relative: str,
+    operation_id: str,
+    backup_relative: object,
+) -> str | None:
+    backup = _publication_backup_path(vault_root, relative, operation_id, backup_relative)
+    try:
+        backup_stat = backup.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(backup_stat.st_mode) or not stat.S_ISREG(backup_stat.st_mode):
+        raise PolicyError("publication-conflict-backup-invalid")
+    return _sha256_locked(backup)
+
+
+def _publication_backup_is_destination(
+    vault_root: Path,
+    relative: str,
+    operation_id: str,
+    backup_relative: object,
+) -> bool:
+    backup = _publication_backup_path(vault_root, relative, operation_id, backup_relative)
+    try:
+        return os.path.samefile(backup, vault_root / relative)
+    except (FileNotFoundError, OSError):
+        return False
+
+
 def _atomic_copy(
     source: Path,
     destination: Path,
     *,
     deadline: float | None = None,
     validate_destination: Callable[[], object] | None = None,
+    expected_destination_digest: str | None | object = _EXPECTED_DESTINATION_UNSET,
+    backup_path: Path | None = None,
 ) -> None:
     existing_mode = 0o644
     if destination.exists():
@@ -1020,9 +1116,24 @@ def _atomic_copy(
             target.flush()
             os.fsync(target.fileno())
         temporary.chmod(existing_mode)
-        # Recheck the original target before every attempt, including sharing retries.
-        # This is optimistic conflict detection, not an atomic filesystem compare-and-swap.
-        replace_with_retry(temporary, destination, deadline=deadline, before_replace=validate_destination)
+        # Recheck the target before every attempt; guarded Windows publication
+        # also holds a native target handle across ReplaceFileW.
+        if expected_destination_digest is _EXPECTED_DESTINATION_UNSET:
+            replace_with_retry(
+                temporary,
+                destination,
+                deadline=deadline,
+                before_replace=validate_destination,
+            )
+        else:
+            replace_with_retry(
+                temporary,
+                destination,
+                deadline=deadline,
+                before_replace=validate_destination,
+                expected_digest=expected_destination_digest,
+                backup=backup_path,
+            )
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -1106,6 +1217,7 @@ def _promote_changes(
                 "before_sha256": before,
                 "after_sha256": after,
                 "completed": False,
+                "conflict": False,
             }
             for relative, _destination, before, after in destinations
         ],
@@ -1118,27 +1230,65 @@ def _promote_changes(
         if deadline is not None
         else time.monotonic() + REPLACE_RETRY_SECONDS
     )
+    operation_id = journal.get("operation_id")
+    if not isinstance(operation_id, str):
+        raise PolicyError("publication-journal-invalid")
     for index, (relative, destination, before, after) in enumerate(destinations):
-        current = _live_digest(vault_root, relative)
-        if current == after:
-            _validate_live_destination(vault_root, relative, after)
-        elif current == before:
-            _validate_live_destination(vault_root, relative, before)
-            _atomic_copy(
-                stage / relative,
-                destination,
-                deadline=replace_deadline,
-                validate_destination=lambda: _validate_live_destination(vault_root, relative, before),
-            )
-            if _live_digest(vault_root, relative) != after:
-                raise PolicyError(f"publication-target-drift:{relative}")
-        else:
-            _validate_live_destination(vault_root, relative, before)
         target = journal["targets"][index]
         if not isinstance(target, dict):
             raise PolicyError("publication-journal-invalid")
+        backup_relative = target.get("backup_relative")
+        backup = _publication_backup_path(
+            vault_root,
+            relative,
+            operation_id,
+            backup_relative,
+        )
+        current = _live_digest(vault_root, relative)
+        if target.get("conflict"):
+            raise PolicyError(f"publication-target-changed:{relative}")
+        if current == after:
+            raise PolicyError(f"publication-target-ambiguous:{relative}")
+        elif current == before:
+            _validate_live_destination(vault_root, relative, before)
+            if _publication_backup_digest(
+                vault_root,
+                relative,
+                operation_id,
+                backup_relative,
+            ) is not None:
+                raise PolicyError(f"publication-conflict-backup-exists:{relative}")
+            try:
+                _atomic_copy(
+                    stage / relative,
+                    destination,
+                    deadline=replace_deadline,
+                    validate_destination=lambda: _validate_live_destination(vault_root, relative, before),
+                    expected_destination_digest=before,
+                    backup_path=backup,
+                )
+            except Exception as exc:
+                target["completed"] = False
+                target["conflict"] = isinstance(exc, ReplacementConflict)
+                compile_state.save_publication(state_dir, journal)
+                raise
+            if _live_digest(vault_root, relative) != after:
+                target["conflict"] = True
+                target["completed"] = False
+                compile_state.save_publication(state_dir, journal)
+                raise PolicyError(f"publication-target-drift:{relative}")
+        else:
+            _validate_live_destination(vault_root, relative, before)
         target["completed"] = True
+        target["conflict"] = False
         compile_state.save_publication(state_dir, journal)
+        _clear_publication_backup(
+            vault_root,
+            relative,
+            before,
+            operation_id,
+            backup_relative,
+        )
     journal["status"] = "complete"
     compile_state.save_publication(state_dir, journal)
 
@@ -1411,6 +1561,9 @@ def _recover_pending_publication(
             if not isinstance(targets, list):
                 raise PolicyError("publication-journal-invalid")
             replace_deadline = time.monotonic() + REPLACE_RETRY_SECONDS
+            operation_id = journal.get("operation_id")
+            if not isinstance(operation_id, str):
+                raise PolicyError("publication-journal-invalid")
             for target in targets:
                 if not isinstance(target, dict):
                     raise PolicyError("publication-journal-invalid")
@@ -1422,26 +1575,109 @@ def _recover_pending_publication(
                     or not isinstance(after, str)
                 ):
                     raise PolicyError("publication-journal-invalid")
+                backup_relative = target.get("backup_relative")
+                if backup_relative is None:
+                    backup_relative = _publication_backup_relative(relative, operation_id)
+                    target["backup_relative"] = backup_relative
+                    compile_state.save_publication(state_dir, journal)
+                backup = _publication_backup_path(
+                    vault_root,
+                    relative,
+                    operation_id,
+                    backup_relative,
+                )
                 current = _live_digest(vault_root, relative)
+                if target.get("conflict"):
+                    raise PolicyError(f"publication-target-changed:{relative}")
                 if current == after:
+                    backup_digest = _publication_backup_digest(
+                        vault_root,
+                        relative,
+                        operation_id,
+                        backup_relative,
+                    )
+                    if before is None:
+                        receipt_matches = (
+                            backup_digest == after
+                            and _publication_backup_is_destination(
+                                vault_root,
+                                relative,
+                                operation_id,
+                                backup_relative,
+                            )
+                        )
+                        if not target.get("completed") and backup_digest is None:
+                            raise PolicyError(f"publication-target-ambiguous:{relative}")
+                        if backup_digest is not None and not receipt_matches:
+                            target["completed"] = False
+                            target["conflict"] = True
+                            compile_state.save_publication(state_dir, journal)
+                            raise PolicyError(f"publication-target-changed:{relative}")
+                    else:
+                        if backup_digest is not None and backup_digest != before:
+                            target["completed"] = False
+                            target["conflict"] = True
+                            compile_state.save_publication(state_dir, journal)
+                            raise PolicyError(f"publication-target-changed:{relative}")
+                        if not target.get("completed") and backup_digest != before:
+                            raise PolicyError(f"publication-target-ambiguous:{relative}")
                     _validate_live_destination(vault_root, relative, after)
+                    target["completed"] = True
+                    target["conflict"] = False
+                    compile_state.save_publication(state_dir, journal)
+                    _clear_publication_backup(
+                        vault_root,
+                        relative,
+                        before,
+                        operation_id,
+                        backup_relative,
+                    )
                 elif current == before:
                     if journal["status"] == "complete":
                         raise PolicyError(f"publication-target-drift:{relative}")
                     if not stage.exists():
                         raise PolicyError("publication-stage-missing")
                     _validate_live_destination(vault_root, relative, before)
-                    _atomic_copy(
-                        stage / relative,
-                        vault_root / relative,
-                        deadline=replace_deadline,
-                        validate_destination=lambda: _validate_live_destination(vault_root, relative, before),
-                    )
+                    if _publication_backup_digest(
+                        vault_root,
+                        relative,
+                        operation_id,
+                        backup_relative,
+                    ) is not None:
+                        raise PolicyError(f"publication-conflict-backup-exists:{relative}")
+                    try:
+                        _atomic_copy(
+                            stage / relative,
+                            vault_root / relative,
+                            deadline=replace_deadline,
+                            validate_destination=lambda: _validate_live_destination(vault_root, relative, before),
+                            expected_destination_digest=before,
+                            backup_path=backup,
+                        )
+                    except Exception as exc:
+                        target["completed"] = False
+                        target["conflict"] = isinstance(exc, ReplacementConflict)
+                        compile_state.save_publication(state_dir, journal)
+                        raise
                     if _live_digest(vault_root, relative) != after:
+                        target["conflict"] = True
+                        target["completed"] = False
+                        compile_state.save_publication(state_dir, journal)
                         raise PolicyError(f"publication-target-drift:{relative}")
+                    target["completed"] = True
+                    target["conflict"] = False
+                    compile_state.save_publication(state_dir, journal)
+                    _clear_publication_backup(
+                        vault_root,
+                        relative,
+                        before,
+                        operation_id,
+                        backup_relative,
+                    )
                 else:
                     _validate_live_destination(vault_root, relative, before)
                 target["completed"] = True
+                target["conflict"] = False
                 compile_state.save_publication(state_dir, journal)
             journal["status"] = "complete"
             compile_state.save_publication(state_dir, journal)

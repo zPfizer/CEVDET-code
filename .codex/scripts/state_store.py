@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import math
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import stat
 import tempfile
@@ -18,6 +20,150 @@ STATE_DIR_PARTS = (".codex", "scripts", ".state")
 REPLACE_RETRY_SECONDS = 1.0
 REPLACE_RETRY_SLEEP_SECONDS = 0.02
 _WINDOWS_SHARE_ERRORS = frozenset({5, 32, 33})
+_EXPECTED_DIGEST_UNSET = object()
+
+
+class ReplacementConflict(OSError):
+    """The target changed during a guarded Windows replacement."""
+
+    def __init__(self, reason: str, backup: Path | None = None) -> None:
+        super().__init__(reason)
+        self.backup = backup
+
+
+class _RetryableGuardOpen(OSError):
+    """The guarded target handle could not be acquired yet."""
+
+
+def _windows_api() -> Any:
+    from ctypes import wintypes
+
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    api.CreateFileW.restype = wintypes.HANDLE
+    api.CloseHandle.argtypes = [wintypes.HANDLE]
+    api.CloseHandle.restype = wintypes.BOOL
+    api.ReplaceFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    api.ReplaceFileW.restype = wintypes.BOOL
+    return api
+
+
+def _windows_handle_value(handle: Any) -> int:
+    value = getattr(handle, "value", handle)
+    if value is None:
+        raise OSError("windows-invalid-handle")
+    return int(value)
+
+
+def _windows_open(path: Path) -> Any:
+    api = _windows_api()
+    handle = api.CreateFileW(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x00000001 | 0x00000004,  # FILE_SHARE_READ | FILE_SHARE_DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x00000080,  # FILE_ATTRIBUTE_NORMAL
+        None,
+    )
+    value = getattr(handle, "value", handle)
+    if value in (None, -1, ctypes.c_void_p(-1).value):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return handle
+
+
+@contextmanager
+def _locked_windows_file(path: Path) -> Any:
+    import msvcrt
+
+    handle = _windows_open(path)
+    descriptor = None
+    try:
+        descriptor = msvcrt.open_osfhandle(
+            _windows_handle_value(handle),
+            os.O_RDONLY | os.O_BINARY,
+        )
+        handle = None
+        with os.fdopen(descriptor, "rb") as source:
+            yield source
+    finally:
+        if handle is not None:
+            _windows_api().CloseHandle(handle)
+
+
+def _locked_windows_digest(path: Path) -> str:
+    with _locked_windows_file(path) as source:
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+        return digest.hexdigest()
+
+
+def _windows_replace(
+    replaced: Path,
+    replacement: Path,
+    backup: Path | None,
+) -> None:
+    api = _windows_api()
+    if not api.ReplaceFileW(
+        str(replaced),
+        str(replacement),
+        str(backup) if backup is not None else None,
+        0,
+        None,
+        None,
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _replace_windows_guarded(
+    source: Path,
+    destination: Path,
+    expected_digest: str | None,
+    *,
+    before_replace: Callable[[], object] | None,
+    backup: Path,
+) -> None:
+    replacement_digest = sha256_file(source)
+    try:
+        target_handle = _windows_open(destination)
+    except OSError as exc:
+        if _is_windows_share_error(exc):
+            raise _RetryableGuardOpen("target-sharing") from exc
+        raise
+    try:
+        if before_replace is not None:
+            before_replace()
+        _windows_replace(destination, source, backup)
+        displaced_digest = _locked_windows_digest(backup)
+        if displaced_digest != expected_digest:
+            raise ReplacementConflict("replace-displaced-target", backup)
+
+        with _locked_windows_file(destination) as output:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: output.read(1024 * 1024), b""):
+                digest.update(chunk)
+            if digest.hexdigest() != replacement_digest:
+                raise ReplacementConflict("replace-output-changed", backup)
+            if sha256_file(destination) != replacement_digest:
+                raise ReplacementConflict("replace-output-replaced", backup)
+    finally:
+        _windows_api().CloseHandle(target_handle)
 
 
 def session_scope(session_id: str | None) -> str:
@@ -43,9 +189,26 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_file_locked(path: Path) -> str:
+    if os.name == "nt":
+        return _locked_windows_digest(path)
+    return sha256_file(path)
+
+
 def _is_windows_share_error(exc: OSError) -> bool:
     """Only Win32 sharing/lock violations are retryable replace races."""
     return os.name == "nt" and getattr(exc, "winerror", None) in _WINDOWS_SHARE_ERRORS
+
+
+def _create_replacement_marker(source: Path, marker: Path | None) -> bool:
+    """Keep a hard-link identity receipt for a no-clobber publication."""
+    if marker is None:
+        return False
+    try:
+        os.link(source, marker)
+    except FileExistsError as exc:
+        raise ReplacementConflict("replace-marker-exists", marker) from exc
+    return True
 
 
 def replace_with_retry(
@@ -55,6 +218,8 @@ def replace_with_retry(
     timeout: float = REPLACE_RETRY_SECONDS,
     deadline: float | None = None,
     before_replace: Callable[[], object] | None = None,
+    expected_digest: str | None | object = _EXPECTED_DIGEST_UNSET,
+    backup: Path | None = None,
 ) -> None:
     """Replace without deleting the destination; bound Windows share retries."""
     try:
@@ -72,6 +237,60 @@ def replace_with_retry(
             raise ValueError("replace-deadline-invalid") from exc
         if not math.isfinite(deadline):
             raise ValueError("replace-deadline-invalid")
+    if expected_digest is not _EXPECTED_DIGEST_UNSET and os.name == "nt":
+        if expected_digest is None:
+            marker_created = False
+            while True:
+                if before_replace is not None:
+                    before_replace()
+                if not marker_created:
+                    marker_created = _create_replacement_marker(source, backup)
+                try:
+                    os.rename(source, destination)
+                    return
+                except FileExistsError as exc:
+                    raise ReplacementConflict("replace-target-created") from exc
+                except OSError as exc:
+                    if not _is_windows_share_error(exc):
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if not math.isfinite(remaining) or remaining <= 0:
+                        raise
+                    time.sleep(min(REPLACE_RETRY_SLEEP_SECONDS, remaining))
+        if backup is None:
+            raise ValueError("replace-backup-required")
+        while True:
+            if before_replace is not None:
+                before_replace()
+            try:
+                _replace_windows_guarded(
+                    source,
+                    destination,
+                    expected_digest,
+                    before_replace=before_replace,
+                    backup=backup,
+                )
+                return
+            except OSError as exc:
+                if isinstance(exc, ReplacementConflict) or not isinstance(exc, _RetryableGuardOpen):
+                    raise
+                remaining = deadline - time.monotonic()
+                if not math.isfinite(remaining) or remaining <= 0:
+                    raise
+                time.sleep(min(REPLACE_RETRY_SLEEP_SECONDS, remaining))
+    if expected_digest is not _EXPECTED_DIGEST_UNSET and expected_digest is None:
+        marker_created = False
+        while True:
+            if before_replace is not None:
+                before_replace()
+            if not marker_created:
+                marker_created = _create_replacement_marker(source, backup)
+            try:
+                os.link(source, destination)
+                source.unlink(missing_ok=True)
+                return
+            except FileExistsError as exc:
+                raise ReplacementConflict("replace-target-created") from exc
     while True:
         if before_replace is not None:
             before_replace()
