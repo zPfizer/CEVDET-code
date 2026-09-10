@@ -211,6 +211,19 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 ):
                     ledger.sanitize_text(original, max_chars=None)
 
+    def test_top_level_and_malformed_embedded_json_strings_hide_credentials(self) -> None:
+        for payload in ('{"api_key":"STRING_SECRET"}',
+                        'password=STRING_SECRET',
+                        'Authorization: Bearer STRING_SECRET'):
+            original = json.dumps(payload).replace('=', r'\u003d').replace(':', r'\u003a')
+            sanitized, redactions = ledger.sanitize_text(' ' + original + '\n', max_chars=None)
+            self.assertNotIn('STRING_SECRET', sanitized)
+            self.assertTrue(redactions)
+            self.assertEqual(json.loads(sanitized), ledger.sanitize_text(payload, max_chars=None)[0])
+            malformed = '{BROKEN,"message":' + original + '}'
+            with self.assertRaisesRegex(ledger.MemoryPreferenceError, '^memory-credential-container-unverifiable$'):
+                ledger.sanitize_text(malformed, max_chars=None)
+
     def test_deep_json_does_not_reparse_every_subtree(self) -> None:
         script = (
             'import sys; '

@@ -340,8 +340,18 @@ def _balanced_value_end(text: str, start: int) -> int | None:
 
 
 def _json_regions(text: str) -> Iterator[tuple[int, int]]:
-    """Validated JSON objects/arrays ending at an ordinary text boundary."""
+    """Validated JSON containers and complete top-level JSON strings."""
     decoder = json.JSONDecoder()
+    start = len(text) - len(text.lstrip())
+    if text[start:start + 1] == '"':
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except (ValueError, RecursionError):
+            pass
+        else:
+            if isinstance(value, str) and not text[end:].strip():
+                yield start, end
+                return
     offset = 0
     # ponytail: bound malformed-input retries to linear parse work; a streaming
     # parser is only needed if legitimate inputs exhaust this budget.
@@ -430,6 +440,8 @@ def _decoded_credential_key(text: str, *, escaped_only: bool = False) -> bool:
         if (not escaped_only or '\\' in text[opening:end]) and tail < len(text) and text[tail] == ':' and (
             CREDENTIAL_NAME_RE.fullmatch(value) or value.casefold() == 'authorization'
         ):
+            return True
+        if '\\' in text[opening:end] and contains_secret(value):
             return True
         cursor = end
     return False
