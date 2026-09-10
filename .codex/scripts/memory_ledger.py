@@ -150,7 +150,7 @@ _QUOTED_DIRECTORY = (
 )
 _WRITE_FILENAME = r"(?:[\w.-]+\.[A-Za-z0-9_-]+|\.[A-Za-z0-9_-]+)"
 _WRITE_CASE_SUFFIX = r"['’]y?[ıiuü]"
-_WRITE_TARGET_SUFFIX = rf"(?:\s+{_WRITE_TARGET_OBJECT}|{_WRITE_CASE_SUFFIX})?"
+_WRITE_TARGET_SUFFIX = rf"(?:\s+(?:{_WRITE_TARGET_OBJECT}|{_WRITE_FILE_MEMBER})|{_WRITE_CASE_SUFFIX})?"
 _WRITE_TARGET = (
     rf"(?:bunu|bunları|şunu|şunları|onu|onları|"
     rf"(?:bu|şu|o)\s+{_WRITE_TARGET_OBJECT}|"
@@ -202,7 +202,7 @@ CONDITIONAL_WRITE = re.compile(
     r"\b(?:takdirde|halinde|durumunda|sonra|kadar)\b"
 )
 ACTION_QUESTION_WORD = re.compile(
-    r"\b(?:ne|nasıl|neden|niçin|hangi|hangisi|kim|ne\s+zaman)\b"
+    r"\b(?:ne|nasıl|neden|niçin|hangi|hangisi|kim|kaç|ne\s+zaman)\b"
 )
 _NAMED_TARGET = re.compile(
     rf"^(?P<name>[\w.-]+)\s+(?:projesindeki\s+{_WRITE_TARGET_OBJECT}|"
@@ -211,9 +211,6 @@ _NAMED_TARGET = re.compile(
 )
 _NAMED_FILENAME = re.compile(_WRITE_FILENAME)
 _SIMPLE_CONDITIONAL = re.compile(rf"\b\w+{_CONDITIONAL_PERSON}\b")
-_SIMPLE_CONDITIONAL_TARGET = re.compile(
-    rf"^(?P<name>[\w.-]+)\s+(?:dosyayı|{_WRITE_FOLDER_OBJECT})$"
-)
 
 
 @dataclass(frozen=True)
@@ -242,11 +239,7 @@ def _targeted_write_matches(pattern: re.Pattern[str], folded: str) -> bool:
     # grammar; punctuation such as an ellipsis remains prose.
     if "." in name:
         return _NAMED_FILENAME.fullmatch(name) is not None
-    simple_target = _SIMPLE_CONDITIONAL_TARGET.fullmatch(match.group("target"))
-    if (
-        simple_target is not None
-        and _SIMPLE_CONDITIONAL.fullmatch(simple_target.group("name")) is not None
-    ):
+    if _SIMPLE_CONDITIONAL.fullmatch(name) is not None:
         return False
     return not (
         NON_COMMITTAL_WRITE.fullmatch(name) is not None
