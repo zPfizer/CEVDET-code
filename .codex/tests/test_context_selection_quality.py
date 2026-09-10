@@ -447,6 +447,12 @@ Eylül etiket denetimi.
                     f"---\ntitle: Hook Deployment Checklist\nstatus: {status}\ntype: note\n---\n"
                     + current_body,
                 )
+            _write(
+                root,
+                "b-archived.md",
+                "---\ntitle: Hook Deployment Checklist\nstatus: archived\ntype: note\n---\n"
+                "# Hook Deployment Checklist\nHook deployment checklist stale release.\n",
+            )
             history = "history.md"
             _write(
                 root,
@@ -467,6 +473,7 @@ Eylül etiket denetimi.
                     self.assertIn("z-active.md", paths)
                     self.assertIn(history, paths)
                     self.assertNotIn("a-archived.md", paths)
+                    self.assertLess(paths.index("z-active.md"), paths.index("b-archived.md"))
 
     def test_ordinary_history_prefix_match_keeps_active_record_ahead_of_archived_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -605,6 +612,10 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
     def test_history_markers_require_historical_context_and_past_dates(self) -> None:
         cases = {
             "what changed files should we deploy?": False,
+            "dosyanın tarihi nedir?": False,
+            "dosyanın tarih nedir?": False,
+            "hook contract changed yesterday": True,
+            "recent changes to the hook contract": True,
             "what changed yesterday in the hook contract?": True,
             "what changed last week in the hook contract?": True,
             "how has the hook contract changed?": True,
@@ -676,6 +687,8 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "hook sözleşmesi neden değişti?": True,
             "records from before the year 2024": True,
             "compare records before 2024 with 2030 roadmap": True,
+            "compare hook versions before and after the 2024 migration": True,
+            "compare hook versions before and after the 2030 migration": False,
             "28 Ağustos 2024 Levent çalışma profili": True,
         }
         class FixedDate(date):

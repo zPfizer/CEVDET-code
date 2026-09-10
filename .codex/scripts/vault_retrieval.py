@@ -152,11 +152,15 @@ HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES = {
 }
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
 CURRENT_QUERY_TERMS = frozenset({"current", "guncel"})
+CURRENT_HISTORY_CONNECTOR = re.compile(r"(?i)\b(?:with|versus|vs|compare|and|or|ve)\b")
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
     "work", "prefer", "response", "reply", "style", "profile",
 })
-HISTORY_CHANGE_TEMPORAL = r"(?:today|yesterday|recently|earlier|last\s+(?:day|week|month|year))"
+HISTORY_CHANGE_TEMPORAL = r"(?:today|yesterday|recent|recently|earlier|last\s+(?:day|week|month|year))"
+HISTORY_NOMINAL_CHANGE_QUERY = re.compile(
+    rf"(?ix)(?:\bchanged\b\s+{HISTORY_CHANGE_TEMPORAL}\b|\b{HISTORY_CHANGE_TEMPORAL}\b\s+changes?\b)"
+)
 HISTORY_CHANGE_TAIL = (
     rf"(?:\s*(?:[?!.,;:]|$)|\s+{HISTORY_CHANGE_TEMPORAL}\b"
     r"|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
@@ -226,6 +230,10 @@ HISTORY_DATE = re.compile(
     rf"|(?P<my_month>{HISTORY_MONTH_PATTERN})\s+(?P<my_year>\d{{4}})"
     rf"|(?P<year>\d{{4}})"
     rf")(?!\w)"
+)
+HISTORY_DATE_QUESTION = re.compile(
+    r"(?i)\btarih(?:i|in|ini|inin|ine|e|te|ten)?\b"
+    r"(?:\W+\w+){0,3}\W+(?:nedir|ne|hangi|kac)\b"
 )
 
 
@@ -1349,7 +1357,7 @@ def _before_date_status(
     for reference in references:
         prefix = normalized[cursor:reference.start]
         if re.search(
-            r"\bbefore[\s,;:()\[\]]*(?:(?:the[\s]+)?year[\s,;:()\[\]]*)?\Z",
+            r"\bbefore[\s,;:()\[\]]*(?:and[\s]+after[\s,;:()\[\]]*)?(?:the[\s,;:()\[\]]*)?(?:year[\s,;:()\[\]]*)?\Z",
             prefix,
         ):
             statuses.append(
@@ -1437,21 +1445,27 @@ def _has_history_context(query: str) -> bool:
 
 def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
     history_terms = query_terms & HISTORY_QUERY_TERMS
+    ambiguous_date_question = bool(query and HISTORY_DATE_QUESTION.search(_normalize(query)))
     has_inflected_history = any(
         _matches_history_inflection(term, root)
         for term in query_terms
         for root in HISTORY_QUERY_INFLECTION_ROOTS
-        if root != "onceki"
+        if root != "onceki" and (root != "tarih" or not ambiguous_date_question)
     )
     has_previous_inflection = "onceki" in query_terms or any(
         _matches_history_inflection(term, "onceki")
         for term in query_terms
     )
     has_retrospective_change = bool(query and HISTORY_CHANGE_QUERY.search(_normalize(query)))
+    has_nominal_change = bool(query and HISTORY_NOMINAL_CHANGE_QUERY.search(_normalize(query)))
+    unambiguous_history_terms = history_terms - {"before", "past", "previous", "onceki"}
+    if ambiguous_date_question:
+        unambiguous_history_terms -= {"tarih"}
     if (
         has_inflected_history
         or has_retrospective_change
-        or history_terms - {"before", "past", "previous", "onceki"}
+        or has_nominal_change
+        or unambiguous_history_terms
     ):
         return True
     if (
@@ -1579,6 +1593,45 @@ def _excerpt(
     return best
 
 
+def _split_current_history_query(query: str) -> tuple[str, str] | None:
+    normalized = _normalize(query)
+    for connector in CURRENT_HISTORY_CONNECTOR.finditer(normalized):
+        left = normalized[:connector.start()].strip(" ,;:()[]")
+        right = normalized[connector.end():].strip(" ,;:()[]")
+        left_terms = _retrieval_terms(left)
+        right_terms = _retrieval_terms(right)
+        left_current = bool(left_terms & CURRENT_QUERY_TERMS)
+        right_current = bool(right_terms & CURRENT_QUERY_TERMS)
+        left_history = _is_history_query(left_terms, left)
+        right_history = _is_history_query(right_terms, right)
+        if left_current and right_history and not right_current and not left_history:
+            return left, right
+        if right_current and left_history and not left_current and not right_history:
+            return right, left
+    return None
+
+
+def _merge_scoped_hits(
+    current_hits: list[VaultHit],
+    history_hits: list[VaultHit],
+    *,
+    top_k: int,
+) -> list[VaultHit]:
+    selected: list[VaultHit] = []
+    seen_paths: set[str] = set()
+    seen_content: set[str] = set()
+    for hit in (*current_hits, *history_hits):
+        key = hit.entry.content_key or hit.entry.path
+        if hit.entry.path in seen_paths or key in seen_content:
+            continue
+        seen_paths.add(hit.entry.path)
+        seen_content.add(key)
+        selected.append(hit)
+        if len(selected) == top_k:
+            break
+    return selected
+
+
 def search_vault(
     entries: list[VaultEntry],
     query: str,
@@ -1587,7 +1640,34 @@ def search_vault(
     route: str | None = None,
 ) -> list[VaultHit]:
     """Route filtresi + sıralama; filtreyi zaten uygulayan çağıran `_rank` kullanır."""
-    return _rank(_routed(entries, route), query, top_k=top_k)
+    return _rank_query(_routed(entries, route), query, top_k=top_k)
+
+
+def _rank_query(
+    entries: VaultMap,
+    query: str,
+    *,
+    top_k: int = MAX_CANDIDATES,
+) -> list[VaultHit]:
+    scopes = _split_current_history_query(query)
+    if scopes is not None:
+        current_query, history_query = scopes
+        return _merge_scoped_hits(
+            _rank(entries, current_query, top_k=top_k),
+            _rank(entries, history_query, top_k=top_k),
+            top_k=top_k,
+        )
+    terms = _retrieval_terms(query)
+    preserve_current_stale_penalty = bool(
+        terms & CURRENT_QUERY_TERMS
+        and _is_history_query(terms, query)
+    )
+    return _rank(
+        entries,
+        query,
+        top_k=top_k,
+        preserve_current_stale_penalty=preserve_current_stale_penalty,
+    )
 
 
 def _rank(
@@ -1595,6 +1675,7 @@ def _rank(
     query: str,
     *,
     top_k: int = MAX_CANDIDATES,
+    preserve_current_stale_penalty: bool = False,
 ) -> list[VaultHit]:
     query_terms = _retrieval_terms(query)
     query_acronyms = frozenset(_normalize(value) for value in ACRONYM.findall(query))
@@ -1671,7 +1752,7 @@ def _rank(
             score += inverse_frequency ** 2 * weight
         score *= 1 + min(len(matched) / max(len(query_terms), 1), 0.5)
         if entry.status == "template" or (
-            not include_history
+            (not include_history or preserve_current_stale_penalty)
             and (
                 entry.status in {"archived", "historical"}
                 or entry.status.startswith("superseded")
@@ -1741,7 +1822,7 @@ def _fresh_hits(vault_root: Path, candidates: VaultMap, query: str, top_k: int, 
     checked: set[str] = set()
     unstable_paths = set(getattr(candidates, 'unstable_paths', frozenset()))
     while True:
-        hits = _rank(candidates, query, top_k=top_k)
+        hits = _rank_query(candidates, query, top_k=top_k)
         if not hits and unstable_paths:
             raise OSError('vault-retrieval-incomplete')
         replacements: dict[str, VaultEntry | None] = {}
