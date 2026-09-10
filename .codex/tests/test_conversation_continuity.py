@@ -548,6 +548,7 @@ class ConversationContinuityTests(unittest.TestCase):
             'app.v1.py dosyasını düzelt.',
             '"Dockerfile" dosyasını düzelt.',
             '"Dockerfile" dosyasındaki hatayı düzelt.',
+            '"src" klasöründeki hatayı düzelt.',
             '“app.py” dosyasını düzelt.',
             '‘app.py’ dosyasını düzelt.',
             '‘C:\\Users\\Me\\My Project\\app.py’yi düzelt.',
@@ -590,6 +591,9 @@ class ConversationContinuityTests(unittest.TestCase):
             '“My Project” klasörünü güncelle.',
             r'C:\ klasörünü değiştir.',
             r'\\server\share klasörünü değiştir.',
+            r'C:\src\ klasörünü değiştir.',
+            r'src/ klasörünü değiştir.',
+            r'\\server\share\src\ klasörünü değiştir.',
         ):
             with self.subTest(prompt=prompt):
                 self._check_explicit_write_prompt_reopens_read_only_scope(prompt)
@@ -658,6 +662,9 @@ class ConversationContinuityTests(unittest.TestCase):
             'Lütfen read-only/modda dosyayı düzelt.',
             r'R&D\read-only dosyayı düzelt.',
             r'Onaylansa C:\ klasörünü değiştir.',
+            r'src/ dosyasını düzelt.',
+            r'Onaylansa C:\src\ klasörünü değiştir.',
+            'Onaylansa "src" klasöründeki hatayı düzelt.',
             'src/app.py dosyasını düzelt ve testleri çalıştır. Do not modify files or settings.',
         ):
             with self.subTest(prompt=prompt):
