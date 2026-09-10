@@ -167,10 +167,10 @@ HISTORY_CHANGE_QUERY = re.compile(
     r"(?:\s+\w+){0,5}\s+(?:should|must|can|will)\b)"
     r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
     r"|"
-    r"\b(?:how|why|what)\s+did\s+(?:\w+\s+){1,5}change\b"
+    r"\b(?:how|why|what|when)\s+did\s+(?:\w+\s+){1,5}change\b"
     r"(?:\s*(?:[?!.,;:]|$)|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
     r"|"
-    r"\b(?:ne|neler|nasil)\b(?:\s+\w+){0,3}?\s+\bdegisti\b"
+    r"\b(?:ne|neler|nasil|neden)\b(?:\s+\w+){0,3}?\s+\bdegisti\b"
     r")"
 )
 # `past` and `before` describe ordering in ordinary operational questions too.
@@ -1333,7 +1333,10 @@ def _before_date_status(
     cursor = 0
     for reference in references:
         prefix = normalized[cursor:reference.start]
-        if re.search(r"\bbefore[\s,;:()\[\]]*\Z", prefix):
+        if re.search(
+            r"\bbefore[\s,;:()\[\]]*(?:(?:the[\s]+)?year[\s,;:()\[\]]*)?\Z",
+            prefix,
+        ):
             statuses.append(
                 reference.start_date is not None and reference.start_date <= today
             )
@@ -1401,8 +1404,6 @@ def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
     if history_terms & {"before", "past"}:
         if past_date is not None:
             return past_date
-        if "before" in history_terms:
-            return False
         return _has_history_context(query)
     return bool(
         past_date is True

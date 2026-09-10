@@ -601,6 +601,11 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "before 31 February 2024 records": False,
             "before tomorrow, review records": False,
             "before next Monday": False,
+            "before deployment, show past records": True,
+            "before tomorrow's meeting, show records": False,
+            "when did the hook contract change?": True,
+            "hook sözleşmesi neden değişti?": True,
+            "records from before the year 2024": True,
             "compare records before 2024 with 2030 roadmap": True,
             "28 Ağustos 2024 Levent çalışma profili": True,
         }
