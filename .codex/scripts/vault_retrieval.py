@@ -154,7 +154,7 @@ HISTORY_QUERY_INFLECTION_LOCATIVE_SUFFIXES = {
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
 CURRENT_QUERY_TERMS = frozenset({"current", "guncel", "latest", "active", "aktif"})
 CURRENT_QUERY_CUE = r"(?:current|guncel|latest|active|aktif)"
-CURRENT_HISTORY_CONNECTOR = re.compile(r"(?i)(?:[,;]|\b(?:with|versus|vs|compare|and|or|ve|to|ile)\b)")
+CURRENT_HISTORY_CONNECTOR = re.compile(r"(?i)(?:[,;]|\b(?:with|versus|vs|compare|and|or|ve|to|ile|against)\b)")
 PERSONAL_WORK_TERMS = frozenset({
     "calisma", "tercih", "tercihler", "yanit", "cevap", "tarz", "bicim", "profil",
     "work", "prefer", "response", "reply", "style", "profile",
@@ -1756,7 +1756,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
         current_scope, history_scope = right, left
     else:
         return None
-    scope_connector_terms = {"with", "versus", "vs", "compare", "and", "or", "ve", "to", "ile"}
+    scope_connector_terms = {"with", "versus", "vs", "compare", "and", "or", "ve", "to", "ile", "against"}
     current_anchor = {
         term for term in _retrieval_terms(current_scope)
         if term not in CURRENT_QUERY_TERMS
@@ -1943,11 +1943,15 @@ def _rank(
             personal_query
             and (
                 (
-                    not include_history
+                    (not include_history or preserve_current_stale_penalty)
                     and entry.path == PROFILE_RELATIVE
                     and record_type == "memory"
                 )
-                or (include_history and record_type.endswith("analysis"))
+                or (
+                    include_history
+                    and not preserve_current_stale_penalty
+                    and record_type.endswith("analysis")
+                )
             )
         )
         # Keep all candidates eligible; incidental prose must not outrank the named system.

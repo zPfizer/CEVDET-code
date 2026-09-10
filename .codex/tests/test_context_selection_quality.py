@@ -513,6 +513,10 @@ Eylül etiket denetimi.
                 "compare current checklist",
                 "hook history",
             ),
+            "compare current work profile against historical work profile": (
+                "compare current work profile",
+                "historical work profile",
+            ),
             "current deployment checklist with records September 10, 2030 history": (
                 "current deployment checklist",
                 "records September 10, 2030 history",
@@ -598,6 +602,78 @@ Eylül etiket denetimi.
         paths = [hit.entry.path for hit in hits]
         self.assertIn("is-active.md", paths)
         self.assertIn("is-history.md", paths)
+
+    def test_against_scope_keeps_canonical_profile_with_historical_analyses(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write(
+                root,
+                "profile-active.md",
+                "---\ntitle: Work Profile\nstatus: active\ntype: note\n---\n"
+                "# Work Profile\nWork profile tercihleri.\n",
+            )
+            for index in range(3):
+                _write(
+                    root,
+                    f"profile-history-{index}.md",
+                    "---\n"
+                    f"title: Historical Work Profile Analysis {index}\n"
+                    "status: historical\n"
+                    "type: research-analysis\n"
+                    "---\n"
+                    f"# Historical Work Profile Analysis {index}\n"
+                    f"Historical work profile analysis {index} bulguları.\n",
+                )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            hits = retrieval.search_vault(
+                entries,
+                "compare current work profile against historical work profile",
+                top_k=3,
+            )
+
+        paths = [hit.entry.path for hit in hits]
+        self.assertIn("profile-active.md", paths)
+        self.assertGreaterEqual(
+            sum(path.startswith("profile-history-") for path in paths),
+            2,
+        )
+
+    def test_unsplit_mixed_personal_query_keeps_canonical_profile_ahead_of_analyses(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write(
+                root,
+                retrieval.PROFILE_RELATIVE,
+                "---\ntitle: Levent Profili\nupdated: 2026-09-05\ntype: memory\nstatus: active\n"
+                "tags: [hafıza]\n---\n# Levent Profili\n\n"
+                "## Oturum Portresi\n\nWork profile özeti.\n\n"
+                "## Vault'ta çalışma ve yanıt tarzı\n\n"
+                "- Türkçe ve kısa yanıt ver Kaynak: [[knowledge/concepts/tercih-kisa#Kayıtlar|Kısa yanıt]] · kullanıcı tercihi · 2026-09-04.\n",
+            )
+            _write(
+                root,
+                "knowledge/concepts/tercih-kisa.md",
+                "---\nschema: knowledge-v2\ntitle: Kısa Tercih\n---\n# Kısa Tercih\n\n"
+                "## Kayıtlar\n\n"
+                "- `gecerli` `kullanici-dusuncesi` `guncel` 2026-09-04 [[daily/2026-09-04|Kaynak]] — Türkçe ve kısa yanıt ver.\n",
+            )
+            _write(root, "daily/2026-09-04.md", "Kullanıcı tercihi kaydı.\n")
+            for index in range(3):
+                _write(
+                    root,
+                    f"analysis-{index}.md",
+                    "---\n"
+                    f"title: Historical Work Profile Analysis {index}\n"
+                    "status: historical\n"
+                    "type: research-analysis\n"
+                    "---\n"
+                    f"# Historical Work Profile Analysis {index}\n"
+                    f"Historical work profile history analysis {index}.\n",
+                )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            hits = retrieval.search_vault(entries, "current work profile history", top_k=3)
+
+        self.assertEqual(hits[0].entry.path, retrieval.PROFILE_RELATIVE)
 
     def test_identifier_scan_skips_long_unterminated_hash_run(self) -> None:
         scripts_root = str(Path(__file__).resolve().parents[1] / "scripts")
