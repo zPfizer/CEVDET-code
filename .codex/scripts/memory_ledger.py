@@ -121,11 +121,12 @@ _MEMORY_CONTROL_PATTERNS = (
     WHAT_KNOWN_REQUEST,
     CORRECT_REQUEST,
 )
+_ACK_SEPARATOR = r"[,;:.!]"
 EXPLICIT_WRITE_INTENT = re.compile(
     r"^\s*(?:"
-    r"(?:lütfen\s+)?(?:(?:ok|okay|tamam)\s*[,;:]?\s*)?(?:lütfen\s+)?"
+    rf"(?:lütfen\s+)?(?:(?:ok|okay|tamam)\s*{_ACK_SEPARATOR}?\s*)?(?:lütfen\s+)?"
     r"(?:s[ıi]rayla(?:\s+hepsini)?|hepsini(?:\s+s[ıi]rayla)?)\s+(?:yap|uygula)|"
-    r"(?:ok|okay|tamam)\s*[,;:]?\s*(?:yap|uygula)|"
+    rf"(?:ok|okay|tamam)\s*{_ACK_SEPARATOR}?\s*(?:yap|uygula)|"
     r"uygula|"
     r"bunu\s+düzelt|"
     r"gerekli\s+değişiklikleri\s+yap|"
@@ -261,7 +262,7 @@ _CONCRETE_WRITE_VERB = re.compile(
     rf"(?:{_CONCRETE_WRITE_MUTATION}|{_CONCRETE_WRITE_QUESTION_VERB}|"
     rf"{_CONCRETE_WRITE_PERMISSION_VERB})"
 )
-_TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen|ok|okay|tamam|sonra)(?:[,;:]\s++|\s++))*"
+_TARGETED_WRITE_PREFIX = rf"(?:(?:acaba|lütfen|ok|okay|tamam|sonra)(?:{_ACK_SEPARATOR}\s++|\s++))*"
 _TRAILING_POLITENESS = r"(?:(?:\s*+,\s*+|\s++)lütfen)?"
 # ponytail: only this test-running suffix; broader compound sentences need shared sentence parsing.
 _WRITE_FOLLOWUP = r"(?:\s+ve\s+testleri\s+çalıştır|[.!]\s+sonra\s+testleri\s+çalıştır)?"
