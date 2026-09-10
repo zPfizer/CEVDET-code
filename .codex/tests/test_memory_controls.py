@@ -116,6 +116,8 @@ class MemoryDirectiveTests(unittest.TestCase):
             r"'C:\saklama.py'yi düzelt.",
             r"'C:\unut.py'yi düzelt.",
             r"'C:\read-only.py'yi düzelt.",
+            r"'C:\saklama.py'YI düzelt.",
+            r"'C:\read-only.py''yi düzelt.",
             '"C:\\saklama.py"\'yi düzelt.',
             '“C:\\saklama.py”\'yi düzelt.',
             r"C:\R&D\app.py dosyasını düzelt.",
@@ -273,6 +275,7 @@ class MemoryDirectiveTests(unittest.TestCase):
         for prompt in (
             r"'C:\saklama.py'yi düzelt. Do not modify files or settings.",
             r"'C:\read-only.py'yi düzelt. Do not modify files or settings.",
+            r"'C:\read-only.py''yi düzelt. Do not modify files or settings. “başka örnek”",
             '"C:\\saklama.py"\'yi düzelt. Do not modify files or settings.',
             '“C:\\saklama.py”\'yi düzelt. Do not modify files or settings.',
         ):
@@ -294,6 +297,8 @@ class MemoryDirectiveTests(unittest.TestCase):
     def test_quoted_controls_are_content_but_outer_controls_still_apply(self) -> None:
         ordinary = [
             "CEVDET'in profilini açıkla.",
+            "'CEVDET'in metninde bunu kaydetme yazıyor' örneğini değerlendir.",
+            "'Bunu kaydetme'YI örnek olarak göster.",
             'Makalede “bu konuşmada kalsın” yazıyor. Bunu değerlendir.',
             'Yazar "bunu kaydetme" diyor; bu görüşü araştır.',
             'Yazar "bunu kaydetme, lütfen" diyor; bu görüşü araştır.',
@@ -315,6 +320,7 @@ class MemoryDirectiveTests(unittest.TestCase):
         for quoted_target in (
             '"Geçici bilgi". Bunu kaydetme.',
             "'Geçici bilgi'. Bunu kaydetme.",
+            r"'C:\saklama.py''yi düzelt. Bunu kaydetme. “başka örnek”",
             '```text\nGeçici bilgi\n```\nBunu kaydetme.',
         ):
             with self.subTest(quoted_target=quoted_target):

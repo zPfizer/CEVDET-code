@@ -70,7 +70,7 @@ NON_PERSISTENT_DIRECTIVES = {
 }
 
 # These are quoted data, not requests. Keep the original text for target extraction.
-_QUOTED_CASE_SUFFIX = r"(?:['’]?y?[ıiuü])?"
+_QUOTED_CASE_SUFFIX = r"(?:(?i:['’]?y?[ıiuü])(?!\w))?"
 _QUOTED_CASE_SUFFIX_RE = re.compile(_QUOTED_CASE_SUFFIX)
 QUOTED_CONTENT = re.compile(
     r'(?ms:^[ \t]*(?P<fence>(?P<fence_char>`|~)(?P=fence_char){2,})[^\r\n]*\r?\n'
@@ -542,7 +542,9 @@ def _unquoted_request(text: str) -> str:
     text = QUOTED_CONTENT.sub(' ', text)
     output = list(text)
     start = None
-    for index, character in enumerate(text):
+    index = 0
+    while index < len(text):
+        character = text[index]
         if character == '\n':
             start = None
         elif character == "'":
@@ -556,6 +558,9 @@ def _unquoted_request(text: str) -> str:
                 if end > index + 1 or not next_word:
                     output[start:end] = ' ' * (end - start)
                     start = None
+                    index = end
+                    continue
+        index += 1
     return ''.join(output).strip()
 
 
