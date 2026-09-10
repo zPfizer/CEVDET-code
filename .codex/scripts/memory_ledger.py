@@ -234,12 +234,6 @@ BARE_WRITE_QUESTION = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}{_WRITE_QUESTION_VERB}\s+{_QUESTION_SUFFIX}"
     rf"{_TRAILING_POLITENESS}\?\s*+$"
 )
-_READ_ONLY_TARGET_FOLLOWUP = re.compile(
-    rf"(?:{_WRITE_CASE_SUFFIX}|\s++(?:{_WRITE_FILE_OBJECT}|"
-    rf"{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_OBJECT}|{_WRITE_MUTATION}|"
-    rf"{_TARGETED_WRITE_QUESTION_VERB}\s+{_QUESTION_SUFFIX}))"
-)
-
 NON_COMMITTAL_WRITE = re.compile(
     r"\b(?:eğer|şayet|uygunsa|mümkünse|istersen(?:iz)?|gerekirse|"
     r"olursa|belki|san[ıi]r[ıi]m|sak[ıi]n|asla|hiç(?:bir)?|"
@@ -263,7 +257,13 @@ CONDITIONAL_WRITE = re.compile(
     r"\b(?:takdirde|halinde|durumunda|sonra|kadar)\b"
 )
 ACTION_QUESTION_WORD = re.compile(
-    r"\b(?:ne|nasıl|neden|niçin|hangi|hangisi|kim|kaç|ne\s+zaman)\b"
+    r"\b(?:"
+    r"ne(?:yin|ye|yi|de|den)?|nasıl|niçin|"
+    r"hangi(?:si(?:nin|ne|ni|nde|nden)?|nin|ne|yi|de|den|deki)?|"
+    r"kim(?:in|e|i|de|den)?|"
+    r"nere(?:si|nin|ye|yi|de|den|deki)?|"
+    r"kaç(?:ıncı|ın|a|ı|ta|tan)?|ne\s+zaman"
+    r")\b"
 )
 _NAMED_TARGET = re.compile(
     rf"^(?P<name>[\w.-]+)\s+(?:{_WRITE_PROJECT_OBJECT}|"
@@ -325,8 +325,6 @@ def _read_only_scan_request(text: str) -> str:
             ("/" not in target and "\\" not in target)
             and _NAMED_FILENAME.fullmatch(target) is None
         ):
-            continue
-        if _READ_ONLY_TARGET_FOLLOWUP.match(folded, token_match.end()) is None:
             continue
         for match in READ_ONLY_REQUEST.finditer(target):
             start = token_match.start() + match.start()

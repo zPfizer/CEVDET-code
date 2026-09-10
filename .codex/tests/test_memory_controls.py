@@ -93,6 +93,8 @@ class MemoryDirectiveTests(unittest.TestCase):
             "rapor.şablon dosyasını düzelt.",
             "rapor.şablon dosyasını oluştur.",
             '"C:\\Temp\\rapor.şablon"yi düzelt.',
+            "kimin.py dosyasını düzelt.",
+            r"src/kimin dosyasını düzelt.",
             "Projeyi düzelt.",
             "Atlas projesini güncelle.",
             "Atlas projesini güncelleyebilir misin?",
@@ -133,6 +135,11 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Gerekirse Atlas projesini oluştur.",
             "Hiç Atlas projesindeki ayarı güncelle.",
             "Onaylansa Atlas modülündeki dosyayı yazabilir misin?",
+            "Kimin dosyasını düzeltebilir misin?",
+            "Neredeki dosyayı düzeltebilir misin?",
+            "Kaçıncı dosyayı düzeltebilir misin?",
+            "Hangisinin dosyasını düzeltebilir misin?",
+            "Neyin dosyasını düzeltebilir misin?",
         ):
             with self.subTest(prompt=prompt):
                 self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
@@ -174,6 +181,17 @@ class MemoryDirectiveTests(unittest.TestCase):
                 "read-only.py dosyasını düzelt. Do not modify files or settings."
             )
         )
+        for prompt in (
+            "read-only.py nedir?",
+            r"src/read-only.py hakkında bilgi ver.",
+            "salt-okunur.md içeriğini açıkla.",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertFalse(memory_ledger.is_read_only_request(prompt))
+                self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
+                self.assertEqual(memory_ledger.memory_directive(prompt).kind, "ordinary")
+        self.assertTrue(memory_ledger.is_read_only_request("Read-only."))
+        self.assertTrue(memory_ledger.is_read_only_request("Salt-okunur."))
 
     def test_quoted_controls_are_content_but_outer_controls_still_apply(self) -> None:
         ordinary = [
