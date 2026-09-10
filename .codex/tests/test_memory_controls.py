@@ -81,6 +81,9 @@ class MemoryDirectiveTests(unittest.TestCase):
             "src/new.py dosyasını oluştur.",
             "README.md dosyasını güncelle.",
             "src/new.py dosyasını yaz.",
+            "src/new.py dosyasını oluşturabilir misin?",
+            "README.md dosyasını güncelleyebilir misin?",
+            "src/new.py dosyasını yazabilir misin?",
             r"\src\app.py dosyasını düzelt.",
             r"/src/app.py dosyasını düzelt.",
         ):
@@ -92,6 +95,9 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Onaydan sonra src/new.py dosyasını oluştur.",
             "Gerekirse README.md dosyasını güncelle.",
             "Sakın src/new.py dosyasını yaz.",
+            "Yazabilir misin?",
+            "Oluşturabilir misin?",
+            "Güncelleyebilir misin?",
         ):
             with self.subTest(prompt=prompt):
                 self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))
@@ -110,6 +116,11 @@ class MemoryDirectiveTests(unittest.TestCase):
                 else:
                     self.assertTrue(memory_ledger.is_explicit_write_intent(prompt))
                 self.assertEqual(memory_ledger.memory_directive(prompt).kind, "correct")
+
+        question_target = "read-only.py dosyasını oluşturabilir misin?"
+        self.assertFalse(memory_ledger.is_read_only_request(question_target))
+        self.assertTrue(memory_ledger.is_explicit_write_intent(question_target))
+        self.assertEqual(memory_ledger.memory_directive(question_target).kind, "write-intent")
 
         self.assertTrue(memory_ledger.is_read_only_request("read-only dosyayı düzelt."))
         for prompt in (

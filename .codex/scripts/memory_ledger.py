@@ -127,6 +127,11 @@ _WRITE_QUESTION_VERB = (
     r"(?:düzeltebilir|düzeltir|değiştirebilir|değiştirir|"
     r"düzenleyebilir|düzenler|uygulayabilir|uygular|onarabilir|onarır)"
 )
+_TARGETED_WRITE_QUESTION_VERB = (
+    r"(?:düzeltebilir|düzeltir|değiştirebilir|değiştirir|"
+    r"düzenleyebilir|düzenler|uygulayabilir|uygular|onarabilir|onarır|"
+    r"oluşturabilir|oluşturur|güncelleyebilir|günceller|yazabilir|yazar)"
+)
 _QUESTION_SUFFIX = r"m[ıiuü]s[ıiuü]n(?:iz|ız|uz|üz)?"
 _WRITE_FOLDER_OBJECT = r"klasör(?:ü|ünü|leri|lerini)?"
 _WRITE_TARGET_OBJECT = (
@@ -197,7 +202,7 @@ TARGETED_WRITE_COMMAND = re.compile(
 )
 TARGETED_WRITE_QUESTION = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+"
-    rf"{_WRITE_QUESTION_VERB}\s+"
+    rf"{_TARGETED_WRITE_QUESTION_VERB}\s+"
     rf"{_QUESTION_SUFFIX}{_TRAILING_POLITENESS}\?\s*+$"
 )
 BARE_WRITE_QUESTION = re.compile(
@@ -207,7 +212,7 @@ BARE_WRITE_QUESTION = re.compile(
 _READ_ONLY_TARGET_FOLLOWUP = re.compile(
     rf"(?:{_WRITE_CASE_SUFFIX}|\s++(?:{_WRITE_FILE_OBJECT}|"
     rf"{_WRITE_FILE_MEMBER}|{_WRITE_FOLDER_OBJECT}|{_WRITE_MUTATION}|"
-    rf"{_WRITE_QUESTION_VERB}\s+{_QUESTION_SUFFIX}))"
+    rf"{_TARGETED_WRITE_QUESTION_VERB}\s+{_QUESTION_SUFFIX}))"
 )
 
 NON_COMMITTAL_WRITE = re.compile(
