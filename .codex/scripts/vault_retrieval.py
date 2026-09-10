@@ -185,6 +185,7 @@ PERSONAL_WORK_TERMS = frozenset({
     "work", "prefer", "response", "reply", "style", "profile",
 })
 HISTORY_CHANGE_TEMPORAL = r"(?:today|yesterday|recent|recently|earlier|last\s+(?:day|week|month|year))"
+HISTORY_TURKISH_CHANGE_TEMPORAL = r"(?:dun|gecen\s+(?:hafta|ay|yil))"
 HISTORY_NOMINAL_CHANGE_QUERY = re.compile(
     rf"(?ix)(?:\bchanged\b\s+{HISTORY_CHANGE_TEMPORAL}\b|\b{HISTORY_CHANGE_TEMPORAL}\b\s+changes?\b)"
 )
@@ -216,6 +217,8 @@ HISTORY_CHANGE_QUERY = re.compile(
     rf"{HISTORY_CHANGE_TAIL}"
     r"|"
     r"\b(?:ne|neler|nasil|neden)\b(?:\s+\w+){0,3}?\s+\bdegisti\b"
+    r"|"
+    rf"\b{HISTORY_TURKISH_CHANGE_TEMPORAL}\b(?:\W+\w+){{0,5}}\W+\bdegisti\b"
     r")"
 )
 # `past` and `before` describe ordering in ordinary operational questions too.
@@ -224,7 +227,8 @@ HISTORY_CONTEXT_TERMS = frozenset({
     "archive", "archives", "arsiv", "arsivler", "change", "changes", "decision", "decisions",
     "event", "events", "history", "histories", "kayit", "kayitlar",
     "log", "logs", "olay", "olaylar", "record", "records", "report", "reports",
-    "timeline", "version", "versions", "surum", "surumler", "karar", "kararlar", "donem", "donemler",
+    "timeline", "version", "versions", "release", "releases", "revision", "revisions",
+    "surum", "surumler", "karar", "kararlar", "donem", "donemler",
     "performance", "experience", "work", "result", "results", "project", "projects",
     "contract", "contracts", "sozlesme", "sozlesmesi", "sozlesmeler",
 }) | HISTORY_CHANGE_NOUN_ROOTS
