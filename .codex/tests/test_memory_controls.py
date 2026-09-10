@@ -113,6 +113,11 @@ class MemoryDirectiveTests(unittest.TestCase):
             "src klasöründeki dosyayı yazabilir misin?",
             r"C:\R&D\app.py dosyasını düzelt.",
             r"C:\R&D+v2\app.py dosyasını düzelt.",
+            r"R&D\app.py dosyasını düzelt.",
+            r"\\server\R&D\app.py dosyasını düzelt.",
+            '"src" klasörünü değiştir.',
+            '“My Project” klasörünü güncelle.',
+            r"./read-only dosyayı düzelt.",
             "dosyayı oluştur.",
             "src klasörünü güncelle.",
             r"C:src\app.py dosyasını düzelt.",
@@ -177,6 +182,9 @@ class MemoryDirectiveTests(unittest.TestCase):
             r"C:\bad|name\app.py dosyasını düzelt.",
             r"C:\bad?name\app.py dosyasını düzelt.",
             r"C:\bad name\app.py dosyasını düzelt.",
+            "Lütfen read-only/modda dosyayı düzelt.",
+            r"R&D\read-only dosyayı düzelt.",
+            r"src/read-only dosyayı düzelt.",
         ):
             with self.subTest(prompt=prompt):
                 self.assertFalse(memory_ledger.is_explicit_write_intent(prompt))

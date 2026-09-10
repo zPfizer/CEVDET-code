@@ -214,7 +214,16 @@ _WRITE_TARGET_SUFFIX = rf"(?:\s+(?:{_WRITE_TARGET_OBJECT}|{_WRITE_FILE_MEMBER}|{
 _WRITE_PATH_COMPONENT = r"[^\\/\s<>:\"|?*\x00-\x1f]+"
 _WRITE_PATH = (
     rf"(?:[a-z]:[\\/]?|\.{{1,2}}[\\/]|[\\/](?![\\/])|"
-    rf"\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])"
+    rf"\\\\{_WRITE_PATH_COMPONENT}[\\/]{_WRITE_PATH_COMPONENT}[\\/]|"
+    rf"{_WRITE_PATH_COMPONENT}[\\/])"
+    rf"{_WRITE_PATH_COMPONENT}(?:[\\/]{_WRITE_PATH_COMPONENT})*"
+)
+_EXPLICIT_WRITE_PATH_PREFIX = re.compile(
+    r"(?:[a-z]:|\.{1,2}[\\/]|[\\/](?![\\/])|"
+    rf"\\\\{_WRITE_PATH_COMPONENT}[\\/]{_WRITE_PATH_COMPONENT}[\\/]?)"
+)
+_MEMORY_TARGET_TOKEN = re.compile(
+    rf"(?:[a-z]:[\\/]?|\.{{1,2}}[\\/]|[\\/]+)?"
     rf"{_WRITE_PATH_COMPONENT}(?:[\\/]{_WRITE_PATH_COMPONENT})*"
 )
 _WRITE_TARGET = (
@@ -228,6 +237,7 @@ _WRITE_TARGET = (
     rf"{_WRITE_FILENAME}{_WRITE_TARGET_SUFFIX}|"
     rf"{_QUOTED_DIRECTORY}\s+{_WRITE_FOLDER_OBJECT}|"
     rf"{_QUOTED_PATH}{_WRITE_TARGET_SUFFIX}|"
+    rf"{_QUOTED_FILENAME}\s+{_WRITE_FOLDER_OBJECT}|"
     rf"{_QUOTED_FILENAME}\s+{_WRITE_FILE_OBJECT})"
 )
 _CONCRETE_WRITE_TARGET = re.compile(
@@ -237,6 +247,7 @@ _CONCRETE_WRITE_TARGET = re.compile(
     rf"{_WRITE_FILENAME}{_WRITE_TARGET_SUFFIX}|"
     rf"{_QUOTED_DIRECTORY}\s+{_WRITE_FOLDER_OBJECT}|"
     rf"{_QUOTED_PATH}{_WRITE_TARGET_SUFFIX}|"
+    rf"{_QUOTED_FILENAME}\s+{_WRITE_FOLDER_OBJECT}|"
     rf"{_QUOTED_FILENAME}\s+{_WRITE_FILE_OBJECT})"
 )
 _CONCRETE_WRITE_VERB = re.compile(
@@ -367,11 +378,14 @@ def _mask_bounded_memory_controls(folded: str) -> str:
     # Control words can be part of a concrete path or filename. Remove only
     # those bounded target tokens; controls elsewhere in the message remain.
     masked = list(folded)
-    for token_match in re.finditer(r"[\w./\\-]+", folded):
+    for token_match in _MEMORY_TARGET_TOKEN.finditer(folded):
         target = token_match.group()
+        final_component = re.split(r"[\\/]", target)[-1]
+        if ":" in target and _EXPLICIT_WRITE_PATH_PREFIX.match(target) is None:
+            continue
         if (
-            ("/" not in target and "\\" not in target)
-            and _NAMED_FILENAME.fullmatch(target) is None
+            _NAMED_FILENAME.fullmatch(final_component) is None
+            and _EXPLICIT_WRITE_PATH_PREFIX.match(target) is None
         ):
             continue
         for pattern in _MEMORY_CONTROL_PATTERNS:
