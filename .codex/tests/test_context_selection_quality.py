@@ -575,6 +575,7 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "what changed files should we deploy?": False,
             "how has the hook contract changed?": True,
             "before December 2026": False,
+            "before December 2026 decisions": False,
             "before": False,
             "get past the hook failure": False,
             "past": False,
@@ -584,6 +585,7 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "past records": True,
             "before 2024": True,
             "before 31 February 2024": False,
+            "before 31 February 2024 records": False,
             "28 Ağustos 2024 Levent çalışma profili": True,
         }
         class FixedDate(date):

@@ -1289,20 +1289,29 @@ def _date_references(query: str) -> tuple[tuple[date, ...], bool]:
     return tuple(references), invalid
 
 
-def _has_past_date(query: str, query_terms: frozenset[str]) -> bool:
+def _past_date_status(query: str, query_terms: frozenset[str]) -> bool | None:
+    """Return past/future status; None means the query contains no date."""
     if query:
         references, invalid = _date_references(query)
+        if invalid:
+            return False
+        if not references:
+            return None
     else:
         years = [int(term) for term in query_terms if re.fullmatch(r"\d{4}", term)]
+        if not years:
+            return None
         if len(years) != 1 or any(
             term in HISTORY_MONTHS or re.fullmatch(r"\d{1,2}", term)
             for term in query_terms
         ):
             return False
         value = _date_value(years[0])
-        references, invalid = (() if value is None else (value,)), value is None
+        if value is None:
+            return False
+        references = (value,)
     today = date.today()
-    return bool(references) and not invalid and all(value < today for value in references)
+    return all(value < today for value in references)
 
 
 def _has_history_context(query_terms: frozenset[str]) -> bool:
@@ -1319,11 +1328,13 @@ def _is_history_query(query_terms: frozenset[str], query: str = "") -> bool:
     has_retrospective_change = bool(query and HISTORY_CHANGE_QUERY.search(_normalize(query)))
     if has_inflected_history or has_retrospective_change or history_terms - {"before", "past"}:
         return True
-    has_past_date = _has_past_date(query, query_terms)
+    past_date = _past_date_status(query, query_terms)
     if history_terms & {"before", "past"}:
-        return has_past_date or _has_history_context(query_terms)
+        if past_date is not None:
+            return past_date
+        return _has_history_context(query_terms)
     return bool(
-        has_past_date
+        past_date is True
         and any(re.fullmatch(r"\d{4}", term) for term in query_terms)
         and _is_personal_query(query_terms)
     )
