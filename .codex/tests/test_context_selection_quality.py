@@ -517,6 +517,10 @@ Eylül etiket denetimi.
                 "compare current work profile",
                 "historical work profile",
             ),
+            "compare historical and current work profiles": (
+                "current work profiles",
+                "compare historical work profiles",
+            ),
             "current deployment checklist with records September 10, 2030 history": (
                 "current deployment checklist",
                 "records September 10, 2030 history",
@@ -549,6 +553,7 @@ Eylül etiket denetimi.
                 "show current work profiles",
                 "historical work profiles",
             ),
+            "compare historical and current": None,
         }
         for query, expected in cases.items():
             with self.subTest(query=query):
@@ -566,21 +571,54 @@ Eylül etiket denetimi.
             _write(
                 root,
                 "profile-history.md",
-                "---\ntitle: Historical Work Profiles\nstatus: historical\n"
-                "type: research-analysis\n---\n# Historical Work Profiles\n"
-                "Historical work profiles önceki tercihleri.\n",
+                "---\ntitle: Work Profiles Analysis\nstatus: historical\n"
+                "type: research-analysis\n---\n# Work Profiles Analysis\n"
+                "Work profiles önceki tercihleri.\n",
             )
             entries = retrieval.build_vault_map(root, write_cache=False)
-            hits = retrieval.search_vault(
-                entries,
+            for query in (
                 "compare current and historical work profiles",
-                top_k=3,
-            )
+                "compare historical and current work profiles",
+            ):
+                with self.subTest(query=query):
+                    hits = retrieval.search_vault(entries, query, top_k=3)
 
-        paths = [hit.entry.path for hit in hits]
-        self.assertIn("profile-active.md", paths)
-        self.assertIn("profile-history.md", paths)
-        self.assertLess(paths.index("profile-active.md"), paths.index("profile-history.md"))
+                    paths = [hit.entry.path for hit in hits]
+                    self.assertIn("profile-active.md", paths)
+                    self.assertIn("profile-history.md", paths)
+                    self.assertLess(paths.index("profile-active.md"), paths.index("profile-history.md"))
+
+    def test_current_qualifier_keeps_history_object_unsplit_and_unpenalized(self) -> None:
+        object_queries = (
+            "show the history of the current hook contract",
+            "show the previous version of the current hook contract",
+        )
+        for query in object_queries:
+            with self.subTest(query=query):
+                self.assertIsNone(retrieval._split_current_history_query(query))
+                self.assertFalse(retrieval._has_independent_current_cue(query))
+        self.assertTrue(retrieval._has_independent_current_cue("current work profile history"))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write(
+                root,
+                "hook-current.md",
+                "---\ntitle: Hook Contract\nstatus: active\ntype: note\n---\n"
+                "# Hook Contract\nCurrent hook contract rules for deployment.\n",
+            )
+            _write(
+                root,
+                "hook-history.md",
+                "---\ntitle: Hook Contract History\nstatus: historical\n"
+                "type: research-analysis\n---\n# Hook Contract History\n"
+                "Hook contract history records and previous version from completed changes.\n",
+            )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            for query in object_queries:
+                with self.subTest(query=query):
+                    hits = retrieval.search_vault(entries, query, top_k=2)
+                    self.assertEqual(hits[0].entry.path, "hook-history.md")
 
     def test_mixed_scope_preserves_uppercase_acronym_retrieval(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

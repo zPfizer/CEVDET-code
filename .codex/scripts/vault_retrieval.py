@@ -168,6 +168,13 @@ HISTORY_CHANGE_NOUN_PATTERN = "|".join(
 PERSONAL_DIRECT_TERMS = frozenset({"benim", "bana", "hakkimda", "levent", "kisisel", "my", "personal"})
 CURRENT_QUERY_TERMS = frozenset({"current", "guncel", "latest", "active", "aktif"})
 CURRENT_QUERY_CUE = r"(?:current|guncel|latest|active|aktif)"
+# In these bounded forms, `current` qualifies the object whose history is
+# requested; it does not create a separate current retrieval scope.
+HISTORY_OBJECT_CURRENT_CUE = re.compile(
+    rf"(?ix)\b(?:history|previous|past)\b"
+    r"(?:\W+\w+){0,3}\W+\bof\b"
+    rf"(?:\W+\w+){{0,2}}\W+(?P<current>{CURRENT_QUERY_CUE})\b"
+)
 CURRENT_HISTORY_CONNECTOR = re.compile(r"(?i)(?:[,;]|\b(?:with|versus|vs|compare|and|or|ve|to|ile|against)\b)")
 SCOPE_COMMAND_TERMS = frozenset({"show", "list", "display", "give", "goster", "listele", "ver"})
 PERSONAL_WORK_TERMS = frozenset({
@@ -1794,34 +1801,50 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
         current_scope, history_scope = right, left
     else:
         return None
-    scope_connector_terms = {"with", "versus", "vs", "compare", "and", "or", "ve", "to", "ile", "against"}
-    current_anchor = {
-        term for term in _retrieval_terms(current_scope)
-        if term not in CURRENT_QUERY_TERMS
-        and term not in scope_connector_terms
-        and term not in SCOPE_COMMAND_TERMS
-        and term not in HISTORY_QUERY_TERMS
-        and not term.isdigit()
-        and not any(_matches_history_inflection(term, root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
+    scope_connector_terms = {
+        "with", "versus", "vs", "compare", "and", "or", "ve", "to", "ile", "against",
     }
-    if current_anchor:
-        return current_scope, history_scope
-    topic_terms = []
-    for match in re.finditer(r"(?<!\w)[\w]+(?!\w)", history_scope):
-        token = _normalize(match[0])
-        if (
-            token in CURRENT_QUERY_TERMS
-            or token in HISTORY_QUERY_TERMS
-            or token in scope_connector_terms
-            or token in SCOPE_COMMAND_TERMS
-            or token.isdigit()
-            or any(_matches_history_inflection(token, root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
-        ):
-            continue
-        topic_terms.append(match[0])
-    if not topic_terms:
+
+    def topic_terms(scope: str) -> list[str]:
+        terms = []
+        for match in re.finditer(r"(?<!\w)[\w]+(?!\w)", scope):
+            token = _normalize(match[0])
+            if (
+                token in CURRENT_QUERY_TERMS
+                or token in HISTORY_QUERY_TERMS
+                or token in scope_connector_terms
+                or token in SCOPE_COMMAND_TERMS
+                or token.isdigit()
+                or any(_matches_history_inflection(token, root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
+            ):
+                continue
+            terms.append(match[0])
+        return terms
+
+    current_topic_terms = topic_terms(current_scope)
+    history_topic_terms = topic_terms(history_scope)
+    if current_topic_terms and not history_topic_terms:
+        history_scope = f"{history_scope} {' '.join(current_topic_terms)}"
+    elif history_topic_terms and not current_topic_terms:
+        current_scope = f"{current_scope} {' '.join(history_topic_terms)}"
+    elif not current_topic_terms:
         return None
-    return f"{current_scope} {' '.join(topic_terms)}", history_scope
+    return current_scope, history_scope
+
+
+def _has_independent_current_cue(query: str) -> bool:
+    normalized = _normalize(query)
+    current_spans = tuple(
+        match.span()
+        for match in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized)
+    )
+    if not current_spans:
+        return False
+    related_current_spans = {
+        match.span("current")
+        for match in HISTORY_OBJECT_CURRENT_CUE.finditer(normalized)
+    }
+    return any(span not in related_current_spans for span in current_spans)
 
 
 def _merge_scoped_hits(
@@ -1880,6 +1903,7 @@ def _rank_query(
     preserve_current_stale_penalty = bool(
         terms & CURRENT_QUERY_TERMS
         and _is_history_query(terms, query)
+        and _has_independent_current_cue(query)
     )
     return _rank(
         entries,
