@@ -3,6 +3,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -196,6 +198,29 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertNotIn(secret, sanitized)
                 self.assertEqual(json.loads(sanitized)["keep"], "ordinary")
                 self.assertIn("credential", redactions)
+
+    def test_malformed_outer_container_does_not_hide_inner_credentials(self) -> None:
+        for field in (r'"\u0061pi_key":"NESTED_SECRET"',
+                      r'"\u0061uthorization":"Bearer NESTED_SECRET"'):
+            for original in ('[{' + field + ',"keep":"ordinary"} BROKEN]',
+                             '{' + field + ', BROKEN}'):
+                with self.subTest(original=original), self.assertRaisesRegex(
+                    ledger.MemoryPreferenceError, '^memory-credential-container-unverifiable$'
+                ):
+                    ledger.sanitize_text(original, max_chars=None)
+
+    def test_deep_json_does_not_reparse_every_subtree(self) -> None:
+        script = (
+            'import sys; '
+            f'sys.path.insert(0, {str(CODEX_DIR / "scripts")!r}); '
+            'from memory_ledger import MemoryPreferenceError, sanitize_text; '
+            'text = \'{"x":\' * 5000 + "0" + "}" * 5000; '
+            'assert sanitize_text(text, max_chars=None) == (text, ())\n'
+            'try: sanitize_text(text[:-5000], max_chars=None)\n'
+            'except MemoryPreferenceError: pass\n'
+            'else: raise AssertionError("unbounded malformed JSON retries")'
+        )
+        subprocess.run([sys.executable, '-X', 'utf8', '-c', script], check=True, timeout=5)
 
     def test_json_credential_like_keys_are_rejected_without_collisions(self) -> None:
         first_key = "example 'token': {'a': 1}"

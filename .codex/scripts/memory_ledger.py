@@ -343,16 +343,22 @@ def _json_regions(text: str) -> Iterator[tuple[int, int]]:
     """Validated JSON objects/arrays ending at an ordinary text boundary."""
     decoder = json.JSONDecoder()
     offset = 0
+    # ponytail: bound malformed-input retries to linear parse work; a streaming
+    # parser is only needed if legitimate inputs exhaust this budget.
+    remaining = 8 * len(text)
     for opening in re.finditer(r'[\[{]', text):
         if opening.start() < offset:
             continue
         try:
             _, end = decoder.raw_decode(text, opening.start())
         except json.JSONDecodeError as exc:
-            offset = max(opening.start() + 1, exc.pos + 1)
+            remaining -= max(1, exc.pos - opening.start())
+            if remaining < 0 or _decoded_credential_key(text[opening.start():exc.pos]):
+                raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+            offset = opening.start() + 1
             continue
         except (ValueError, RecursionError):
-            return
+            raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
         offset = end
         boundary = end
         while (boundary < len(text) and not text[boundary].isspace()
@@ -385,7 +391,9 @@ def _json_string_regions(
                 tail += 1
             is_value = tail >= region_end or text[tail] != ':'
             value_start = value_end = None
-            if not is_value:
+            # Only credential fields need their complete value span. Decoding
+            # every ordinary key's subtree repeats work at each nesting level.
+            if not is_value and (CREDENTIAL_NAME_RE.fullmatch(value) or value.casefold() == 'authorization'):
                 value_start = tail + 1
                 while value_start < region_end and text[value_start].isspace():
                     value_start += 1
@@ -413,7 +421,9 @@ def _decoded_credential_key(text: str) -> bool:
         tail = end
         while tail < len(text) and text[tail].isspace():
             tail += 1
-        if tail < len(text) and text[tail] == ':' and CREDENTIAL_NAME_RE.fullmatch(value):
+        if tail < len(text) and text[tail] == ':' and (
+            CREDENTIAL_NAME_RE.fullmatch(value) or value.casefold() == 'authorization'
+        ):
             return True
         cursor = end
     return False
