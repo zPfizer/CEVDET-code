@@ -542,8 +542,13 @@ class ConversationContinuityTests(unittest.TestCase):
             'ne.py dosyasını düzelt.',
             'app.v1.py dosyasını düzelt.',
             '"Dockerfile" dosyasını düzelt.',
+            '“app.py” dosyasını düzelt.',
+            '‘app.py’ dosyasını düzelt.',
+            '‘C:\\Users\\Me\\My Project\\app.py’yi düzelt.',
             'src/app.py dosyasını düzelt, lütfen.',
             "src/app.py'yi düzelt.",
+            'src/app.py dosyasını düzelt ve testleri çalıştır.',
+            'src/app.py dosyasını düzelt. Sonra testleri çalıştır.',
             r'\\server\share\app.py dosyasını düzelt.',
             r'\\server-name\share.name\nested\app.py dosyasını düzelt.',
             'Tamam, src/app.py dosyasını düzelt.',
@@ -571,6 +576,7 @@ class ConversationContinuityTests(unittest.TestCase):
             "src/app.py dosyasını düzeltin.",
             "Lütfen dosyayı değiştiriniz.",
             '"LICENSE" dosyasını düzenle.',
+            '"C:\\Program Files (x86)\\Project / R&D" klasörünü değiştir.',
         ):
             with self.subTest(prompt=prompt):
                 self._check_explicit_write_prompt_reopens_read_only_scope(prompt)
@@ -633,6 +639,7 @@ class ConversationContinuityTests(unittest.TestCase):
             'Sakın klasörünü değiştir.',
             r'Onaylanmadıkça \\server\share\app.py dosyasını düzelt.',
             r'Sakın \\server\share\app.py dosyasını düzelt.',
+            'src/app.py dosyasını düzelt ve testleri çalıştır. Do not modify files or settings.',
         ):
             with self.subTest(prompt=prompt):
                 self._check_write_prompt_keeps_read_only_scope(prompt)
@@ -645,6 +652,8 @@ class ConversationContinuityTests(unittest.TestCase):
             '"C:\\Users\\Me\\My Project\\app.py dosyasını düzelt."',
             '"Dockerfile dosyasını düzelt."',
             '"LICENSE dosyasını düzenle."',
+            '“src/app.py dosyasını düzelt ve testleri çalıştır.”',
+            '‘src/app.py dosyasını düzelt. Sonra testleri çalıştır.’',
             '"Bunu düzelt."',
             '"app.py dosyasını düzelt."',
         ):

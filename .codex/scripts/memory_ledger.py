@@ -138,15 +138,21 @@ _WRITE_MODULE_TARGET = (
 )
 _QUOTED_PATH = (
     r'''(?:"[^"\r\n]*\.[A-Za-z0-9_-]+"|'''
-    r"""'[^'\r\n]*\.[A-Za-z0-9_-]+(?:['’]y?[ıiuü]|'))"""
+    r"""'[^'\r\n]*\.[A-Za-z0-9_-]+(?:['’]y?[ıiuü]|')|"""
+    r'''“[^“”\r\n]*\.[A-Za-z0-9_-]+”|'''
+    r'''‘[^‘’\r\n]*\.[A-Za-z0-9_-]+(?:’y?[ıiuü]|’))'''
 )
 _QUOTED_FILENAME = (
     r'''(?:"[^"\r\n]+"|'''
-    r'''\'[^\'\r\n]+\')'''
+    r'''\'[^\'\r\n]+\'|'''
+    r'''“[^“”\r\n]+”|'''
+    r'''‘[^‘’\r\n]+’)'''
 )
 _QUOTED_DIRECTORY = (
-    r'''(?:"(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w ./\\-]+?"|'''
-    r'''\'(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[\w ./\\-]+?\')'''
+    r'''(?:"(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[^"\r\n]+?"|'''
+    r'''\'(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[^\'\r\n]+?\'|'''
+    r'''“(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[^“”\r\n]+?”|'''
+    r'''‘(?:[a-z]:[\\/]|\.{1,2}[\\/]|\\\\[\w.-]+[\\/][\w.-]+[\\/]|[\w.-]+[\\/])[^‘’\r\n]+?’)'''
 )
 _WRITE_FILENAME = r"(?:[\w.-]+\.[A-Za-z0-9_-]+|\.[A-Za-z0-9_-]+)"
 _WRITE_CASE_SUFFIX = r"['’]y?[ıiuü]"
@@ -165,9 +171,10 @@ _WRITE_TARGET = (
 )
 _TARGETED_WRITE_PREFIX = r"(?:(?:acaba|lütfen|ok|okay|tamam)(?:[,;:]\s++|\s++))*"
 _TRAILING_POLITENESS = r"(?:(?:\s*+,\s*+|\s++)lütfen)?"
+_WRITE_FOLLOWUP = r"(?:\s+ve\s+testleri\s+çalıştır|[.!]\s+sonra\s+testleri\s+çalıştır)?"
 TARGETED_WRITE_COMMAND = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+{_WRITE_MUTATION}"
-    rf"{_TRAILING_POLITENESS}\s*+[.!]*\s*+$"
+    rf"{_TRAILING_POLITENESS}{_WRITE_FOLLOWUP}\s*+[.!]*\s*+$"
 )
 TARGETED_WRITE_QUESTION = re.compile(
     rf"^\s*{_TARGETED_WRITE_PREFIX}(?P<target>{_WRITE_TARGET})\s+"
