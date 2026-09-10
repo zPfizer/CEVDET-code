@@ -190,7 +190,7 @@ HISTORY_CONTEXT_TERMS = frozenset({
 HISTORY_DIRECTIONAL_PAST = re.compile(
     r"(?i)\bpast(?:\s+(?:(?:the|my|your|his|her|its|our|their)\s+)?(?:due|deadline)s?)\b"
 )
-HISTORY_CLAUSE_SPLIT = re.compile(r"(?i)\s*(?:;|\b(?:and|or|ve)\b)\s*")
+HISTORY_CLAUSE_SPLIT = re.compile(r"(?i)(?:;|\b(?:and|or|ve)\b)")
 # `eskime` is the noun/verb form for tarnishing and must not be read as `eski` + suffix.
 HISTORY_DERIVATIONAL_HOMONYMS = frozenset({"eskime"})
 HISTORY_MONTHS = {
