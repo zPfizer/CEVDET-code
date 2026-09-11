@@ -1521,6 +1521,70 @@ def recover_stale_jobs(state_dir: Path, *, now: float | None = None) -> int:
     return recovered
 
 
+def redrive_dead_letter(
+    state_dir: Path,
+    *,
+    job_id: str | None = None,
+    now: float | None = None,
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Dead-letter kaydını operatör kararıyla aynı kimlikle pending'e döndürür.
+
+    Kayıt yerinde güncellenip `os.replace` ile taşınır (recover_stale_jobs ile
+    aynı kalıp); yarım kalan taşımada pending kopya kazandığı için tekrar
+    çalıştırmak güvenlidir. Dead-letter zaten çözülmemiş iş sayıldığından
+    taşıma admission bütçesini değiştirmez.
+    """
+    observed_now = time.time() if now is None else now
+    _ensure_job_dirs(state_dir)
+    redriven: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    with locked(state_dir / "worker-queue"):
+        for path in sorted((_job_root(state_dir) / "dead-letter").glob("*.json")):
+            try:
+                job = _load_job(path)
+            except ValueError as exc:
+                skipped.append((path.name, str(exc)))
+                continue
+            if job_id is not None and job["job_id"] != job_id:
+                continue
+            if job.get("terminal_reason") == "recovered-by-successor":
+                skipped.append((job["job_id"], "zaten kurtarılmış"))
+                continue
+            if job["kind"] == "flush":
+                hook_input = _hook_input_reference(job["payload"])
+                if (
+                    hook_input is not None
+                    and _managed_hook_input(hook_input, state_dir)
+                    and not hook_input.is_file()
+                ):
+                    skipped.append((job["job_id"], "girdi dosyası silinmiş"))
+                    continue
+            job["status"] = "pending"
+            job["attempt"] = 0
+            job["generation"] = int(job["generation"]) + 1
+            job["enqueued_ts"] = int(observed_now)
+            job["redriven_ts"] = int(observed_now)
+            for stale_key in (
+                "finished_ts",
+                "last_error",
+                "terminal_reason",
+                "retryable",
+                "claim_token",
+                "owner_pid",
+                "owner_identity",
+                "lease_until",
+                "recovery_job_id",
+                "next_attempt_ts",
+                "retry_scheduled_ts",
+            ):
+                job.pop(stale_key, None)
+            destination = _job_root(state_dir) / "pending" / path.name
+            atomic_write_json(path, job)
+            os.replace(path, destination)
+            redriven.append(job["job_id"])
+    return redriven, skipped
+
+
 def _claim_next_job(
     state_dir: Path,
     *,
@@ -2061,9 +2125,28 @@ def main() -> int:
     parser.add_argument("--claim-token")
     parser.add_argument("--drain", action="store_true")
     parser.add_argument("--execute-job", type=Path)
+    parser.add_argument(
+        "--redrive",
+        nargs="?",
+        const="all",
+        metavar="JOB_ID",
+        help="dead-letter işlerini pending'e döndürür (tek iş için 32 hex kimlik)",
+    )
     args = parser.parse_args()
     vault_root = args.vault.resolve(strict=True)
     state_dir = args.state_dir.resolve()
+    if args.redrive is not None:
+        target = None if args.redrive == "all" else args.redrive
+        if target is not None and re.fullmatch(r"[0-9a-f]{32}", target) is None:
+            raise ValueError("worker-redrive-job-id-invalid")
+        redriven, skipped = redrive_dead_letter(state_dir, job_id=target)
+        for identifier in redriven:
+            print(f"pending'e döndü: {identifier}")
+        for identifier, reason in skipped:
+            print(f"atlandı: {identifier} — {reason}")
+        if not redriven and not skipped:
+            print("dead-letter boş ya da eşleşen iş yok")
+        return 0 if not skipped else 1
     if args.execute_job is not None:
         if not isinstance(args.claim_token, str) or re.fullmatch(
             r"[0-9a-f]{32}", args.claim_token

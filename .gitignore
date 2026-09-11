@@ -130,6 +130,7 @@
 !/.codex/tests/test_vault_ingestion_slice_c.py
 !/.codex/tests/test_vault_tag_quality.py
 !/.codex/tests/test_worker_handoff.py
+!/.codex/tests/test_worker_redrive.py
 !/.codex/tests/test_worker_result_contract.py
 !/.gitattributes
 !/.gitignore
