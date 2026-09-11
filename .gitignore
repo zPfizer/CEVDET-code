@@ -100,6 +100,7 @@
 !/.codex/tests/test_defensive_error_paths_hook.py
 !/.codex/tests/test_defensive_error_paths_worker.py
 !/.codex/tests/test_defensive_error_paths_process.py
+!/.codex/tests/test_defensive_error_paths_flush.py
 !/.codex/tests/test_doctor.py
 !/.codex/tests/test_doctor_failure_isolation.py
 !/.codex/tests/test_doctor_record_validation.py
