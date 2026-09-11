@@ -1161,6 +1161,12 @@ def _run_codex(prompt: str, stage: Path) -> str | None:
             timeout=900,
             stage=stage,
             propagate_cleanup_error=True,
+            usage_state_dir=STATE_DIR,
+            purpose=(
+                'compile-repair'
+                if prompt.startswith('BELLEK ŞEMASI ONARIMI')
+                else 'compile'
+            ),
         )
     except ProcessTreeCleanupError:
         cleanup_unverified = True

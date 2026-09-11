@@ -7,7 +7,9 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 
+import model_usage
 from process_control import (
     ProcessTreeCleanupError,
     ProcessTreeTimeout,
@@ -140,6 +142,8 @@ def run_exec(
     stage: Path | None = None,
     forbidden_root: Path | None = None,
     propagate_cleanup_error: bool = False,
+    usage_state_dir: Path | None = None,
+    purpose: str = "unknown",
 ) -> tuple[str | None, str | None]:
     """Run one bounded, sandboxed, hook-disabled `codex exec`.
 
@@ -154,7 +158,51 @@ def run_exec(
     landed inside a tree the sandbox must not be able to write.
     Queue adapters set ``propagate_cleanup_error`` so an unverified child tree
     reaches the durable worker fence instead of becoming a retryable reason.
+    ``usage_state_dir`` verildiğinde çağrı ``model_usage``'a kaydedilir; kayıt
+    hatası asıl çağrının sonucunu asla değiştirmez.
     """
+    start = time.monotonic()
+
+    def note(outcome: str, result_chars: int = 0) -> None:
+        if usage_state_dir is None:
+            return
+        try:
+            model_usage.record(
+                usage_state_dir,
+                purpose=purpose,
+                prompt_chars=len(prompt),
+                duration_ms=int((time.monotonic() - start) * 1000),
+                outcome=outcome,
+                result_chars=result_chars,
+            )
+        except (OSError, ValueError):
+            pass
+
+    try:
+        text, reason = _bounded_exec(
+            prompt,
+            sandbox=sandbox,
+            timeout=timeout,
+            stage=stage,
+            forbidden_root=forbidden_root,
+            propagate_cleanup_error=propagate_cleanup_error,
+        )
+    except ProcessTreeCleanupError:
+        note("codex-cleanup-error")
+        raise
+    note(reason or ("ok" if text is not None else "output-missing"), len(text or ""))
+    return text, reason
+
+
+def _bounded_exec(
+    prompt: str,
+    *,
+    sandbox: str,
+    timeout: float,
+    stage: Path | None = None,
+    forbidden_root: Path | None = None,
+    propagate_cleanup_error: bool = False,
+) -> tuple[str | None, str | None]:
     try:
         codex = find_codex()
     except FileNotFoundError as exc:
