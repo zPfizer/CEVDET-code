@@ -123,7 +123,9 @@ def _run_hook(
     environment: dict[str, str],
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(vault / ".codex" / "hooks" / "hook.py"), event, "--strict"],
+        # Üretim paritesi: Codex host kancayı --strict OLMADAN, fail-open
+        # çalıştırır. Sonuç iddiaları dönüş koduna değil çıktılara dayanır.
+        [sys.executable, str(vault / ".codex" / "hooks" / "hook.py"), event],
         cwd=vault,
         input=json.dumps(payload, ensure_ascii=False),
         text=True,
@@ -143,6 +145,17 @@ def _wait_until(condition, timeout: float, interval: float = 0.5) -> bool:
             return True
         time.sleep(interval)
     return condition()
+
+
+def _debug_state(state: Path) -> str:
+    """Başarısızlık mesajı için: state listesi + sağlık kayıtları."""
+    lines = [f"state: {sorted(path.name for path in state.glob('*'))}"]
+    for path in sorted(state.glob("*health*.json")):
+        try:
+            lines.append(f"{path.name}: {path.read_text(encoding='utf-8')[:500]}")
+        except OSError:
+            continue
+    return "\n".join(lines)
 
 
 def _queue_idle(state: Path) -> bool:
@@ -199,7 +212,10 @@ class JourneyE2ETests(unittest.TestCase):
 
             self.assertTrue(
                 _wait_until(daily_has_summary, DAILY_TIMEOUT_SECONDS),
-                f"daily yazılmadı; state: {sorted(p.name for p in state.glob('*'))}",
+                "daily yazılmadı;\n"
+                + _debug_state(state)
+                + f"\nprompt-stdout: {prompt.stdout[:500]}"
+                + f"\nend-stdout: {ended.stdout[:500]}\nend-stderr: {ended.stderr[:500]}",
             )
 
             # Aynı kapanışın tekrarı ikinci bir kayıt üretmemeli (idempotency).
