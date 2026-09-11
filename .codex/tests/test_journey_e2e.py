@@ -168,6 +168,30 @@ def _debug_state(state: Path) -> str:
     return "\n".join(lines)
 
 
+def _drain_worker(vault: Path, environment: dict[str, str]) -> None:
+    """Worker'ı üretim CLI girişiyle deterministik koştur.
+
+    Kancanın başlattığı ayrık supervisor CI runner'ında hook süreciyle
+    birlikte ölebilir (job object torunları toplar); yerelde ise yaşar ve
+    yaşarken lifetime kilidini tuttuğu için bu çağrı 0 ile hemen döner.
+    İki ortamda da sonuç aynı: kuyruk boşalana kadar biri çalışır.
+    """
+    subprocess.run(
+        [
+            sys.executable,
+            str(vault / ".codex" / "scripts" / "worker_supervisor.py"),
+            "--vault", str(vault),
+            "--state-dir", str(vault / ".codex" / "scripts" / ".state"),
+        ],
+        cwd=vault,
+        capture_output=True,
+        check=False,
+        timeout=110,
+        env=environment,
+        creationflags=FLAGS,
+    )
+
+
 def _queue_idle(state: Path) -> bool:
     jobs = state / "worker-jobs"
     return all(
@@ -211,6 +235,7 @@ class JourneyE2ETests(unittest.TestCase):
 
             ended = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(ended.returncode, 0, ended.stderr)
+            _drain_worker(vault, environment)
 
             daily = vault / "daily" / f"{datetime.date.today().isoformat()}.md"
 
@@ -231,6 +256,7 @@ class JourneyE2ETests(unittest.TestCase):
             # Aynı kapanışın tekrarı ikinci bir kayıt üretmemeli (idempotency).
             repeated = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            _drain_worker(vault, environment)
             self.assertTrue(
                 _wait_until(lambda: _queue_idle(state), DAILY_TIMEOUT_SECONDS),
                 "kuyruk boşalmadı",
