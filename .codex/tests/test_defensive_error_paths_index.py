@@ -23,6 +23,36 @@ import transcript_index
 SESSION = "oturum-1"
 
 
+def _sealed(payload):
+    payload["metadata_sha256"] = transcript_index._metadata_digest(payload)
+    return payload
+
+
+def _role_none_retained(base):
+    import copy
+    payload = copy.deepcopy(base)
+    payload["rows"][0]["role"] = None
+    return _sealed(payload)
+
+
+def _row_bytes_grown(base):
+    import copy
+    payload = copy.deepcopy(base)
+    payload["rows"][0]["line_bytes"] += 1
+    return _sealed(payload)
+
+
+def _row_bytes_grown_with_complete_tail(base):
+    import copy
+    payload = copy.deepcopy(base)
+    payload["rows"][0]["line_bytes"] += 1
+    size = payload["source_bytes"]
+    payload["partial_tail"] = {
+        "offset": size - 1, "line_bytes": 1, "sha256": "a" * 64, "complete": True,
+    }
+    return _sealed(payload)
+
+
 def _write_transcript(path: Path, lines: list[object]) -> None:
     payload = "\n".join(
         line if isinstance(line, str) else json.dumps(line, ensure_ascii=False)
@@ -162,6 +192,9 @@ class IndexValidatorEdges(unittest.TestCase):
         def mutate(**changes):
             payload = copy.deepcopy(base)
             payload.update(changes)
+            # Üstveri özeti bilinçli olarak tazelenir: amaç özet uyuşmazlığı
+            # değil, hedeflenen alan korkuluğunu tetiklemek.
+            payload["metadata_sha256"] = transcript_index._metadata_digest(payload)
             return payload
 
         row = copy.deepcopy(base["rows"][0])
@@ -186,11 +219,59 @@ class IndexValidatorEdges(unittest.TestCase):
             mutate(reducer={**base["reducer"], "retained_rows": "liste-degil"}),
             mutate(reducer={**base["reducer"], "retained_rows": [999]}),
             mutate(reducer={**base["reducer"], "session_only": True}),
+            _role_none_retained(base),
+            _row_bytes_grown(base),
+            _row_bytes_grown_with_complete_tail(base),
         ]
         for index, payload in enumerate(cases):
             with self.subTest(case=index):
                 with self.assertRaises(ValueError):
                     transcript_index._validate_state(payload)
+
+    def test_partial_tail_consistency_guards(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = self._index_payload(Path(temporary))
+
+        def with_partial(partial, **changes):
+            payload = copy.deepcopy(base)
+            payload["partial_tail"] = partial
+            payload.update(changes)
+            payload["metadata_sha256"] = transcript_index._metadata_digest(payload)
+            return payload
+
+        size = base["source_bytes"]
+        cases = [
+            # complete kuyruk indekslenmiş bölgenin gerisinde kalamaz
+            with_partial(
+                {"offset": size - 1, "line_bytes": 1, "sha256": "a" * 64,
+                 "complete": True},
+                indexed_bytes=size - 1,
+            ),
+            # eksik kuyruk tam indekslenen sınırdan başlamalı
+            with_partial(
+                {"offset": size - 1, "line_bytes": 1, "sha256": "a" * 64,
+                 "complete": False},
+                indexed_bytes=size - 2,
+            ),
+            # kuyruk yoksa indekslenen == kaynak olmalı
+            with_partial(None, indexed_bytes=size - 1),
+        ]
+        for index, payload in enumerate(cases):
+            with self.subTest(case=index):
+                with self.assertRaises(ValueError):
+                    transcript_index._validate_state(payload)
+
+    def test_grown_source_reuses_cache_with_session_only_force(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            transcript = root / "t.jsonl"
+            _write_transcript(transcript, [_user("Kalıcı ilk tur.")])
+            first = _open(root, transcript)
+            self.assertTrue(any(row["retained"] for row in first.rows))
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(_user("İkinci tur.")) + "\n")
+            grown = _open(root, transcript, force_session_only=True)
+        self.assertTrue(all(not row["retained"] for row in grown.rows))
 
     def test_offset_mismatch_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

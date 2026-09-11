@@ -331,6 +331,100 @@ class AttachmentCaptureGuards(unittest.TestCase):
                 _capture(root, _envelope(source), hashes=hashes), []
             )
 
+    def test_capture_core_path_guards_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            attachment_root = root / "home" / "attachments"
+            attachment_root.mkdir(parents=True)
+            state = root / "state"
+            state.mkdir()
+            for value in (
+                str(root / "dis" / "pasted-text.txt"),
+                str(attachment_root / UUID1 / "alt" / "pasted-text.txt"),
+            ):
+                with self.subTest(value=value):
+                    with self.assertRaises(ValueError):
+                        attachment_memory._capture_one_core(
+                            value, attachment_root, root, NOW, frozenset(),
+                            lambda _s: SUMMARY, state, None, "a" * 64, None,
+                        )
+
+    def test_committed_mapping_with_missing_note_is_unrecoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _seed(root)
+            first = _capture(root, _envelope(source))
+            (root / (first[0][0] + ".md")).unlink()
+            with self.assertRaises(ValueError):
+                _capture(root, _envelope(source))
+
+    def test_new_envelope_refreshes_committed_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _seed(root)
+            first = _capture(root, _envelope(source))
+            # Aynı kaynak, farklı zarf: eşleme yeni zarf imzasıyla tazelenir.
+            second_text = _envelope(source) + "\nek istek satırı\n"
+            second = _capture(root, second_text)
+        self.assertEqual(first[0][0], second[0][0])
+
+    def test_recovered_source_fully_suppressed_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _seed(root, content="Bastırılacak kaynak satırı.")
+            first = _capture(root, _envelope(source))
+            self.assertTrue(first)
+            source.unlink()
+            suppress_derived_memory(
+                root / ".codex/private-memory", "Bastırılacak kaynak satırı."
+            )
+            hashes = load_suppressed_hashes(root / ".codex/private-memory")
+            self.assertEqual(_capture(root, _envelope(source), hashes=hashes), [])
+
+    def test_note_planted_during_summary_is_adopted_when_identical(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _seed(root)
+            first = _capture(root, _envelope(source))
+            note = root / (first[0][0] + ".md")
+            note_bytes = note.read_bytes()
+            note.unlink()
+            for mapping_file in root.rglob("attachment-memory-*.json"):
+                mapping_file.unlink()
+
+            def ayni_dosyayi_diken(_prompt: str) -> str:
+                note.write_bytes(note_bytes)
+                return SUMMARY
+
+            result = _capture(root, _envelope(source), summarize=ayni_dosyayi_diken)
+            self.assertTrue(result)
+
+    def test_read_note_rejects_tail_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _seed(root)
+            first = _capture(root, _envelope(source))
+            note = root / (first[0][0] + ".md")
+            text = note.read_text(encoding="utf-8")
+            import re as _re
+            digest = _re.search(r"source_sha256: ([0-9a-f]{64})", text).group(1)
+
+            def read(tampered: str):
+                note.write_text(tampered, encoding="utf-8", newline="\n")
+                return attachment_memory._read_note(
+                    note, root, expected_hash=None,
+                    source_digest=digest,
+                    source_attachment=f"{UUID1}/pasted-text.txt",
+                )
+
+            self.assertTrue(read(text))
+            with self.assertRaises(ValueError):
+                read(text.rstrip("\n") + "\nfence sonrası kuyruk")
+            with self.assertRaises(ValueError):
+                read(text.replace(attachment_memory.SOURCE_BODY, "\n## Başka gövde\n"))
+            with self.assertRaises(ValueError):
+                read(text.replace("Kalıcı kaynak dersi.", "Değişmiş kaynak dersi!"))
+
     def test_prepared_note_drift_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

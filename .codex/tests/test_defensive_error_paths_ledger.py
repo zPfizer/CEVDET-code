@@ -72,6 +72,20 @@ class SanitizerEdges(unittest.TestCase):
                 except memory_ledger.MemoryPreferenceError:
                     pass
 
+    def test_decoded_key_fragment_and_auth_brace_overlap(self) -> None:
+        # Değeri olmayan tırnaklı kimlik anahtarı çözülünce redakte edilir.
+        cleaned, redactions = memory_ledger.sanitize_text('{"a": "\\"password\\":"}')
+        self.assertIn("credential", redactions)
+        self.assertIn("<REDACTED>", cleaned)
+
+        # Süslü değerli Authorization, iç içe ikinci eşleşmeyi yutar.
+        overlap = (
+            'Authorization: Bearer {"i": "Authorization: Bearer inner"}kuyruk'
+        )
+        cleaned, redactions = memory_ledger.sanitize_text(overlap)
+        self.assertIn("authorization", redactions)
+        self.assertNotIn("inner", cleaned)
+
     def test_deep_nesting_is_unverifiable_not_crash(self) -> None:
         payload = "cok-gizli-deger"
         for _ in range(12):
