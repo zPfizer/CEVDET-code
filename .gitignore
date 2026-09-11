@@ -106,6 +106,7 @@
 !/.codex/tests/test_doctor_record_validation.py
 !/.codex/tests/test_external_memory_removal.py
 !/.codex/tests/test_file_lock.py
+!/.codex/tests/test_defensive_error_paths_doctor.py
 !/.codex/tests/test_flush_completion.py
 !/.codex/tests/test_flush_public_surface.py
 !/.codex/tests/test_full_content_retrieval.py
