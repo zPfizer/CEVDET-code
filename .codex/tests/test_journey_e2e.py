@@ -148,11 +148,21 @@ def _wait_until(condition, timeout: float, interval: float = 0.5) -> bool:
 
 
 def _debug_state(state: Path) -> str:
-    """Başarısızlık mesajı için: state listesi + sağlık kayıtları."""
+    """Başarısızlık mesajı için: state listesi, kuyruk içi ve kayıt gövdeleri."""
     lines = [f"state: {sorted(path.name for path in state.glob('*'))}"]
-    for path in sorted(state.glob("*health*.json")):
+    for stage_dir in sorted((state / "worker-jobs").glob("*")):
+        names = sorted(path.name for path in stage_dir.glob("*"))
+        if names:
+            lines.append(f"worker-jobs/{stage_dir.name}: {names}")
+    interesting = (
+        *state.glob("*health*.json"),
+        *(state / "worker-jobs" / "dead-letter").glob("*.json"),
+        *(state / "worker-jobs" / "failed").glob("*.json"),
+        *state.glob("flush-*.json"),
+    )
+    for path in sorted(interesting):
         try:
-            lines.append(f"{path.name}: {path.read_text(encoding='utf-8')[:500]}")
+            lines.append(f"{path.name}: {path.read_text(encoding='utf-8')[:400]}")
         except OSError:
             continue
     return "\n".join(lines)
