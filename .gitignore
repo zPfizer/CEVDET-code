@@ -110,6 +110,7 @@
 !/.codex/tests/test_defensive_error_paths_retrieval.py
 !/.codex/tests/test_defensive_error_paths_compile.py
 !/.codex/tests/test_defensive_error_paths_compile2.py
+!/.codex/tests/test_defensive_error_paths_compile3.py
 !/.codex/tests/test_flush_completion.py
 !/.codex/tests/test_flush_public_surface.py
 !/.codex/tests/test_full_content_retrieval.py
