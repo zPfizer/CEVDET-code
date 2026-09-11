@@ -103,6 +103,7 @@
 !/.codex/tests/test_defensive_error_paths_hook.py
 !/.codex/tests/test_defensive_error_paths_worker.py
 !/.codex/tests/test_defensive_error_paths_worker2.py
+!/.codex/tests/test_defensive_error_paths_misc2.py
 !/.codex/tests/test_defensive_error_paths_process.py
 !/.codex/tests/test_defensive_error_paths_doctor2.py
 !/.codex/tests/test_defensive_error_paths_flush.py
