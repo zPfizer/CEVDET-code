@@ -60,6 +60,7 @@
 !/.codex/scripts/memory_ledger.py
 !/.codex/scripts/process_control.py
 !/.codex/scripts/profile_guard.py
+!/.codex/scripts/stale_review.py
 !/.codex/scripts/state_store.py
 !/.codex/scripts/tag_taxonomy.py
 !/.codex/scripts/transcript_index.py
@@ -119,6 +120,7 @@
 !/.codex/tests/test_semantic_tag_repair.py
 !/.codex/tests/test_session_access_removal.py
 !/.codex/tests/test_session_snapshots.py
+!/.codex/tests/test_stale_review.py
 !/.codex/tests/test_startup_index_boundary.py
 !/.codex/tests/test_state_store.py
 !/.codex/tests/test_transcript_index.py
