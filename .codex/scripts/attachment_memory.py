@@ -16,6 +16,7 @@ from knowledge_schema import markdown_headings
 from memory_ledger import (
     filter_suppressed_text,
     is_session_only,
+    session_only_path,
     memory_write_guard,
     sanitize_text,
     suppression_guard,
@@ -276,9 +277,7 @@ def _publication_scope(state_dir: Path, session_id: str | None) -> Iterator[None
         if not session_id:
             yield
             return
-        session_lock = state_dir / (
-            'memory-session-only-' + _attachment_digest(session_id)
-        )
+        session_lock = session_only_path(state_dir, session_id)
         with locked(session_lock):
             if is_session_only(state_dir, session_id):
                 raise ValueError('memory-session-excluded')

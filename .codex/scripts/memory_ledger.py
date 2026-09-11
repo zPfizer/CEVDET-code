@@ -1039,19 +1039,20 @@ def persistent_turns(
     return [(turn.role, turn.text) for turn in reducer.retained]
 
 
-def _session_only_path(state_dir: Path, session_id: str) -> Path:
+def session_only_path(state_dir: Path, session_id: str) -> Path:
+    """Tek sahip: session-only işaret/kilit yolu; yayincilar bu yolu kilitler."""
     return state_dir / f"memory-session-only-{_sha256_text(session_id)}"
 
 
 def mark_session_only(state_dir: Path, session_id: str) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
-    path = _session_only_path(state_dir, session_id)
+    path = session_only_path(state_dir, session_id)
     with locked(path):
         path.touch(exist_ok=True)
 
 
 def is_session_only(state_dir: Path, session_id: str) -> bool:
-    return _session_only_path(state_dir, session_id).is_file()
+    return session_only_path(state_dir, session_id).is_file()
 
 
 def _read_only_path(state_dir: Path, session_id: str) -> Path:
