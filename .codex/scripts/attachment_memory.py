@@ -470,7 +470,9 @@ def _capture_one_core(
                         destination, vault_root, expected_hash=note_digest,
                         source_digest=source_digest, source_attachment=source_attachment,
                     )
-                    if existing['source'] != visible or existing['summary'] != summary:
+                    # expected_hash içerik özetini sabitler; _read_note geçtiyse
+                    # ayrışma imkânsızdır — derinlemesine savunma satırı.
+                    if existing['source'] != visible or existing['summary'] != summary:  # pragma: no cover
                         raise ValueError('attachment-note-integrity')
                 else:
                     destination.parent.mkdir(parents=True, exist_ok=True)
