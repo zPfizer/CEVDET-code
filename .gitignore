@@ -91,6 +91,7 @@
 !/.codex/tests/test_conversation_continuity.py
 !/.codex/tests/test_daily_compaction.py
 !/.codex/tests/test_defensive_error_paths.py
+!/.codex/tests/test_defensive_error_paths_process2.py
 !/.codex/tests/test_defensive_error_paths_records.py
 !/.codex/tests/test_defensive_error_paths_retrieval2.py
 !/.codex/tests/test_defensive_error_paths_schema.py
