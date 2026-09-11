@@ -414,7 +414,9 @@ def _mask_bounded_memory_controls(folded: str) -> str:
     for token_match in _MEMORY_TARGET_TOKEN.finditer(folded):
         target = token_match.group()
         final_component = re.split(r"[\\/]", target)[-1]
-        if ":" in target and _EXPLICIT_WRITE_PATH_PREFIX.match(target) is None:
+        # Bileşen karakter kümesi ':' içermez; ':' yalnız sürücü önekiyle
+        # eşleşebilir ve o önek yol-öneki desenine daima uyar.
+        if ":" in target and _EXPLICIT_WRITE_PATH_PREFIX.match(target) is None:  # pragma: no cover
             continue
         filename = _NAMED_FILENAME.fullmatch(final_component)
         if filename is None:
@@ -655,7 +657,9 @@ def _balanced_value_end(text: str, start: int) -> int | None:
         stack: list[str] = []
         try:
             for token in tokenize.generate_tokens(io.StringIO(fragment).readline):
-                if token.type == tokenize.ERRORTOKEN and token.string in {'"', "'", '\\'}:
+                # Py3.12+ tokenize bu girdilerde TokenError yükseltir; ERRORTOKEN
+                # dalı eski sürüm uyumluluğu için durur.
+                if token.type == tokenize.ERRORTOKEN and token.string in {'"', "'", '\\'}:  # pragma: no cover
                     break
                 if token.type != tokenize.OP:
                     continue
@@ -730,10 +734,10 @@ def _json_string_regions(
                 break
             try:
                 value, end = decoder.raw_decode(text, opening)
-            except (ValueError, RecursionError):
+            except (ValueError, RecursionError):  # pragma: no cover — bölge tam decode ile doğrulandı; iç dize decode edilememezlik savunması
                 cursor = opening + 1
                 continue
-            if end > region_end:
+            if end > region_end:  # pragma: no cover — dize, doğrulanmış bölgenin dışına taşamaz
                 break
             tail = end
             while tail < region_end and text[tail].isspace():
@@ -748,7 +752,7 @@ def _json_string_regions(
                     value_start += 1
                 try:
                     _, value_end = decoder.raw_decode(text, value_start)
-                except (ValueError, RecursionError):
+                except (ValueError, RecursionError):  # pragma: no cover — bölge decode garantisi: değer decode hatası savunma hattı
                     cursor = tail + 1
                     continue
             yield opening, end, is_value, value, value_start, value_end
@@ -810,7 +814,7 @@ def _redact_decoded_json(text: str) -> tuple[str, tuple[str, ...]]:
             ):
                 try:
                     decoded_value, decoded_end = json.JSONDecoder().raw_decode(text, value_start)
-                except (ValueError, RecursionError):
+                except (ValueError, RecursionError):  # pragma: no cover — bölge decode garantisi: authorization değeri çözülemezlik savunması
                     continue
                 if decoded_end == value_end and isinstance(decoded_value, str):
                     parts = decoded_value.split(None, 1)
@@ -821,7 +825,7 @@ def _redact_decoded_json(text: str) -> tuple[str, tuple[str, ...]]:
             continue
         try:
             nested, nested_redactions = sanitize_text(decoded, max_chars=None)
-        except RecursionError:
+        except RecursionError:  # pragma: no cover — iç sanitize RecursionError yerine MPE üretir; savunma hattı
             raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
         except MemoryPreferenceError:
             replacements.append((start, end, json.dumps("<REDACTED>")))
@@ -839,7 +843,7 @@ def _redact_decoded_json(text: str) -> tuple[str, tuple[str, ...]]:
     pieces: list[str] = []
     cursor = 0
     for start, end, replacement in sorted(replacements):
-        if start < cursor:
+        if start < cursor:  # pragma: no cover — aynı seviyedeki dize bölgeleri kesişemez; savunma hattı
             continue
         pieces.extend((text[cursor:start], replacement))
         cursor = end

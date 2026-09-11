@@ -232,6 +232,79 @@ class MemoryViewEdges(unittest.TestCase):
             )
         self.assertIn("https://example.com/sayfa", text)
 
+    def test_ledger_scanner_and_view_stragglers(self) -> None:
+        # Derin köşeli parantez: sınırlı özyinelemede decode RecursionError'ı
+        # doğrulanamaz kimlik hatasına çevrilir.
+        limit = sys.getrecursionlimit()
+        try:
+            sys.setrecursionlimit(60)
+            with self.assertRaises(memory_ledger.MemoryPreferenceError):
+                list(memory_ledger._json_regions("[" * 200))
+        finally:
+            sys.setrecursionlimit(limit)
+
+        # TOKEN_PREFIX bölge sonrası eşleşme: bölge atlanır, token redakte edilir.
+        cleaned, redactions = memory_ledger.sanitize_text(
+            '{"x": "deger"} sonra ghp_abcdefghijklmnop123456 son'
+        )
+        self.assertIn("credential", redactions)
+        self.assertNotIn("ghp_abcdefghijklmnop123456", cleaned)
+
+        # Companion alias bastırması kaynağın kendisini de kapatır.
+        source, alias = next(iter(memory_ledger._COMPANION_SOURCE_ALIASES.items()))
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = self._vault(Path(temporary))
+            memory_ledger.suppress_derived_memory(
+                vault / ".codex/private-memory", alias
+            )
+            with memory_ledger.memory_read(vault) as memory:
+                self.assertIsNone(
+                    memory.project_text(source, "metin", resolved_relative=source)
+                )
+
+        # Aktif hafızada bastırılmış kaynağın görünüm kimliği: kaynak görünür
+        # listede yoktur, başa eklenir ve boş metin döner.
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = self._vault(Path(temporary))
+            (vault / "daily" / "2026-09-01.md").write_text("Gün.", encoding="utf-8")
+            memory_ledger.suppress_derived_memory(
+                vault / ".codex/private-memory", "daily/2026-09-01.md"
+            )
+            digest = memory_ledger._sha256_text("daily/2026-09-01.md")
+            view = vault / ".codex" / "private-memory" / "views" / f"{digest}.md"
+            self.assertEqual(memory_ledger.read_memory_source(vault, view), "")
+
+        # Görünüm hedefi symlink ise materialize reddeder; render'ın kendi
+        # junction korkuluğu da bağımsız çalışır.
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = self._vault(Path(temporary))
+            (vault / "daily" / "2026-09-01.md").write_text("Gün.", encoding="utf-8")
+            memory_ledger.suppress_derived_memory(
+                vault / ".codex/private-memory", "alakasız"
+            )
+            hashes = memory_ledger.load_suppressed_hashes(
+                vault / ".codex/private-memory"
+            )
+            digest = memory_ledger._sha256_text("daily/2026-09-01.md")
+            views = vault / ".codex" / "private-memory" / "views"
+            views.mkdir(parents=True, exist_ok=True)
+            gercek = vault / "gercek-view.md"
+            gercek.write_text("x", encoding="utf-8")
+            os.symlink(gercek, views / f"{digest}.md")
+            with self.assertRaises(memory_ledger.MemoryPreferenceError):
+                memory_ledger.materialize_memory_views(
+                    vault, [("daily/2026-09-01.md", "Gün")], hashes
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            vault2 = Path(temporary) / "vault2"
+            (vault2 / ".codex").mkdir(parents=True)
+            outside = Path(temporary) / "dis"
+            outside.mkdir()
+            _junction(vault2 / ".codex" / "private-memory", outside)
+            with self.assertRaises(memory_ledger.MemoryPreferenceError):
+                memory_ledger._render_memory_views(vault2, [], frozenset())
+
     def test_read_memory_source_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = self._vault(Path(temporary))
