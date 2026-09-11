@@ -98,6 +98,7 @@
 !/.codex/tests/test_defensive_error_paths_attachments.py
 !/.codex/tests/test_defensive_error_paths_ledger.py
 !/.codex/tests/test_defensive_error_paths_companion.py
+!/.codex/tests/test_defensive_error_paths_flush3.py
 !/.codex/tests/test_defensive_error_paths_hook.py
 !/.codex/tests/test_defensive_error_paths_worker.py
 !/.codex/tests/test_defensive_error_paths_worker2.py

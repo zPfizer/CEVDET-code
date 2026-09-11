@@ -836,7 +836,9 @@ def flush_once(
 
         def legacy_values(limit: int) -> list[tuple[str, str]] | None:
             if limit in legacy_values_cache:
-                return legacy_values_cache[limit]
+                # Üç çağrı yeri (kapsama, batch göçü, legacy-batch) kesişimsiz
+                # limitlerle çağırır; önbellek gelecekteki çoklu çağrılar için.
+                return legacy_values_cache[limit]  # pragma: no cover
             if limit < 0 or limit > len(all_chunks):
                 return None
             references = all_chunks[:limit]
