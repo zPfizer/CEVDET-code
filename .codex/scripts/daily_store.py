@@ -335,9 +335,11 @@ def _publish(
         if receipt is None:
             date_text = now.date().isoformat()
             daily_path = vault_root / "daily" / f"{date_text}.md"
-            newline = "\r\n" if daily_path.is_file() and b"\r\n" in daily_path.read_bytes() else "\n"
             with locked(state_dir / f"daily-{date_text}"):
                 before = daily_path.read_bytes() if daily_path.is_file() else b""
+                # Derive the newline from the locked read: an unlocked probe can
+                # disagree with ``before`` and mix line endings into the image.
+                newline = "\r\n" if b"\r\n" in before else "\n"
                 base = daily_with_graph_link(
                     before.decode("utf-8") if before else "",
                     date_text,
