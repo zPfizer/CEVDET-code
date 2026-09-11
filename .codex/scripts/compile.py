@@ -1136,7 +1136,9 @@ def _promote_changes(
             _validate_live_destination(vault_root, relative, before)
         target = journal["targets"][index]
         if not isinstance(target, dict):
-            raise PolicyError("publication-journal-invalid")
+            # _publication_record hedefleri sözlük üretir ve günlük hemen
+            # üstte doğrulanır; bu kol tetiklenemez (savunma hattı).
+            raise PolicyError("publication-journal-invalid")  # pragma: no cover
         target["completed"] = True
         compile_state.save_publication(state_dir, journal)
     journal["status"] = "complete"
