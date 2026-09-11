@@ -96,6 +96,7 @@
 !/.codex/tests/test_defensive_error_paths_index.py
 !/.codex/tests/test_defensive_error_paths_attachments.py
 !/.codex/tests/test_defensive_error_paths_ledger.py
+!/.codex/tests/test_defensive_error_paths_companion.py
 !/.codex/tests/test_doctor.py
 !/.codex/tests/test_doctor_failure_isolation.py
 !/.codex/tests/test_doctor_record_validation.py
