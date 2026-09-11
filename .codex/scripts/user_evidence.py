@@ -269,7 +269,7 @@ def filter_evidence(text: str, excludes: Callable[[str], bool]) -> str:
     def replace(match: re.Match[str]) -> str:
         try:
             record = _json_object(json.loads(match.group(1)))
-            if record is None:
+            if record is None:  # pragma: no cover — EVIDENCE {...} deseni json nesnesi garantiler; savunma hattı.
                 return ''
             record_id = record.get('id')
             claim = record.get('claim')

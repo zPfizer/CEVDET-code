@@ -17,6 +17,7 @@
 /.agents/*
 /.codex/*
 /docs/*
+!/.coveragerc
 !/.agents
 !/.codex
 !/docs
@@ -89,6 +90,7 @@
 !/.codex/tests/test_context_selection_quality.py
 !/.codex/tests/test_conversation_continuity.py
 !/.codex/tests/test_daily_compaction.py
+!/.codex/tests/test_defensive_error_paths.py
 !/.codex/tests/test_doctor.py
 !/.codex/tests/test_doctor_failure_isolation.py
 !/.codex/tests/test_doctor_record_validation.py
