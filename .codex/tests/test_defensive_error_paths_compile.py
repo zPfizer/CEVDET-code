@@ -117,25 +117,18 @@ class ManifestAndPublicationGuards(unittest.TestCase):
             self.assertIsNone(memory_compile._live_digest(vault, "baska/dosya.txt"))
             self.assertIsNone(memory_compile._live_digest(vault, "daily/yok.md"))
 
-    def test_source_snapshot_matches_budget_and_git_failure(self) -> None:
+    def test_source_snapshot_matches_argument_guards(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            vault = Path(temporary)
-            source = vault / "daily"
-            source.mkdir()
-            note = source / "2026-09-11.md"
+            note = Path(temporary) / "2026-09-11.md"
             note.write_text("x", encoding="utf-8")
+            self.assertFalse(
+                memory_compile._source_snapshot_matches(note, 5, 1)
+            )
             with mock.patch.object(
                 memory_compile, "_MAX_SOURCE_SNAPSHOT_BYTES", 0
             ):
                 self.assertFalse(
-                    memory_compile._source_snapshot_matches(vault, note, b"x")
-                )
-            with mock.patch.object(
-                memory_compile, "_git",
-                side_effect=subprocess.SubprocessError("git yok"),
-            ):
-                self.assertFalse(
-                    memory_compile._source_snapshot_matches(vault, note, b"x")
+                    memory_compile._source_snapshot_matches(note, "a" * 64, 1)
                 )
 
 
