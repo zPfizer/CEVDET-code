@@ -366,7 +366,9 @@ def _scoped_hook_runtime(ctx: Context) -> Check | None:
             coherent_prompts.append(item)
     latest_timestamp = _finite_timestamp(latest.get("ts"))
     if latest_timestamp is None:
-        return Check("Hook çalışma zamanı", "WARN", "fresh scoped SessionStart receipt yok")
+        # fresh_starts'a girerken aynı sözlükten aynı fonksiyonla doğrulandı;
+        # bellekteki dict değişmediğinden bu kol tetiklenemez (savunma hattı).
+        return Check("Hook çalışma zamanı", "WARN", "fresh scoped SessionStart receipt yok")  # pragma: no cover
     if not coherent_prompts:
         age = max(0, int(ctx.now - latest_timestamp))
         return Check(
@@ -551,7 +553,9 @@ def _hook_health_check(ctx: Context) -> Check | list[Check]:
                 error_text = _receipt_error(error)
                 timestamp = _finite_timestamp(health.get("ts"))
                 if timestamp is None:
-                    failures.append(f"{error_text} (invalid timestamp)")
+                    # ts alanı birkaç satır yukarıda aynı fonksiyonla int+finite
+                    # doğrulandı; bu kol tetiklenemez (savunma hattı).
+                    failures.append(f"{error_text} (invalid timestamp)")  # pragma: no cover
                 elif ctx.now - timestamp > HOOK_RUNTIME_MAX_AGE_SECONDS:
                     historical_failures.append(error_text)
                 else:
