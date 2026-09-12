@@ -336,9 +336,11 @@ def _capture_one_core(
                 source_digest=mapping['source_sha256'],
                 source_attachment=source_attachment,
             )
-            visible = filter_suppressed_text(note['source'], hashes)
-            raw_digest = mapping['source_sanitized_sha256']
-            redactions = mapping['redactions']
+            recovered_source, redactions = sanitize_text(
+                note['source'], max_chars=MAX_SOURCE_CHARS,
+            )
+            visible = filter_suppressed_text(recovered_source, hashes)
+            raw_digest = _attachment_digest(recovered_source)
 
         if not visible.strip():
             return None

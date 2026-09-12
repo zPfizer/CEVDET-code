@@ -165,6 +165,50 @@ class AttachmentMemoryTests(unittest.TestCase):
             self.assertEqual(second, first)
             summarize.assert_called_once()
 
+    def test_recovery_resanitizes_cached_source_before_summary_model(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('DATABASE_PASSWORD=LEGACY_SECRET\nKeep source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nSafe summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            old_policy = lambda value, max_chars=None: (value, ())
+
+            def current_policy(value, max_chars=None):
+                if 'LEGACY_SECRET' in value:
+                    return value.replace('LEGACY_SECRET', '<REDACTED>'), ('credential',)
+                return value, ()
+
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}), \
+                 mock.patch.object(attachment_memory, 'sanitize_text', side_effect=old_policy):
+                first = attachment_memory.capture_sources(
+                    [('user', text)], root, dt.datetime.now(dt.timezone.utc), frozenset(),
+                    mock.Mock(return_value=summary), state_dir=state,
+                )
+            self.assertTrue(first)
+            suppress_derived_memory(root / '.codex/private-memory', 'Keep source.')
+            source.unlink()
+            calls = []
+
+            def summarize(prompt):
+                calls.append(prompt)
+                return summary
+
+            hashes = load_suppressed_hashes(root / '.codex/private-memory')
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}), \
+                 mock.patch.object(attachment_memory, 'sanitize_text', side_effect=current_policy):
+                recovered = attachment_memory.capture_sources(
+                    [('user', text)], root, dt.datetime.now(dt.timezone.utc), hashes,
+                    summarize, state_dir=state,
+                )
+            self.assertTrue(recovered)
+            self.assertEqual(len(calls), 1)
+            self.assertNotIn('LEGACY_SECRET', calls[0])
+            self.assertIn('<REDACTED>', calls[0])
+
     def test_rejects_tampered_note_and_same_id_different_content(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
