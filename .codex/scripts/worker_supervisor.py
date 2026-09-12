@@ -1532,14 +1532,29 @@ def redrive_dead_letter(
 
     Kayıt yerinde güncellenip `os.replace` ile taşınır (recover_stale_jobs ile
     aynı kalıp); yarım kalan taşıma, kaydedilmiş `pending` durumundan mevcut
-    recovery yolu tarafından tamamlanır. Dead-letter zaten çözülmemiş iş
-    sayıldığından taşıma admission bütçesini değiştirmez.
+    recovery yolu tarafından tamamlanır. Önceki redrive'dan kalan `pending`
+    kaydı da tekrar çalıştırmada tanınır ve supervisor yeniden uyandırılır.
+    Dead-letter zaten çözülmemiş iş sayıldığından taşıma admission bütçesini
+    değiştirmez.
     """
     observed_now = time.time() if now is None else now
     _ensure_job_dirs(state_dir)
     redriven: list[str] = []
     skipped: list[tuple[str, str]] = []
     with locked(state_dir / "worker-queue"):
+        for path in sorted((_job_root(state_dir) / "pending").glob("*.json")):
+            try:
+                job = _load_job(path)
+            except ValueError:
+                continue
+            redriven_ts = job.get("redriven_ts")
+            if (
+                not isinstance(redriven_ts, int)
+                or isinstance(redriven_ts, bool)
+                or (job_id is not None and job["job_id"] != job_id)
+            ):
+                continue
+            redriven.append(job["job_id"])
         for path in sorted((_job_root(state_dir) / "dead-letter").glob("*.json")):
             try:
                 job = _load_job(path)
@@ -2143,6 +2158,7 @@ def main() -> int:
         target = None if args.redrive == "all" else args.redrive
         if target is not None and re.fullmatch(r"[0-9a-f]{32}", target) is None:
             raise ValueError("worker-redrive-job-id-invalid")
+        recover_stale_jobs(state_dir)
         redriven, skipped = redrive_dead_letter(state_dir, job_id=target)
         if redriven:
             ensure_supervisor(state_dir, vault_root=vault_root)

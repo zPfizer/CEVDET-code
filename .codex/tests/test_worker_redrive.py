@@ -201,6 +201,105 @@ class RedriveDeadLetterTests(unittest.TestCase):
         self.assertEqual(result, 0)
         wake.assert_called_once_with(state, vault_root=vault)
 
+    def test_cli_redrive_retry_recovers_transition_and_wakes_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            vault = root / "vault"
+            vault.mkdir()
+            job_id = "a" * 32
+            dead_letter = _dead_letter_job(state, job_id, payload={"reason": "retry"})
+            real_replace = workers.os.replace
+
+            def fail_transition(source: Path, destination: Path) -> None:
+                if (
+                    source.parent.name == "dead-letter"
+                    and destination.parent.name == "pending"
+                ):
+                    raise OSError("simulated interruption")
+                real_replace(source, destination)
+
+            with mock.patch.object(workers.os, "replace", side_effect=fail_transition):
+                with mock.patch.object(
+                    workers.sys,
+                    "argv",
+                    [
+                        "worker_supervisor.py",
+                        "--vault",
+                        str(vault),
+                        "--state-dir",
+                        str(state),
+                        "--redrive",
+                        job_id,
+                    ],
+                ):
+                    with self.assertRaisesRegex(OSError, "simulated interruption"):
+                        workers.main()
+
+            with (
+                mock.patch.object(
+                    workers.sys,
+                    "argv",
+                    [
+                        "worker_supervisor.py",
+                        "--vault",
+                        str(vault),
+                        "--state-dir",
+                        str(state),
+                        "--redrive",
+                        job_id,
+                    ],
+                ),
+                mock.patch.object(workers, "ensure_supervisor") as wake,
+            ):
+                result = workers.main()
+
+            pending = state / "worker-jobs" / "pending" / dead_letter.name
+            recovered = workers._load_job(pending)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(recovered["job_id"], job_id)
+        wake.assert_called_once_with(state, vault_root=vault)
+
+    def test_cli_redrive_retry_wakes_pending_after_launcher_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            vault = root / "vault"
+            vault.mkdir()
+            job_id = "a" * 32
+            dead_letter = _dead_letter_job(state, job_id, payload={"reason": "launcher"})
+            argv = [
+                "worker_supervisor.py",
+                "--vault",
+                str(vault),
+                "--state-dir",
+                str(state),
+                "--redrive",
+                job_id,
+            ]
+            with (
+                mock.patch.object(workers.sys, "argv", argv),
+                mock.patch.object(
+                    workers,
+                    "ensure_supervisor",
+                    side_effect=OSError("launcher failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(OSError, "launcher failed"):
+                    workers.main()
+            pending = state / "worker-jobs" / "pending" / dead_letter.name
+            self.assertIsInstance(workers._load_job(pending)["redriven_ts"], int)
+
+            with (
+                mock.patch.object(workers.sys, "argv", argv),
+                mock.patch.object(workers, "ensure_supervisor") as wake,
+            ):
+                result = workers.main()
+
+        self.assertEqual(result, 0)
+        wake.assert_called_once_with(state, vault_root=vault)
+
     def test_cli_targeted_missing_job_returns_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -224,6 +323,40 @@ class RedriveDeadLetterTests(unittest.TestCase):
                 result = workers.main()
 
         self.assertEqual(result, 1)
+
+    def test_cli_targeted_normal_pending_job_is_not_treated_as_redriven(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            vault = root / "vault"
+            vault.mkdir()
+            pending = workers.enqueue_job(
+                state,
+                "maintenance",
+                {"reason": "ordinary"},
+                start_supervisor=False,
+            )
+            job_id = pending.stem.removeprefix("job-")
+            with (
+                mock.patch.object(
+                    workers.sys,
+                    "argv",
+                    [
+                        "worker_supervisor.py",
+                        "--vault",
+                        str(vault),
+                        "--state-dir",
+                        str(state),
+                        "--redrive",
+                        job_id,
+                    ],
+                ),
+                mock.patch.object(workers, "ensure_supervisor") as wake,
+            ):
+                result = workers.main()
+
+        self.assertEqual(result, 1)
+        wake.assert_not_called()
 
     def test_flush_job_with_deleted_managed_input_is_skipped(self) -> None:
         # Yönetilen hookin girdisi silinmişse iş koşamaz; sessiz düşmek
