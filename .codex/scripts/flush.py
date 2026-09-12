@@ -24,7 +24,7 @@ import time
 from file_lock import locked
 from jsonl_tail import IncompleteRecord, iter_records, seek_tail
 from knowledge_schema import markdown_headings
-from memory_ledger import is_session_only, sanitize_text, load_suppressed_hashes
+from memory_ledger import is_session_only, sanitize_text, load_suppressed_hashes, session_only_path
 from memory_ledger import is_read_only_turn, memory_write_guard, MemoryReadOnlyError
 from process_control import ProcessTreeCleanupError
 from worker_supervisor import load_hook_input, resolve_hook_input
@@ -732,7 +732,7 @@ def append_daily(
         f"{reason}\0{now.isoformat()}\0{summary}".encode("utf-8")
     ).hexdigest()
     # Use the same marker lock as mark_session_only, only for the short publish.
-    lock_target = state_dir / ('memory-session-only-' + _session_key(session_id)) if session_id else state_dir / 'memory-publish'
+    lock_target = session_only_path(state_dir, session_id) if session_id else state_dir / 'memory-publish'
     with memory_write_guard(state_dir, session_id), locked(lock_target):
         if session_id and is_session_only(state_dir, session_id):
             raise ValueError('memory-session-excluded')

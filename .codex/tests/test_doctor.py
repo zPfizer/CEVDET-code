@@ -27,6 +27,7 @@ import flush  # noqa: E402
 import hook  # noqa: E402
 import worker_supervisor as workers  # noqa: E402
 import memory_ledger  # noqa: E402
+import process_control  # noqa: E402
 
 
 class DoctorTests(unittest.TestCase):
@@ -295,6 +296,39 @@ class DoctorTests(unittest.TestCase):
                 self.assertIn("ownership", check.evidence)
 
     def test_doctor_accepts_ready_pending_job_with_live_owner_after_lease_expiry(self) -> None:
+        for identity_case in ("absent", None):
+            with self.subTest(identity_case=identity_case), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                pending = state / "worker-jobs" / "pending"
+                pending.mkdir(parents=True)
+                (pending / "job-ready.json").write_text(
+                    json.dumps({"status": "pending", "next_attempt_ts": 90}),
+                    encoding="utf-8",
+                )
+                receipt = {
+                    "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
+                    "status": "running",
+                    "generation": 1,
+                    "launch_token": "",
+                    "owner_pid": os.getpid(),
+                    "lease_until": 99,
+                    "updated_ts": 100,
+                }
+                if identity_case != "absent":
+                    receipt["owner_identity"] = identity_case
+                (state / "worker-supervisor.json").write_text(
+                    json.dumps(receipt),
+                    encoding="utf-8",
+                )
+
+                check = doctor._worker_delayed_job_check(
+                    doctor.Context(state_dir=state, now=100)
+                )
+
+            self.assertEqual(check.status, "OK")
+            self.assertIn("supervisor=running", check.evidence)
+
+    def test_doctor_warns_when_running_supervisor_birth_identity_cannot_be_read(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             pending = state / "worker-jobs" / "pending"
@@ -311,6 +345,7 @@ class DoctorTests(unittest.TestCase):
                         "generation": 1,
                         "launch_token": "",
                         "owner_pid": os.getpid(),
+                        "owner_identity": "win32:recorded-at-launch",
                         "lease_until": 99,
                         "updated_ts": 100,
                     }
@@ -318,12 +353,122 @@ class DoctorTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            check = doctor._worker_delayed_job_check(
-                doctor.Context(state_dir=state, now=100)
+            with mock.patch.object(
+                process_control, "process_identity", return_value=None
+            ):
+                check = doctor._worker_delayed_job_check(
+                    doctor.Context(state_dir=state, now=100)
+                )
+
+        self.assertEqual(check.status, "WARN")
+        self.assertIn("ownership", check.evidence)
+        self.assertIn("ready-pending=1", check.evidence)
+
+    def test_doctor_uses_one_supervisor_birth_identity_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            pending = state / "worker-jobs" / "pending"
+            pending.mkdir(parents=True)
+            (pending / "job-ready.json").write_text(
+                json.dumps({"status": "pending", "next_attempt_ts": 90}),
+                encoding="utf-8",
             )
+            (state / "worker-supervisor.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
+                        "status": "running",
+                        "generation": 1,
+                        "launch_token": "",
+                        "owner_pid": os.getpid(),
+                        "owner_identity": "win32:recorded-at-launch",
+                        "lease_until": 99,
+                        "updated_ts": 100,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                process_control,
+                "process_identity",
+                side_effect=[None, "win32:reused-pid"],
+            ) as identity:
+                check = doctor._worker_delayed_job_check(
+                    doctor.Context(state_dir=state, now=100)
+                )
+
+        self.assertEqual(identity.call_count, 1)
+        self.assertEqual(check.status, "WARN")
+        self.assertIn("ownership", check.evidence)
+
+    def test_doctor_accepts_running_supervisor_with_readable_matching_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            pending = state / "worker-jobs" / "pending"
+            pending.mkdir(parents=True)
+            (pending / "job-ready.json").write_text(
+                json.dumps({"status": "pending", "next_attempt_ts": 90}),
+                encoding="utf-8",
+            )
+            (state / "worker-supervisor.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
+                        "status": "running",
+                        "generation": 1,
+                        "launch_token": "",
+                        "owner_pid": os.getpid(),
+                        "owner_identity": "win32:still-the-same",
+                        "lease_until": 99,
+                        "updated_ts": 100,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                process_control, "process_identity", return_value="win32:still-the-same"
+            ):
+                check = doctor._worker_delayed_job_check(
+                    doctor.Context(state_dir=state, now=100)
+                )
 
         self.assertEqual(check.status, "OK")
         self.assertIn("supervisor=running", check.evidence)
+
+    def test_doctor_rejects_running_supervisor_with_malformed_birth_identity(self) -> None:
+        for malformed_identity in (123, ""):
+            with self.subTest(malformed_identity=malformed_identity), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                pending = state / "worker-jobs" / "pending"
+                pending.mkdir(parents=True)
+                (pending / "job-ready.json").write_text(
+                    json.dumps({"status": "pending", "next_attempt_ts": 90}),
+                    encoding="utf-8",
+                )
+                (state / "worker-supervisor.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
+                            "status": "running",
+                            "generation": 1,
+                            "launch_token": "",
+                            "owner_pid": os.getpid(),
+                            "owner_identity": malformed_identity,
+                            "lease_until": 99,
+                            "updated_ts": 100,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                check = doctor._worker_delayed_job_check(
+                    doctor.Context(state_dir=state, now=100)
+                )
+
+            self.assertEqual(check.status, "FAIL")
+            self.assertIn("supervisor receipt alanları geçersiz", check.evidence)
 
     def test_doctor_warns_for_terminal_unrecoverable_input_dead_letter(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
