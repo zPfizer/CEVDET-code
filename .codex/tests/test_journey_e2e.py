@@ -86,12 +86,32 @@ def _copy_runtime(vault: Path) -> Path:
         "    if os.name == 'nt':\n"
         "        breakaway = getattr(subprocess, 'CREATE_BREAKAWAY_FROM_JOB', 0x01000000)\n"
         "        options['creationflags'] = int(options.get('creationflags', 0)) & ~breakaway\n"
+        "    state_dir = None\n"
+        "    pending = []\n"
+        "    command_values = [str(value) for value in command]\n"
+        "    if '--state-dir' in command_values:\n"
+        "        state_dir = Path(command_values[command_values.index('--state-dir') + 1])\n"
+        "        for job_path in sorted((state_dir / 'worker-jobs' / 'pending').glob('*.json')):\n"
+        "            try:\n"
+        "                job = json.loads(job_path.read_text(encoding='utf-8'))\n"
+        "                payload = job.get('payload', {})\n"
+        "                hook_input = payload.get('hook_input') if isinstance(payload, dict) else None\n"
+        "                transport = None\n"
+        "                if isinstance(hook_input, str) and hook_input:\n"
+        "                    transport = json.loads(Path(hook_input).read_text(encoding='utf-8'))\n"
+        "                pending.append({'job_id': job.get('job_id'), 'kind': job.get('kind'),\n"
+        "                                'reason': payload.get('reason') if isinstance(payload, dict) else None,\n"
+        "                                'hook_input': hook_input, 'transport': transport})\n"
+        "            except (OSError, UnicodeError, json.JSONDecodeError):\n"
+        "                continue\n"
         "    process = subprocess.Popen(list(command), **options)\n"
         "    registry = os.environ.get('CEVO_JOURNEY_WORKER_REGISTRY')\n"
         "    if registry:\n"
         "        identity = worker_supervisor.process_control.process_identity(process.pid)\n"
         "        with Path(registry).open('a', encoding='utf-8') as stream:\n"
-        "            stream.write(json.dumps({'pid': process.pid, 'identity': identity}) + '\\n')\n"
+        "            stream.write(json.dumps({'pid': process.pid, 'identity': identity,\n"
+        "                                      'state_dir': str(state_dir) if state_dir else '',\n"
+        "                                      'pending': pending}) + '\\n')\n"
         "    return process\n"
         "\n"
         "def enqueue_flush(payload, reason, *, popen_factory=subprocess.Popen, deadline=None):\n"
@@ -245,6 +265,46 @@ def _debug_state(state: Path) -> str:
     return "\n".join(lines)
 
 
+class _ManagedWorkerHandle:
+    """Popen-shaped owner handle for identity-verified test cleanup."""
+
+    def __init__(self, pid: int, identity: str) -> None:
+        self.pid = pid
+        self._beyin_process_identity = identity
+        self._beyin_command = ["journey-managed-worker", str(pid)]
+        self._beyin_process_group = False
+
+    def poll(self) -> int | None:
+        return None if process_control.process_is_same(
+            self.pid, self._beyin_process_identity
+        ) else 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while self.poll() is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(self._beyin_command, timeout)
+            time.sleep(0.05)
+        return 0
+
+    def terminate(self) -> None:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(self.pid), "/T", "/F"],
+                check=False,
+                capture_output=True,
+                creationflags=FLAGS,
+            )
+        else:
+            os.kill(self.pid, 15)
+
+    def kill(self) -> None:
+        if os.name == "nt":
+            self.terminate()
+        else:
+            os.kill(self.pid, 9)
+
+
 def _hook_result_diagnostics(result: subprocess.CompletedProcess[str] | None) -> str:
     if result is None:
         return ""
@@ -306,7 +366,8 @@ class JourneyE2ETests(unittest.TestCase):
         environment["CODEX_CLI_PATH"] = str(stub)
         environment["CODEX_HOME"] = str(home)
         environment["CEVO_JOURNEY_WORKER_REGISTRY"] = str(
-            stub.parent / "worker-processes.jsonl"
+            Path(tempfile.gettempdir())
+            / f"cevo-journey-workers-{uuid.uuid4().hex}.jsonl"
         )
         return environment
 
@@ -328,6 +389,29 @@ class JourneyE2ETests(unittest.TestCase):
             if isinstance(value, dict):
                 records.append(value)
         return records
+
+    def _cleanup_managed_workers(self, registry: Path) -> None:
+        records = self._managed_worker_records(
+            {"CEVO_JOURNEY_WORKER_REGISTRY": str(registry)},
+        )
+        for record in records:
+            pid = record.get("pid")
+            identity = record.get("identity")
+            if (
+                isinstance(pid, int)
+                and not isinstance(pid, bool)
+                and pid > 0
+                and isinstance(identity, str)
+                and identity
+                and process_control.process_is_same(pid, identity)
+            ):
+                process_control.terminate_process_tree(
+                    _ManagedWorkerHandle(pid, identity)
+                )
+        try:
+            registry.unlink()
+        except FileNotFoundError:
+            pass
 
     def _assert_managed_workers_stopped(
         self, environment: dict[str, str],
@@ -422,17 +506,37 @@ class JourneyE2ETests(unittest.TestCase):
 
     def _assert_pending_session_end_transport(
         self, state: Path, session_id: str, transcript: Path,
+        environment: dict[str, str],
+        excluded_job_ids: set[str] | None = None,
     ) -> tuple[str, str]:
-        jobs = list((state / "worker-jobs" / "pending").glob("*.json"))
-        self.assertEqual(len(jobs), 1, _debug_state(state))
-        job = json.loads(jobs[0].read_text(encoding="utf-8"))
-        self.assertEqual(job["kind"], "flush")
-        self.assertEqual(job["payload"]["reason"], "sessionend")
-        hook_input = Path(job["payload"]["hook_input"])
-        transport = json.loads(hook_input.read_text(encoding="utf-8"))
-        self.assertEqual(transport["session_id"], session_id)
-        self.assertEqual(transport["transcript_path"], str(transcript))
-        return job["job_id"], str(hook_input)
+        excluded = excluded_job_ids or set()
+        matches: list[tuple[str, str]] = []
+        for record in self._managed_worker_records(environment):
+            if record.get("state_dir") != str(state):
+                continue
+            snapshots = record.get("pending")
+            if not isinstance(snapshots, list):
+                continue
+            for snapshot in snapshots:
+                if not isinstance(snapshot, dict):
+                    continue
+                job_id = snapshot.get("job_id")
+                hook_input = snapshot.get("hook_input")
+                transport = snapshot.get("transport")
+                if (
+                    not isinstance(job_id, str)
+                    or job_id in excluded
+                    or snapshot.get("kind") != "flush"
+                    or snapshot.get("reason") != "sessionend"
+                    or not isinstance(hook_input, str)
+                    or not isinstance(transport, dict)
+                    or transport.get("session_id") != session_id
+                    or transport.get("transcript_path") != str(transcript)
+                ):
+                    continue
+                matches.append((job_id, hook_input))
+        self.assertEqual(len(matches), 1, _debug_state(state))
+        return matches[0]
 
     def _assert_session_end_source_was_consumed(
         self, state: Path, job_id: str, hook_input: str,
@@ -503,6 +607,10 @@ class JourneyE2ETests(unittest.TestCase):
             state = codex / "scripts" / ".state"
             stub = _write_stub_codex(root)
             environment = self._environment(stub, root / "codex-home")
+            self.addCleanup(
+                self._cleanup_managed_workers,
+                Path(environment["CEVO_JOURNEY_WORKER_REGISTRY"]),
+            )
             session_id = str(uuid.uuid4())
             transcript = _write_transcript(root, session_id)
             payload = {
@@ -526,7 +634,7 @@ class JourneyE2ETests(unittest.TestCase):
             self.assertEqual(ended.returncode, 0, ended.stderr)
             self._assert_session_end_succeeded(state, session_id, result=ended)
             first_job_id, first_hook_input = self._assert_pending_session_end_transport(
-                state, session_id, transcript,
+                state, session_id, transcript, environment,
             )
             _drain_worker(vault, environment)
             self._assert_session_end_source_was_consumed(
@@ -594,7 +702,8 @@ class JourneyE2ETests(unittest.TestCase):
                 state, session_id, expected_generation=2, result=repeated,
             )
             replay_job_id, replay_hook_input = self._assert_pending_session_end_transport(
-                state, session_id, transcript,
+                state, session_id, transcript, environment,
+                excluded_job_ids={first_job_id},
             )
             _drain_worker(vault, environment)
             self._assert_session_end_source_was_consumed(
@@ -656,6 +765,10 @@ class JourneyE2ETests(unittest.TestCase):
             state = codex / "scripts" / ".state"
             stub = _write_stub_codex(root)
             environment = self._environment(stub, root / "codex-home")
+            self.addCleanup(
+                self._cleanup_managed_workers,
+                Path(environment["CEVO_JOURNEY_WORKER_REGISTRY"]),
+            )
             session_id = str(uuid.uuid4())
             transcript = _write_transcript(root, session_id)
             payload = {
