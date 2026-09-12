@@ -24,6 +24,9 @@ from file_lock import locked
 BUNDLE_NAME = re.compile(r"vault-(\d{8}-\d{6})(?:-(\d+))?\.bundle$")
 DEFAULT_KEEP = 14
 GIT_TIMEOUT_SECONDS = 600
+GIT_REPOSITORY_ENV = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+)
 
 
 class BackupError(RuntimeError):
@@ -49,6 +52,9 @@ class _CompletedBackupWarning(RuntimeError):
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     command = ["git", "-C", str(repo), *args]
+    environment = os.environ.copy()
+    for key in GIT_REPOSITORY_ENV:
+        environment.pop(key, None)
     try:
         result = subprocess.run(
             command,
@@ -57,6 +63,7 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
             encoding="utf-8",
             errors="replace",
             timeout=GIT_TIMEOUT_SECONDS,
+            env=environment,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise BackupError(f"git çalıştırılamadı: {exc}") from exc
@@ -141,8 +148,17 @@ def _require_repo(vault: Path) -> None:
         raise BackupError(f"vault Git deposunun kökü olmalı: {vault}")
 
 
+def _repository_identity(vault: Path) -> str:
+    roots = sorted(set(_git(vault, "rev-list", "--all", "--max-parents=0").stdout.split()))
+    if not roots:
+        raise BackupError(f"vault Git kök commit'i yok: {vault}")
+    return "\n".join(roots)
+
+
 def _owned_destination(dest: Path, vault: Path) -> Path:
-    source_key = os.path.normcase(str(vault)).encode("utf-8")
+    source_key = (
+        os.path.normcase(str(vault)) + "\0" + _repository_identity(vault)
+    ).encode("utf-8")
     source_id = hashlib.sha256(source_key).hexdigest()
     return dest / f".vault-{source_id}"
 

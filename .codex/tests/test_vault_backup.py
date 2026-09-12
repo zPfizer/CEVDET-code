@@ -1,5 +1,6 @@
 from contextlib import redirect_stdout
 from io import StringIO
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -66,6 +67,64 @@ class VaultBackupTests(unittest.TestCase):
             _init_repo(vault)
             with self.assertRaises(vault_backup.BackupError):
                 vault_backup.create_bundle(vault, vault / "yedek")
+
+    def test_git_repository_env_cannot_redirect_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            other = root / "other"
+            dest = root / "yedek"
+            _init_repo(vault)
+            _init_repo(other)
+            (other / "not.md").write_text("başka depo", encoding="utf-8")
+            _git(other, "add", "not.md")
+            _git(
+                other,
+                "-c", "user.name=test",
+                "-c", "user.email=test@example.invalid",
+                "commit", "-q", "-m", "başka",
+            )
+
+            with mock.patch.dict(
+                os.environ,
+                {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(vault)},
+                clear=False,
+            ):
+                bundle = vault_backup.create_bundle(vault, dest)
+
+            restored = root / "restored"
+            _git(root, "clone", "-q", str(bundle), str(restored))
+            self.assertEqual(
+                (restored / "not.md").read_text(encoding="utf-8"),
+                "kalıcı içerik",
+            )
+
+    def test_recreated_vault_uses_a_distinct_backup_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            old_bundle = vault_backup.create_bundle(vault, dest)
+            old_namespace = old_bundle.parent
+
+            vault.rename(root / "old-vault")
+            _init_repo(vault)
+            (vault / "not.md").write_text("yeni depo", encoding="utf-8")
+            _git(vault, "add", "not.md")
+            _git(
+                vault,
+                "-c", "user.name=test",
+                "-c", "user.email=test@example.invalid",
+                "commit", "-q", "-m", "yeni",
+            )
+            new_bundle = vault_backup.create_bundle(vault, dest)
+            removed = vault_backup.prune_bundles(dest, keep=1, vault=vault)
+
+            self.assertNotEqual(old_namespace, new_bundle.parent)
+            self.assertEqual(removed, [])
+            self.assertTrue(old_bundle.exists())
+            self.assertTrue(new_bundle.exists())
 
     def test_repo_without_commits_fails_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
