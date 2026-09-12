@@ -389,21 +389,9 @@ def _capture_one_core(
             visible = filter_suppressed_text(recovered_source, hashes)
             raw_digest = _attachment_digest(recovered_source)
 
-        if not visible.strip():
-            return None
         source_digest = _attachment_digest(visible)
         revision = _suppression_revision(hashes)
         destination = vault_root / _note_relative(attachment_id, source_digest)
-        if (
-            mapping is not None
-            and mapping['status'] == 'empty'
-            and mapping['source_sanitized_sha256'] == raw_digest
-            and mapping['source_sha256'] == source_digest
-            and mapping['suppression_revision'] == revision
-        ):
-            with _publication_scope(state_dir, session_id):
-                with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                    return None
         mapped_note = None
         summary_only_rebuild = False
         if mapping is not None and mapping['status'] != 'empty':
@@ -418,6 +406,46 @@ def _capture_one_core(
                     source_digest=mapping['source_sha256'],
                     source_attachment=source_attachment,
                 )
+
+        def retain_empty_result() -> None:
+            with _publication_scope(state_dir, session_id):
+                with suppression_guard(vault_root / '.codex/private-memory', hashes):
+                    if (
+                        mapping is None
+                        or mapping['status'] == 'empty'
+                        or (mapping['status'] == 'prepared' and mapped_note is None)
+                    ):
+                        updated = _empty_mapping(
+                            attachment_id=attachment_id,
+                            source_attachment=source_attachment,
+                            envelope_digest=envelope_digest,
+                            source_sanitized_digest=raw_digest,
+                            source_digest=source_digest,
+                            suppression_revision=revision,
+                            event_date=mapping['event_date'] if mapping is not None else event_time.date().isoformat(),
+                            redactions=redactions,
+                        )
+                    else:
+                        updated = dict(mapping)
+                        updated['empty_result'] = {
+                            'source_sha256': source_digest, 'suppression_revision': revision,
+                        }
+                    if updated != mapping:
+                        _write_mapping(mapping_path, updated)
+
+        if not visible.strip():
+            retain_empty_result()
+            return None
+        if (
+            mapping is not None
+            and mapping['status'] == 'empty'
+            and mapping['source_sanitized_sha256'] == raw_digest
+            and mapping['source_sha256'] == source_digest
+            and mapping['suppression_revision'] == revision
+        ):
+            with _publication_scope(state_dir, session_id):
+                with suppression_guard(vault_root / '.codex/private-memory', hashes):
+                    return None
 
         if mapped_note is not None and mapping.get('empty_result') == {
             'source_sha256': source_digest, 'suppression_revision': revision,
@@ -444,7 +472,7 @@ def _capture_one_core(
             elif mapping['status'] == 'committed':
                 raise ValueError('attachment-recovery-unavailable')
 
-        if mapping is None and destination.exists():
+        if (mapping is None or mapping['status'] == 'empty') and destination.exists():
             if destination.is_symlink() or not destination.is_file():
                 raise ValueError('attachment-note-invalid')
             legacy = _read_note(
@@ -463,7 +491,7 @@ def _capture_one_core(
                 note_relative=destination.relative_to(vault_root),
                 note_digest=_attachment_digest(legacy['text']),
                 suppression_revision=revision,
-                event_date=event_time.date().isoformat(),
+                event_date=mapping['event_date'] if mapping is not None else event_time.date().isoformat(),
                 redactions=redactions,
                 status='committed',
             )
@@ -480,35 +508,11 @@ def _capture_one_core(
 
         generated_summary = _summary_from_model(summarize, visible)
         if generated_summary is None:
-            with _publication_scope(state_dir, session_id):
-                with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                    if (
-                        mapping is None
-                        or mapping['status'] == 'empty'
-                        or (mapping['status'] == 'prepared' and mapped_note is None)
-                    ):
-                        _write_mapping(
-                            mapping_path,
-                            _empty_mapping(
-                                attachment_id=attachment_id,
-                                source_attachment=source_attachment,
-                                envelope_digest=envelope_digest,
-                                source_sanitized_digest=raw_digest,
-                                source_digest=source_digest,
-                                suppression_revision=revision,
-                                event_date=mapping['event_date'] if mapping is not None else event_time.date().isoformat(),
-                                redactions=redactions,
-                            ),
-                        )
-                    else:
-                        updated = dict(mapping)
-                        updated['empty_result'] = {
-                            'source_sha256': source_digest, 'suppression_revision': revision,
-                        }
-                        _write_mapping(mapping_path, updated)
+            retain_empty_result()
             return None
         summary = filter_suppressed_text(generated_summary, hashes)
         if not summary.strip():
+            retain_empty_result()
             return None
         if summary_only_rebuild and mapping is not None and destination.is_file():
             with _publication_scope(state_dir, session_id):

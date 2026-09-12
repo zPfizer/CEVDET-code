@@ -84,6 +84,58 @@ class AttachmentMemoryTests(unittest.TestCase):
                 )
             self.assertEqual(summarize.call_count, 1)
 
+    def test_readable_fully_suppressed_retry_refreshes_empty_receipt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('No durable content.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summarize = mock.Mock(return_value='FLUSH_BOS')
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                def capture(hashes):
+                    return attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        hashes, summarize, state_dir=root / 'state',
+                    )
+                self.assertEqual(capture(frozenset()), [])
+                suppress_derived_memory(root / '.codex/private-memory', 'No durable content.')
+                hashes = load_suppressed_hashes(root / '.codex/private-memory')
+                self.assertEqual(capture(hashes), [])
+                source.unlink()
+                self.assertEqual(capture(hashes), [])
+                self.assertEqual(summarize.call_count, 1)
+
+    def test_empty_promotion_adopts_note_published_by_another_envelope(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Shared source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nSummary.' for h in flush.EXPECTED_SECTIONS)
+            summarize = mock.Mock(side_effect=['FLUSH_BOS', summary, summary])
+            state = root / 'state'
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                def capture(envelope, day, hashes=frozenset()):
+                    return attachment_memory.capture_sources(
+                        [('user', envelope)], root, dt.datetime(2026, 9, day, tzinfo=dt.timezone.utc),
+                        hashes, summarize, state_dir=state,
+                    )
+                self.assertEqual(capture(text, 1), [])
+                other = capture(text + 'Preserve source.', 2)
+                note = root / (other[0][0] + '.md')
+                original = note.read_bytes()
+                suppress_derived_memory(root / '.codex/private-memory', 'Unrelated preference.')
+                hashes = load_suppressed_hashes(root / '.codex/private-memory')
+                self.assertEqual(capture(text, 3, hashes), other)
+                source.unlink()
+                self.assertEqual(capture(text, 4, hashes), other)
+                self.assertEqual(note.read_bytes(), original)
+                self.assertEqual(summarize.call_count, 2)
+
     def test_empty_source_receipt_does_not_cross_suppression_revision(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
