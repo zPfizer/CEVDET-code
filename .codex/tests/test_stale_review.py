@@ -669,6 +669,35 @@ class StaleReviewTests(unittest.TestCase):
                     finally:
                         alias.unlink(missing_ok=True)
 
+    def test_report_parent_is_revalidated_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            outside = root / "outside-output"
+            vault.mkdir()
+            outside.mkdir()
+            _note(vault, "eski-not", updated="2026-01-02", sources=[])
+            parent = vault / "custom-output"
+            parent.mkdir()
+            target = parent / "report.md"
+            real_render = stale_review.render
+
+            def render_then_link(*args: object, **kwargs: object) -> str:
+                parent.rmdir()
+                try:
+                    parent.symlink_to(outside, target_is_directory=True)
+                except (OSError, NotImplementedError) as exc:
+                    raise unittest.SkipTest(f"symlink unavailable: {exc}") from exc
+                return real_render(*args, **kwargs)
+
+            with mock.patch.object(
+                stale_review, "render", side_effect=render_then_link
+            ):
+                with self.assertRaisesRegex(ValueError, "report-target-invalid"):
+                    stale_review.write_report(vault, output=target)
+            self.assertFalse((outside / "report.md").exists())
+            parent.unlink(missing_ok=True)
+
     def test_report_stays_unwritten_when_compile_lock_is_busy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

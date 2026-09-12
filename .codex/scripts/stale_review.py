@@ -726,6 +726,7 @@ def write_report(
                 memory.check_knowledge_snapshot()
                 _validate_note_observations(vault, note_observations)
                 _validate_source_observations(vault, observations)
+                _validate_report_target(vault, target)
                 atomic_write_text(
                     target,
                     rendered,
