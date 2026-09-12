@@ -76,6 +76,19 @@ class DailyCompactionTests(unittest.TestCase):
                 self.assertEqual(self.day.read_text(encoding='utf-8').count(text), 1)
         self.assertFalse(list((self.state / 'daily-operations').glob('*.after.md')))
 
+    def test_prepared_replay_rejects_summary_drift_without_rewriting_daily_prefix(self):
+        legacy_summary = 'DATABASE_PASSWORD=LEGACY_SECRET'
+        current_summary = 'DATABASE_PASSWORD=<REDACTED>'
+        with self.assertRaisesRegex(RuntimeError, 'daily-injected:prepared'):
+            self.publish('a', legacy_summary, _fail_after='prepared')
+        self.day.parent.mkdir(parents=True, exist_ok=True)
+        self.day.write_text('# Günlük Log: 2026-09-07\nKullanıcı öneki.\n', encoding='utf-8')
+        before = self.day.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'daily-prepared-summary-drift'):
+            self.publish('a', current_summary)
+        self.assertEqual(self.day.read_bytes(), before)
+        self.assertNotIn(legacy_summary, self.day.read_text(encoding='utf-8'))
+
     def test_rebase_receipt_failure_keeps_old_image_for_exactly_once_retry(self):
         with self.assertRaisesRegex(RuntimeError, 'daily-injected:prepared'):
             self.publish('a', 'Operation A', _fail_after='prepared')
