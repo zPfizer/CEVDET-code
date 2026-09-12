@@ -3,6 +3,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from _fixtures import CODEX_DIR  # noqa: F401
 import vault_backup
@@ -29,6 +30,12 @@ def _init_repo(repo: Path) -> None:
         "-c", "user.email=test@example.invalid",
         "commit", "-q", "-m", "ilk",
     )
+
+
+def _owned_dest(vault: Path, dest: Path) -> Path:
+    owned = vault_backup._owned_destination(dest.resolve(), vault.resolve())
+    owned.mkdir(parents=True, exist_ok=True)
+    return owned
 
 
 class VaultBackupTests(unittest.TestCase):
@@ -69,7 +76,11 @@ class VaultBackupTests(unittest.TestCase):
 
     def test_prune_keeps_newest_and_ignores_foreign_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            dest = Path(temporary)
+            root = Path(temporary)
+            vault = root / "vault"
+            _init_repo(vault)
+            dest = root / "yedek"
+            owned = _owned_dest(vault, dest)
             names = [
                 "vault-20260901-120000.bundle",
                 "vault-20260902-120000.bundle",
@@ -77,23 +88,27 @@ class VaultBackupTests(unittest.TestCase):
                 "vault-20260903-120000-1.bundle",
             ]
             for name in names:
-                (dest / name).write_bytes(b"x")
-            foreign = dest / "vault-notlar.bundle"
+                (owned / name).write_bytes(b"x")
+            foreign = owned / "vault-notlar.bundle"
             foreign.write_bytes(b"x")
 
-            removed = vault_backup.prune_bundles(dest, keep=2)
+            removed = vault_backup.prune_bundles(dest, keep=2, vault=vault)
 
             self.assertEqual(
                 sorted(path.name for path in removed),
                 ["vault-20260901-120000.bundle", "vault-20260902-120000.bundle"],
             )
-            self.assertTrue((dest / "vault-20260903-120000.bundle").exists())
-            self.assertTrue((dest / "vault-20260903-120000-1.bundle").exists())
+            self.assertTrue((owned / "vault-20260903-120000.bundle").exists())
+            self.assertTrue((owned / "vault-20260903-120000-1.bundle").exists())
             self.assertTrue(foreign.exists())
 
     def test_prune_orders_same_second_suffixes_numerically(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            dest = Path(temporary)
+            root = Path(temporary)
+            vault = root / "vault"
+            _init_repo(vault)
+            dest = root / "yedek"
+            owned = _owned_dest(vault, dest)
             names = [
                 "vault-20260903-120000.bundle",
                 "vault-20260903-120000-1.bundle",
@@ -101,9 +116,9 @@ class VaultBackupTests(unittest.TestCase):
                 "vault-20260903-120000-10.bundle",
             ]
             for name in names:
-                (dest / name).write_bytes(b"x")
+                (owned / name).write_bytes(b"x")
 
-            removed = vault_backup.prune_bundles(dest, keep=1)
+            removed = vault_backup.prune_bundles(dest, keep=1, vault=vault)
 
             self.assertEqual(
                 sorted(path.name for path in removed),
@@ -113,7 +128,7 @@ class VaultBackupTests(unittest.TestCase):
                     "vault-20260903-120000.bundle",
                 ],
             )
-            self.assertTrue((dest / "vault-20260903-120000-10.bundle").exists())
+            self.assertTrue((owned / "vault-20260903-120000-10.bundle").exists())
 
     def test_same_second_newer_commit_survives_prune(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -145,6 +160,37 @@ class VaultBackupTests(unittest.TestCase):
                 (restored / "not.md").read_text(encoding="utf-8"),
                 "güncel içerik",
             )
+
+    def test_main_captures_bundle_size_before_a_second_backup_prunes_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            real_create_and_prune = vault_backup._create_and_prune
+            results = []
+
+            def create_and_prune_then_race(
+                source: Path, target: Path, keep: int, *, now: float | None = None,
+            ):
+                result = real_create_and_prune(source, target, keep, now=now)
+                results.append(result)
+                if len(results) == 1:
+                    results.append(real_create_and_prune(source, target, keep, now=now))
+                return result
+
+            with mock.patch.object(
+                vault_backup,
+                "_create_and_prune",
+                side_effect=create_and_prune_then_race,
+            ):
+                exit_code = vault_backup.main(
+                    ["--vault", str(vault), "--dest", str(dest), "--keep", "1"],
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertFalse(results[0][0].exists())
+            self.assertTrue(results[1][0].exists())
 
     def test_shared_destination_prunes_only_source_namespace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

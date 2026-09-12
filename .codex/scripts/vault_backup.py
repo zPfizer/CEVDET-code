@@ -135,32 +135,22 @@ def _prune_bundles_locked(dest: Path, keep: int) -> list[Path]:
     return removed
 
 
-def prune_bundles(dest: Path, keep: int, *, vault: Path | None = None) -> list[Path]:
-    """En yeni `keep` bundle kalır; desene uymayan dosyalara dokunulmaz.
-
-    `vault` verilirse yalnız o Vault'un kaynak namespace'i budanır. `vault`
-    verilmeden çağrı, zaten kaynak-sahipli bir dizin için tutulur.
-    """
-    dest = Path(dest).resolve()
-    if vault is not None:
-        vault = Path(vault).resolve()
-        if dest == vault or vault in dest.parents:
-            raise BackupError(f"yedek hedefi vault içinde olamaz: {dest}")
-        dest = _owned_destination(dest, vault)
-    if not dest.is_dir():
-        return []
-    with locked(_lock_target(dest)):
-        return _prune_bundles_locked(dest, keep)
+def prune_bundles(dest: Path, keep: int, *, vault: Path) -> list[Path]:
+    """Yalnız `vault` kaynak namespace'inin en yeni bundle'larını tutar."""
+    _vault, owned_dest = _prepare_dest(vault, dest)
+    with locked(_lock_target(owned_dest)):
+        return _prune_bundles_locked(owned_dest, keep)
 
 
 def _create_and_prune(
     vault: Path, dest: Path, keep: int, *, now: float | None = None,
-) -> tuple[Path, list[Path]]:
+) -> tuple[Path, list[Path], int]:
     vault, owned_dest = _prepare_dest(vault, dest)
     with locked(_lock_target(owned_dest)):
         bundle = _create_bundle_locked(vault, owned_dest, now=now)
         removed = _prune_bundles_locked(owned_dest, keep)
-    return bundle, removed
+        bundle_size = bundle.stat().st_size
+    return bundle, removed, bundle_size
 
 
 def working_tree_summary(vault: Path) -> tuple[int, int]:
@@ -191,13 +181,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     vault = Path(args.vault).resolve()
     dest = args.dest if args.dest is not None else vault.parent / f"{vault.name}-yedek"
     try:
-        bundle, removed = _create_and_prune(vault, dest, args.keep)
+        bundle, removed, bundle_size = _create_and_prune(vault, dest, args.keep)
         tracked, untracked = working_tree_summary(vault)
     except BackupError as error:
         print(f"YEDEK BAŞARISIZ: {error}")
         return 1
 
-    size_mb = bundle.stat().st_size / (1024 * 1024)
+    size_mb = bundle_size / (1024 * 1024)
     print(f"Yedek alındı: {bundle} ({size_mb:.1f} MB)")
     if removed:
         print(f"Budanan eski yedek: {len(removed)}")
