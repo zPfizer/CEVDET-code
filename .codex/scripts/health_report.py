@@ -13,6 +13,7 @@ import hashlib
 import heapq
 import json
 import math
+import os
 from pathlib import Path
 import re
 import stat
@@ -153,7 +154,17 @@ def _bounded_json(path: Path) -> dict[str, Any] | None:
             or metadata.st_size > MAX_RECORD_BYTES
         ):
             return None
-        loaded = json.loads(path.read_text(encoding="utf-8"))
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (
+                (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+                or opened.st_nlink != 1
+            ):
+                return None
+            payload = handle.read(MAX_RECORD_BYTES + 1)
+        if len(payload) > MAX_RECORD_BYTES:
+            return None
+        loaded = json.loads(payload.decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return loaded if isinstance(loaded, dict) else None
@@ -460,8 +471,7 @@ def _worker_observation(state_dir: Path) -> dict[Path, tuple[int, ...]]:
         paths.extend(path for stage in WORKER_STAGES for path in _json_files(jobs / stage))
         paths.extend((jobs / "quarantined").glob("*.payload"))
     for lane in (state_dir, state_dir / "maintenance"):
-        paths.extend(path for path in _json_files(lane, error_prefix="state")
-                     if path.name.startswith("hookin-"))
+        paths.extend(_json_files(lane, error_prefix="state"))
         supervisor = lane / "worker-supervisor.json"
         if supervisor.exists():
             if _bounded_json(supervisor) is None:

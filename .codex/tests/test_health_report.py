@@ -59,6 +59,44 @@ def _pending_record(job_id: str) -> dict[str, object]:
 
 
 class HealthReportTests(unittest.TestCase):
+    def test_replaced_json_record_is_rejected_before_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "state.json"
+            replacement = root / "replacement.json"
+            path.write_text("{}", encoding="utf-8")
+            replacement.write_text(" " * (health_report.MAX_RECORD_BYTES + 1), encoding="utf-8")
+            open_file = Path.open
+
+            def replace_before_open(candidate, *args, **kwargs):
+                if candidate == path:
+                    replacement.replace(path)
+                return open_file(candidate, *args, **kwargs)
+
+            with mock.patch.object(Path, "open", replace_before_open):
+                self.assertIsNone(health_report._bounded_json(path))
+
+    def test_new_cleanup_fence_after_scan_aborts_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            maintenance = state / "maintenance"
+            maintenance.mkdir()
+            scan = health_report.worker_fences
+
+            def scan_then_fence(directory):
+                result = scan(directory)
+                (maintenance / "worker-tree-cleanup-unverified.json").write_text(
+                    "{}", encoding="utf-8",
+                )
+                return result
+
+            target = vault / "report.md"
+            with mock.patch.object(health_report, "worker_fences", scan_then_fence):
+                with self.assertRaisesRegex(OSError, "worker-state-changed"):
+                    health_report.write_report(vault, target)
+            self.assertFalse(target.exists())
+
     def test_missing_compile_state_still_rechecks_publication(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = _seed_state(Path(temporary))
@@ -223,7 +261,9 @@ class HealthReportTests(unittest.TestCase):
                 )
                 return result
             with mock.patch.object(health_report.compile_state, "load", load_and_begin_publication):
-                report = health_report.render(vault)
+                with self.assertRaisesRegex(OSError, "worker-state-changed"):
+                    health_report.render(vault)
+            report = health_report.render(vault)
             self.assertIn("yayın kurtarma bekliyor", report)
             self.assertNotIn("(durum: ok)", report)
 
