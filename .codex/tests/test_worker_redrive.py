@@ -517,6 +517,61 @@ class RedriveDeadLetterTests(unittest.TestCase):
         wake.assert_called_once_with(state, vault_root=vault)
         self.assertIn("stale işler toparlandı: 1", output.getvalue())
 
+    def test_cli_targeted_recovery_ignores_unreadable_unrelated_pending_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            vault = root / "vault"
+            vault.mkdir()
+            job_id = "a" * 32
+            unrelated_id = "b" * 32
+            stale = _active_job(
+                state,
+                job_id,
+                "running",
+                payload={"reason": "stale-target"},
+                redriven_ts=None,
+            )
+            unrelated = _pending_job(
+                state,
+                unrelated_id,
+                payload={"reason": "unrelated"},
+            )
+            real_read_text = Path.read_text
+
+            def read_text(path: Path, *args: object, **kwargs: object) -> str:
+                if path == unrelated:
+                    raise OSError("pending record temporarily locked")
+                return real_read_text(path, *args, **kwargs)
+
+            argv = [
+                "worker_supervisor.py",
+                "--vault",
+                str(vault),
+                "--state-dir",
+                str(state),
+                "--redrive",
+                job_id,
+            ]
+            with (
+                mock.patch.object(Path, "read_text", autospec=True, side_effect=read_text),
+                mock.patch.object(workers.sys, "argv", argv),
+                mock.patch.object(
+                    workers, "_process_owner_is_active", return_value=False
+                ),
+                mock.patch.object(workers, "ensure_supervisor") as wake,
+            ):
+                result = workers.main()
+
+            pending = state / "worker-jobs" / "pending" / stale.name
+            recovered = workers._load_job(pending)
+            unrelated_exists = unrelated.is_file()
+
+        self.assertEqual(result, 1)
+        self.assertEqual(recovered["status"], "pending")
+        self.assertTrue(unrelated_exists)
+        wake.assert_called_once_with(state, vault_root=vault)
+
     def test_cli_redrive_retry_recovers_transition_and_wakes_supervisor(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

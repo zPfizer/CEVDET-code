@@ -2294,6 +2294,8 @@ def _has_pending_locked(
 ) -> bool:
     """Return whether any pending job exists while the queue lock is held."""
     for path in (_job_root(state_dir) / "pending").glob("*.json"):
+        if job_id is not None and _job_id_from_path(path) != job_id:
+            continue
         job = _load_job_quarantined(state_dir, path)
         if job is not None and (job_id is None or job["job_id"] == job_id):
             return True
