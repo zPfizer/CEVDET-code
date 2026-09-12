@@ -111,6 +111,26 @@ class HealthReportTests(unittest.TestCase):
                     health_report.write_report(vault, target)
             self.assertFalse(target.exists())
 
+    def test_linked_worker_jobs_root_aborts_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            outside = root / "outside-worker"
+            vault.mkdir()
+            outside.mkdir()
+            state = state_dir_of(vault)
+            state.mkdir(parents=True)
+            jobs = state / "worker-jobs"
+            try:
+                jobs.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            target = vault / "report.md"
+            with self.assertRaisesRegex(OSError, "worker-directory-invalid"):
+                health_report.write_report(vault, target)
+            self.assertFalse(target.exists())
+
     def test_unreadable_marker_enumeration_aborts_report(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -355,6 +375,42 @@ class HealthReportTests(unittest.TestCase):
         self.assertIn("| dead-letter | 0 |", text)
         self.assertIn("Boş — takılı iş yok.", text)
         self.assertNotIn("Takılı iş var", text)
+
+    def test_malformed_recovered_dead_letter_stays_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            dead_letter = state / "worker-jobs" / "dead-letter"
+            succeeded = state / "worker-jobs" / "succeeded"
+            old_id = "8" * 32
+            successor_id = "9" * 32
+            (dead_letter / f"job-{old_id}.json").write_text(
+                json.dumps(
+                    _dead_letter_record(
+                        old_id,
+                        finished_ts=None,
+                        terminal_reason="recovered-by-successor",
+                        recovery_job_id=successor_id,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            successor = _dead_letter_record(
+                successor_id,
+                finished_ts=1757500001,
+            )
+            successor["status"] = "succeeded"
+            (succeeded / f"job-{successor_id}.json").write_text(
+                json.dumps(successor), encoding="utf-8"
+            )
+
+            text = health_report.render(
+                vault, now=datetime.datetime(2026, 9, 11)
+            )
+
+        self.assertIn("| dead-letter | 1 |", text)
+        self.assertIn("Takılı iş var: 1 kayıt.", text)
+        self.assertIn("| ? | ? | ? | ? |", text)
 
     def test_default_report_write_does_not_clobber_existing_user_text(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

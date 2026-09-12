@@ -101,6 +101,7 @@ def _dead_letter_row(path: Path) -> dict[str, Any]:
     record = _bounded_json(path)
     if record is None:
         return _unreadable_dead_letter_row()
+    timestamp_repaired = False
     try:
         from worker_supervisor import _has_verified_successor, _validate_job
 
@@ -113,8 +114,11 @@ def _dead_letter_row(path: Path) -> dict[str, Any]:
             validation_record = dict(record)
             validation_record["finished_ts"] = 0
             _validate_job(path, validation_record)
+            timestamp_repaired = True
         terminal_reason = record.get("terminal_reason")
         if not isinstance(terminal_reason, str) or terminal_reason not in _DEAD_LETTER_REASONS:
+            return _unreadable_dead_letter_row()
+        if timestamp_repaired and terminal_reason == "recovered-by-successor":
             return _unreadable_dead_letter_row()
     except (TypeError, ValueError):
         return _unreadable_dead_letter_row()
@@ -128,10 +132,29 @@ def _dead_letter_row(path: Path) -> dict[str, Any]:
 
 
 def worker_counts(state_dir: Path) -> dict[str, int]:
-    jobs = state_dir / "worker-jobs"
+    jobs = _worker_jobs_root(state_dir)
+    if jobs is None:
+        return {stage: 0 for stage in WORKER_STAGES}
     counts = {stage: len(_json_files(jobs / stage)) for stage in WORKER_STAGES}
-    counts["dead-letter"] = len(_all_dead_letter_rows(state_dir))
+    counts["dead-letter"] = len(_all_dead_letter_rows(state_dir, jobs=jobs))
     return counts
+
+
+def _worker_jobs_root(state_dir: Path) -> Path | None:
+    jobs = state_dir / "worker-jobs"
+    try:
+        jobs_stat = jobs.lstat()
+    except FileNotFoundError:
+        return None
+    except (OSError, RuntimeError) as exc:
+        raise OSError("worker-directory-unreadable") from exc
+    if (
+        stat.S_ISLNK(jobs_stat.st_mode)
+        or not stat.S_ISDIR(jobs_stat.st_mode)
+        or jobs.is_junction()
+    ):
+        raise OSError("worker-directory-invalid")
+    return jobs
 
 
 def _directory_entries(directory: Path, *, error_prefix: str) -> tuple[Path, ...]:
@@ -171,9 +194,14 @@ def _json_files(
     return tuple(sorted(files))
 
 
-def _all_dead_letter_rows(state_dir: Path) -> list[dict[str, Any]]:
+def _all_dead_letter_rows(
+    state_dir: Path, *, jobs: Path | None = None
+) -> list[dict[str, Any]]:
+    jobs = _worker_jobs_root(state_dir) if jobs is None else jobs
+    if jobs is None:
+        return []
     rows = []
-    for path in _json_files(state_dir / "worker-jobs" / "dead-letter"):
+    for path in _json_files(jobs / "dead-letter"):
         row = _dead_letter_row(path)
         if not row.get("recovered", False):
             rows.append(row)
