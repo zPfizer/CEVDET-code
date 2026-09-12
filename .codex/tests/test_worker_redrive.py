@@ -155,6 +155,43 @@ class RedriveDeadLetterTests(unittest.TestCase):
         self.assertTrue(stayed)
         self.assertFalse(moved)
 
+    def test_recovery_fences_marked_duplicate_before_moving_dead_letter(self) -> None:
+        for same_identity in (True, False):
+            with self.subTest(same_identity=same_identity), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                job_id = "c" * 32
+                _succeeded_job(state, job_id, payload={"reason": "same"})
+                dead_letter = _dead_letter_job(
+                    state,
+                    job_id,
+                    status="pending",
+                    payload={
+                        "reason": "same" if same_identity else "different"
+                    },
+                    redriven_ts=1757500000,
+                )
+
+                recovered = workers.recover_stale_jobs(state, now=1757500001)
+                conflict = workers._load_job(dead_letter)
+                pending = state / "worker-jobs" / "pending" / dead_letter.name
+
+                (state / "worker-jobs" / "succeeded" / dead_letter.name).unlink()
+                workers.recover_stale_jobs(state, now=1757500002)
+                still_conflict = workers._load_job(dead_letter)
+
+            self.assertEqual(recovered, 0)
+            self.assertEqual(conflict["status"], "dead-letter")
+            self.assertEqual(
+                conflict["terminal_reason"],
+                "redrive-conflict"
+                if same_identity
+                else "redrive-identity-conflict",
+            )
+            self.assertFalse(pending.exists())
+            self.assertEqual(
+                still_conflict["terminal_reason"], conflict["terminal_reason"]
+            )
+
     def test_redrive_revives_job_as_valid_pending(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)

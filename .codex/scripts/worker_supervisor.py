@@ -1294,6 +1294,92 @@ def _same_redrive_identity(left: dict[str, Any], right: dict[str, Any]) -> bool:
     )
 
 
+def _redrive_conflict_reason(
+    active: dict[str, Any] | None, dead_letter: dict[str, Any]
+) -> str:
+    return (
+        "redrive-conflict"
+        if isinstance(active, dict) and _same_redrive_identity(active, dead_letter)
+        else "redrive-identity-conflict"
+    )
+
+
+def _mark_redrive_conflict(
+    job: dict[str, Any], active: dict[str, Any] | None, *, now: float
+) -> None:
+    reason = _redrive_conflict_reason(active, job)
+    # A recovered interrupted transition may still say pending in dead-letter.
+    # Make the durable conflict terminal so later recovery cannot reactivate it.
+    job["status"] = "dead-letter"
+    job["terminal_reason"] = reason
+    job["retryable"] = False
+    if (
+        not isinstance(job.get("finished_ts"), int)
+        or isinstance(job.get("finished_ts"), bool)
+    ):
+        job["finished_ts"] = int(now)
+    if not isinstance(job.get("last_error"), str) or not job["last_error"]:
+        job["last_error"] = reason
+
+
+def _scan_redrive_records_locked(
+    state_dir: Path,
+) -> tuple[dict[str, dict[str, Any] | None], dict[str, dict[str, Any]]]:
+    """Return queue identities and marked redrive receipts under queue ownership."""
+    seen_records: dict[str, dict[str, Any] | None] = {}
+    seen_redriven: dict[str, dict[str, Any]] = {}
+    for state in (
+        "pending",
+        "claimed",
+        "running",
+        "succeeded",
+        "quarantined",
+    ):
+        for path in sorted((_job_root(state_dir) / state).glob("*.json")):
+            try:
+                if state == "quarantined":
+                    tombstone = _load_job(path)
+                    job = {
+                        "job_id": tombstone["job_id"],
+                        "kind": None,
+                        "payload": None,
+                    }
+                    try:
+                        payload_path = path.with_name(
+                            str(tombstone["payload_file"])
+                        )
+                        original = json.loads(
+                            payload_path.read_text(encoding="utf-8")
+                        )
+                    except (
+                        OSError,
+                        UnicodeError,
+                        json.JSONDecodeError,
+                        KeyError,
+                        TypeError,
+                        ValueError,
+                    ):
+                        original = None
+                    if isinstance(original, dict):
+                        job["kind"] = original.get("kind")
+                        job["payload"] = original.get("payload")
+                else:
+                    job = _load_job(path)
+            except ValueError:
+                record_id = _job_id_from_path(path)
+                if record_id is not None:
+                    seen_records.setdefault(record_id, None)
+                continue
+            if (
+                job["job_id"] not in seen_records
+                or seen_records[job["job_id"]] is None
+            ):
+                seen_records[job["job_id"]] = job
+            if state != "quarantined" and _has_redrive_marker(job):
+                seen_redriven.setdefault(job["job_id"], job)
+    return seen_records, seen_redriven
+
+
 def _console_safe(text: str) -> str:
     encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
     return text.encode(encoding, errors="backslashreplace").decode(encoding)
@@ -1540,6 +1626,7 @@ def recover_stale_jobs(state_dir: Path, *, now: float | None = None) -> int:
     with locked(state_dir / "worker-queue"):
         if has_unverified_process_tree(state_dir):
             return 0
+        seen_records, seen_redriven = _scan_redrive_records_locked(state_dir)
         # A crash can occur between the atomic JSON update and directory move.
         # Complete only a valid recorded transition; never overwrite another job.
         for source_state, targets in RECOVERABLE_TRANSITIONS.items():
@@ -1561,6 +1648,17 @@ def recover_stale_jobs(state_dir: Path, *, now: float | None = None) -> int:
                         continue
                     destination = _job_root(state_dir) / target / path.name
                     _validate_job(destination, value)
+                    if source_state == "dead-letter":
+                        record_id = value["job_id"]
+                        if record_id in seen_records:
+                            active = seen_redriven.get(
+                                record_id, seen_records[record_id]
+                            )
+                            _mark_redrive_conflict(
+                                value, active, now=observed_now
+                            )
+                            atomic_write_json(path, value)
+                            continue
                     if destination.exists():
                         raise ValueError('worker-transition-target-exists')
                     os.replace(path, destination)
@@ -1623,62 +1721,13 @@ def redrive_dead_letter(
     redriven: list[str] = []
     skipped: list[tuple[str, str]] = []
     with locked(state_dir / "worker-queue"):
-        seen_records: dict[str, dict[str, Any] | None] = {}
-        seen_redriven: dict[str, dict[str, Any]] = {}
-        for state in (
-            "pending",
-            "claimed",
-            "running",
-            "succeeded",
-            "quarantined",
-        ):
-            for path in sorted((_job_root(state_dir) / state).glob("*.json")):
-                try:
-                    if state == "quarantined":
-                        tombstone = _load_job(path)
-                        job = {
-                            "job_id": tombstone["job_id"],
-                            "kind": None,
-                            "payload": None,
-                        }
-                        try:
-                            payload_path = path.with_name(
-                                str(tombstone["payload_file"])
-                            )
-                            original = json.loads(
-                                payload_path.read_text(encoding="utf-8")
-                            )
-                        except (
-                            OSError,
-                            UnicodeError,
-                            json.JSONDecodeError,
-                            TypeError,
-                            ValueError,
-                        ):
-                            original = None
-                        if isinstance(original, dict):
-                            job["kind"] = original.get("kind")
-                            job["payload"] = original.get("payload")
-                    else:
-                        job = _load_job(path)
-                except ValueError:
-                    record_id = _job_id_from_path(path)
-                    if record_id is not None:
-                        seen_records.setdefault(record_id, None)
-                    continue
-                if (
-                    job["job_id"] not in seen_records
-                    or seen_records[job["job_id"]] is None
-                ):
-                    seen_records[job["job_id"]] = job
-                if (
-                    state != "quarantined"
-                    and _has_redrive_marker(job)
-                    and (job_id is None or job["job_id"] == job_id)
-                    and job["job_id"] not in seen_redriven
-                ):
-                    seen_redriven[job["job_id"]] = job
-                    redriven.append(job["job_id"])
+        seen_records, all_redriven = _scan_redrive_records_locked(state_dir)
+        seen_redriven = {
+            identifier: job
+            for identifier, job in all_redriven.items()
+            if job_id is None or identifier == job_id
+        }
+        redriven.extend(seen_redriven)
         for path in sorted((_job_root(state_dir) / "dead-letter").glob("*.json")):
             if job_id is not None and _job_id_from_path(path) != job_id:
                 continue
@@ -1703,13 +1752,7 @@ def redrive_dead_letter(
                 # Persist the conflict so a later receipt prune cannot reopen it.
                 # The ID may be reused for a different logical job; retain both
                 # records as an explicit unresolved identity conflict.
-                job["terminal_reason"] = (
-                    "redrive-conflict"
-                    if isinstance(active, dict)
-                    and _same_redrive_identity(active, job)
-                    else "redrive-identity-conflict"
-                )
-                job["retryable"] = False
+                _mark_redrive_conflict(job, active, now=observed_now)
                 atomic_write_json(path, job)
                 skipped.append((job["job_id"], "redrive çakışması"))
                 continue
