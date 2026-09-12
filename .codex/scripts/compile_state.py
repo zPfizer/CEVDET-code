@@ -245,6 +245,11 @@ def load(state_dir: Path) -> CompileState:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise PolicyError("compile-state-unreadable") from exc
+    return parse_state(value)
+
+
+def parse_state(value: object) -> CompileState:
+    """Validate an already decoded state through the canonical schema rules."""
     if not isinstance(value, dict):
         raise PolicyError("compile-state-not-object")
     state = CompileState(

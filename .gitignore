@@ -55,6 +55,7 @@
 !/.codex/scripts/file_lock.py
 !/.codex/scripts/flush.py
 !/.codex/scripts/graph_integrity.py
+!/.codex/scripts/health_report.py
 !/.codex/scripts/intake_contract.py
 !/.codex/scripts/jsonl_tail.py
 !/.codex/scripts/knowledge_schema.py
@@ -126,6 +127,7 @@
 !/.codex/tests/test_flush_public_surface.py
 !/.codex/tests/test_full_content_retrieval.py
 !/.codex/tests/test_graph_integrity.py
+!/.codex/tests/test_health_report.py
 !/.codex/tests/test_hook_scope.py
 !/.codex/tests/test_journey_e2e.py
 !/.codex/tests/test_knowledge_provenance.py

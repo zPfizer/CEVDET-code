@@ -1121,11 +1121,14 @@ def recover_orphan_hook_inputs(
 def count_orphan_hook_inputs(
     state_dir: Path,
     *,
+    strict: bool = False,
     deadline: float | None = None,
 ) -> int:
     """Read-only wake-up hint for SessionStart; races are resolved by recovery."""
     reference_sets = _orphan_reference_sets_locked(state_dir, deadline=deadline)
     if reference_sets is None:
+        if strict:
+            raise ValueError("worker-hook-input-references-unreadable")
         return 0
     references, completed = reference_sets
     count = 0
@@ -1133,6 +1136,8 @@ def count_orphan_hook_inputs(
         _check_deadline(deadline)
         payload = _hook_input_delivery_payload(state_dir, candidate)
         if payload is None:
+            if strict:
+                raise ValueError("worker-hook-input-invalid")
             continue
         reference = candidate.resolve(strict=False)
         if (

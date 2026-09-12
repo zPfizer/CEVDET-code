@@ -740,12 +740,16 @@ def _state_privacy_check(ctx: Context) -> Check:
 
 
 def _flush_inflight_check(ctx: Context) -> Check:
-    now = ctx.now
+    return check_flush_state(ctx.state_dir, ctx.now)
+
+
+def check_flush_state(state_dir: Path, now: float) -> Check:
+    """Read-only receipt validation shared with the bounded health panel."""
     active = 0
     stale: list[tuple[str, int]] = []
     invalid: list[str] = []
     valid_statuses = {"inflight", "prepared", "ok", "fail"}
-    for path in sorted(ctx.state_dir.glob("flush-*.json")):
+    for path in sorted(state_dir.glob("flush-*.json")):
         if path.name.startswith(("flush-coverage-", "flush-batch-", "flush-index-")):
             continue
         try:
@@ -1094,7 +1098,11 @@ def _worker_queue_check(ctx: Context) -> Check | list[Check]:
 
 
 def _worker_delayed_job_check(ctx: Context) -> Check:
-    state_dir, now = ctx.state_dir, ctx.now
+    return check_ready_worker_jobs(ctx.state_dir, ctx.now)
+
+
+def check_ready_worker_jobs(state_dir: Path, now: float) -> Check:
+    """Read-only readiness/owner check shared with the health dashboard."""
     ready_pending = 0
     for path in (state_dir / "worker-jobs" / "pending").glob("*.json"):
         try:

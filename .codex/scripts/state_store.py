@@ -319,11 +319,14 @@ def atomic_write_text(
     newline: str | None = None,
     keep_mode: bool = False,
     deadline: float | None = None,
+    overwrite: bool = True,
 ) -> None:
     """Aynı dizinde temp + `os.replace`; temp adı daima `.{ad}.*.tmp`.
 
     `newline=None` platform çevirisini korur, `"\\n"` byte'ları aynen yazar.
     `keep_mode` hedefin mevcut iznini taşır (hedef yoksa FileNotFoundError).
+    `overwrite=False` hedefi atomik biçimde yalnız yoksa oluşturur; mevcut
+    hedefi değiştirmez.
     """
     mode = stat.S_IMODE(path.stat().st_mode) if keep_mode else None
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -341,7 +344,22 @@ def atomic_write_text(
                 os.fsync(handle.fileno())
         if mode is not None:
             temporary.chmod(mode)
-        replace_with_retry(temporary, path, deadline=deadline)
+        if overwrite:
+            replace_with_retry(temporary, path, deadline=deadline)
+        else:
+            # The guarded create-only path is atomic on both platforms and
+            # retries transient Windows sharing violations.
+            try:
+                replace_with_retry(
+                    temporary,
+                    path,
+                    deadline=deadline,
+                    expected_digest=None,
+                )
+            except ReplacementConflict as exc:
+                if str(exc) == "replace-target-created":
+                    raise FileExistsError(path) from exc
+                raise
     finally:
         temporary.unlink(missing_ok=True)
 
