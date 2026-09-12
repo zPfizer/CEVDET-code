@@ -261,26 +261,32 @@ class JourneyE2ETests(unittest.TestCase):
         )
         self.assertIn(marker, context)
 
+    def _assert_session_runtime_succeeded(
+        self, state: Path, event: str, session_id: str,
+        expected_generation: int = 1,
+    ) -> None:
+        session_key = hashlib.sha256(
+            session_id.encode("utf-8")
+        ).hexdigest()
+        session_receipt = state / f"runtime-{event}-{session_key}.json"
+        self.assertTrue(
+            session_receipt.is_file(),
+            f"{event} runtime makbuzu yok",
+        )
+        session_runtime = json.loads(
+            session_receipt.read_text(encoding="utf-8")
+        )
+        self.assertEqual(session_runtime["event"], event)
+        self.assertEqual(session_runtime["session_key"], session_key)
+        self.assertEqual(
+            session_runtime["event_generation"], expected_generation
+        )
+
     def _assert_session_end_succeeded(
         self, state: Path, session_id: str, expected_generation: int = 1,
     ) -> None:
-        session_end_key = hashlib.sha256(
-            session_id.encode("utf-8")
-        ).hexdigest()
-        session_end_receipt = (
-            state / f"runtime-session-end-{session_end_key}.json"
-        )
-        self.assertTrue(
-            session_end_receipt.is_file(),
-            "session-end runtime makbuzu yok",
-        )
-        session_end_runtime = json.loads(
-            session_end_receipt.read_text(encoding="utf-8")
-        )
-        self.assertEqual(session_end_runtime["event"], "session-end")
-        self.assertEqual(session_end_runtime["session_key"], session_end_key)
-        self.assertEqual(
-            session_end_runtime["event_generation"], expected_generation
+        self._assert_session_runtime_succeeded(
+            state, "session-end", session_id, expected_generation,
         )
 
     def test_model_stub_rejects_missing_or_misordered_transcript(self) -> None:
@@ -431,17 +437,24 @@ class JourneyE2ETests(unittest.TestCase):
                 "tekrar kapanış başarılı bir makbuz üretmedi;\n" + _debug_state(state),
             )
             self.assertEqual(
+                daily.read_text(encoding="utf-8"), daily_text
+            )
+            self.assertEqual(
                 daily.read_text(encoding="utf-8").count(CANNED_TODO), 1
             )
 
             # Bir SONRAKİ oturum: session-start bağlamı flush'ın yazdığını
             # gerçekten geri çağırıyor mu?
+            next_session_id = str(uuid.uuid4())
             started = _run_hook(
                 vault, "session-start",
-                {"session_id": str(uuid.uuid4()), "cwd": str(vault)},
+                {"session_id": next_session_id, "cwd": str(vault)},
                 environment,
             )
             self.assertEqual(started.returncode, 0, started.stderr)
+            self._assert_session_runtime_succeeded(
+                state, "session-start", next_session_id,
+            )
             emitted = json.loads(started.stdout)
             context = emitted["hookSpecificOutput"]["additionalContext"]
             self.assertEqual(
