@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,7 @@ import unittest
 import uuid
 
 from _fixtures import CODEX_DIR
+import user_evidence
 
 CANNED_TODO = "Atlas planını yaz."
 TRANSCRIPT_MESSAGES = (
@@ -31,6 +33,13 @@ TRANSCRIPT_MESSAGES = (
     "Atlas için ilk adım planı çıkarıyorum.",
     "Tamam, planı yarın yazalım.",
 )
+TRANSCRIPT_RENDERED = "\n".join(
+    f"**{role}:** {message}"
+    for role, message in zip(
+        ("User", "Assistant", "User"), TRANSCRIPT_MESSAGES
+    )
+)
+CANNED_CLAIM = "Atlas projesinde hızlı ve net ilerleme tercih ediliyor."
 CANNED_SUMMARY = f"""## Bağlam
 Kullanıcı Atlas hedefini konuştu.
 
@@ -41,7 +50,7 @@ Yok.
 Yok.
 
 ## Öğrenilenler
-- Kullanıcı hızlı ve net yanıt istiyor.
+- {CANNED_CLAIM} <!-- user-source: {{"quote":{json.dumps(TRANSCRIPT_MESSAGES[0], ensure_ascii=False)},"scope":"project"}} -->
 
 ## Yapılacaklar
 - {CANNED_TODO}
@@ -78,10 +87,15 @@ def _write_stub_codex(root: Path) -> Path:
     script = root / "fake_codex.py"
     script.write_text(
         "import sys\n"
-        "raw = sys.stdin.buffer.read()\n"
-        f"expected = {TRANSCRIPT_MESSAGES!r}\n"
-        "if any(message not in raw.decode('utf-8') for message in expected):\n"
-        "    raise SystemExit('journey-transcript-missing')\n"
+        "raw = sys.stdin.buffer.read().decode('utf-8')\n"
+        f"expected = {TRANSCRIPT_RENDERED!r}\n"
+        "begin = '--- BEGIN UNTRUSTED TRANSCRIPT DATA ---'\n"
+        "end = '--- END UNTRUSTED TRANSCRIPT DATA ---'\n"
+        "if begin not in raw or end not in raw:\n"
+        "    raise SystemExit('journey-transcript-block-missing')\n"
+        "block = raw.split(begin, 1)[1].split(end, 1)[0].strip()\n"
+        "if block != expected:\n"
+        "    raise SystemExit('journey-transcript-mismatch')\n"
         "args = sys.argv[1:]\n"
         "target = None\n"
         "for index, value in enumerate(args):\n"
@@ -247,13 +261,43 @@ class JourneyE2ETests(unittest.TestCase):
         )
         self.assertIn(marker, context)
 
-    def test_model_stub_rejects_missing_transcript_content(self) -> None:
+    def test_model_stub_rejects_missing_or_misordered_transcript(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cevo-journey-stub-") as temporary:
             root = Path(temporary)
             _write_stub_codex(root)
             output = root / "answer.md"
-            for prompt in ("unrelated input", "\n".join(TRANSCRIPT_MESSAGES[:-1])):
-                with self.subTest(prompt=prompt):
+            swapped_roles = "\n".join(
+                f"**{role}:** {message}"
+                for role, message in zip(
+                    ("Assistant", "User", "User"), TRANSCRIPT_MESSAGES
+                )
+            )
+            reordered_turns = "\n".join(
+                f"**{role}:** {message}"
+                for role, message in (
+                    ("User", TRANSCRIPT_MESSAGES[2]),
+                    ("Assistant", TRANSCRIPT_MESSAGES[1]),
+                    ("User", TRANSCRIPT_MESSAGES[0]),
+                )
+            )
+            prompts = (
+                ("unrelated input", "journey-transcript-block-missing"),
+                ("\n".join(TRANSCRIPT_MESSAGES[:-1]), "journey-transcript-block-missing"),
+                (
+                    "--- BEGIN UNTRUSTED TRANSCRIPT DATA ---\n"
+                    + swapped_roles
+                    + "\n--- END UNTRUSTED TRANSCRIPT DATA ---",
+                    "journey-transcript-mismatch",
+                ),
+                (
+                    "--- BEGIN UNTRUSTED TRANSCRIPT DATA ---\n"
+                    + reordered_turns
+                    + "\n--- END UNTRUSTED TRANSCRIPT DATA ---",
+                    "journey-transcript-mismatch",
+                ),
+            )
+            for prompt, error in prompts:
+                with self.subTest(prompt=prompt, error=error):
                     result = subprocess.run(
                         [sys.executable, str(root / "fake_codex.py"),
                          "--output-last-message", str(output)],
@@ -261,7 +305,7 @@ class JourneyE2ETests(unittest.TestCase):
                         capture_output=True, timeout=10, creationflags=FLAGS,
                     )
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("journey-transcript-missing", result.stderr)
+                    self.assertIn(error, result.stderr)
                     self.assertFalse(output.exists())
 
     def test_full_memory_journey_survives_process_boundaries(self) -> None:
@@ -315,6 +359,38 @@ class JourneyE2ETests(unittest.TestCase):
             )
             first_receipts = _successful_session_ends(state)
             self.assertEqual(len(first_receipts), 1)
+            daily_text = daily.read_text(encoding="utf-8")
+            evidence_match = re.search(
+                r"<!-- user-evidence: (\{[^\n]+\}) -->", daily_text
+            )
+            self.assertIsNotNone(evidence_match)
+            assert evidence_match is not None
+            evidence_record = json.loads(evidence_match.group(1))
+            self.assertEqual(evidence_record["claim"], CANNED_CLAIM)
+            self.assertEqual(
+                evidence_record["quote"], TRANSCRIPT_MESSAGES[0]
+            )
+            self.assertEqual(evidence_record["scope"], "project")
+            self.assertEqual(evidence_record["previous_assistant"], "")
+            self.assertEqual(
+                evidence_record["message_hash"],
+                hashlib.sha256(
+                    TRANSCRIPT_MESSAGES[0].encode("utf-8")
+                ).hexdigest(),
+            )
+            self.assertEqual(
+                user_evidence.evidence_for(
+                    daily_text,
+                    evidence_record["id"],
+                    CANNED_CLAIM,
+                ),
+                evidence_record,
+            )
+            evidence_link = (
+                f"[[daily/{datetime.date.today().isoformat()}#user-"
+                f"{evidence_record['id']}|Kullanıcı dayanağı; kapsam: project]]"
+            )
+            self.assertIn(evidence_link, daily_text)
 
             # Aynı kapanışın tekrarı ikinci bir kayıt üretmemeli (idempotency).
             repeated = _run_hook(vault, "session-end", payload, environment)
