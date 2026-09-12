@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 import re
 import stat
@@ -50,6 +51,16 @@ SOURCE_LINK = re.compile(
 )
 _HEADING_LINE = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$")
 _FENCE_LINE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^\r\n]*)$")
+
+
+def _valid_iso_date(value: object) -> bool:
+    if not isinstance(value, str) or DATE.fullmatch(value) is None:
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 
 DERIVED_RULES = (
     'Yeni kullanıcı düşüncesi kayıtları, daily içindeki sistem üretimi user-evidence kaydının '
@@ -671,7 +682,7 @@ def _validate_concept(path: Path, issues: list[str]) -> None:
             issues.append(f"{_issue_path(path)}:{key}")
     for key in ("created", "updated"):
         value = frontmatter.get(key)
-        if isinstance(value, str) and not DATE.fullmatch(value):
+        if isinstance(value, str) and not _valid_iso_date(value):
             issues.append(f"{_issue_path(path)}:{key}-format")
     sources = frontmatter.get("sources")
     if isinstance(sources, list) and any(
@@ -783,7 +794,7 @@ def _validate_derived_connection(
     if _source_links(_heading_section(text, "## Kaynaklar")) != set(sources):
         issues.append(f"{_issue_path(path)}:source-links")
     updated = frontmatter.get("updated")
-    if not isinstance(updated, str) or not DATE.fullmatch(updated):
+    if not _valid_iso_date(updated):
         issues.append(f"{_issue_path(path)}:updated")
     elif updated < max(source.removesuffix(".md") for source in sources):
         issues.append(f"{_issue_path(path)}:updated-before-source")
