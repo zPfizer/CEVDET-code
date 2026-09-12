@@ -59,6 +59,33 @@ def _pending_record(job_id: str) -> dict[str, object]:
 
 
 class HealthReportTests(unittest.TestCase):
+    def test_oversized_compiler_state_is_not_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = _seed_state(Path(temporary))
+            (state / "compile-state.json").write_text(
+                " " * (health_report.MAX_RECORD_BYTES + 1), encoding="utf-8",
+            )
+            with mock.patch.object(health_report.compile_state, "load",
+                                   side_effect=AssertionError("unbounded read")):
+                self.assertEqual(health_report.compile_summary(state), ("?", "bozuk kayıt"))
+
+    def test_new_privacy_marker_after_scan_aborts_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            scan = health_report.marker_counts
+
+            def scan_then_mark(directory):
+                result = scan(directory)
+                (state / "memory-read-only-concurrent").touch()
+                return result
+
+            target = vault / "report.md"
+            with mock.patch.object(health_report, "marker_counts", scan_then_mark):
+                with self.assertRaisesRegex(OSError, "worker-state-changed"):
+                    health_report.write_report(vault, target)
+            self.assertFalse(target.exists())
+
     def test_replaced_json_record_is_rejected_before_read(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -252,15 +279,15 @@ class HealthReportTests(unittest.TestCase):
                 json.dumps({"ingested": {}, "cursor": "", "last_run": "",
                             "last_status": "ok", "runs": []}), encoding="utf-8",
             )
-            load = health_report.compile_state.load
-            def load_and_begin_publication(state_dir):
-                result = load(state_dir)
+            parse = health_report.compile_state.parse_state
+            def parse_and_begin_publication(value):
+                result = parse(value)
                 (state / "compile-publication.json").write_text(
                     json.dumps({"schema_version": 1, "status": "pending"}),
                     encoding="utf-8",
                 )
                 return result
-            with mock.patch.object(health_report.compile_state, "load", load_and_begin_publication):
+            with mock.patch.object(health_report.compile_state, "parse_state", parse_and_begin_publication):
                 with self.assertRaisesRegex(OSError, "worker-state-changed"):
                     health_report.render(vault)
             report = health_report.render(vault)

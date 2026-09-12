@@ -471,7 +471,7 @@ def _worker_observation(state_dir: Path) -> dict[Path, tuple[int, ...]]:
         paths.extend(path for stage in WORKER_STAGES for path in _json_files(jobs / stage))
         paths.extend((jobs / "quarantined").glob("*.payload"))
     for lane in (state_dir, state_dir / "maintenance"):
-        paths.extend(_json_files(lane, error_prefix="state"))
+        paths.extend(_directory_entries(lane, error_prefix="state"))
         supervisor = lane / "worker-supervisor.json"
         if supervisor.exists():
             if _bounded_json(supervisor) is None:
@@ -479,6 +479,10 @@ def _worker_observation(state_dir: Path) -> dict[Path, tuple[int, ...]]:
             paths.append(supervisor)
     for path in paths:
         info = path.lstat()
+        if path.parent in (state_dir, state_dir / "maintenance") and not stat.S_ISDIR(info.st_mode) and (
+            not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+        ):
+            raise OSError("state-record-invalid")
         observation[path] = (info.st_dev, info.st_ino, info.st_size,
                              info.st_mtime_ns, info.st_ctime_ns)
     return observation
@@ -543,7 +547,7 @@ def _compile_state_summary(state_dir: Path) -> tuple[str, str]:
     ):
         return "?", "okunamadı"
     try:
-        state = compile_state.load(state_dir)
+        state = compile_state.parse_state(_bounded_json(path))
     except compile_state.PolicyError:
         return "?", "bozuk kayıt"
     last_run = state.last_run
