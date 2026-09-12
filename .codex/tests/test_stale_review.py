@@ -7,6 +7,7 @@ from unittest import mock
 
 from _fixtures import CODEX_DIR  # noqa: F401
 import compile_state
+from file_lock import LockUnavailable
 import memory_ledger as ledger
 import stale_review
 from state_store import state_dir_of
@@ -67,6 +68,28 @@ class StaleReviewTests(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].age_days, 2)
         self.assertTrue(any("kaynağı sonradan değişmiş" in reason for reason in findings[0].reasons))
+
+    def test_same_day_source_change_is_flagged_as_uncertain(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            today = datetime.date(2026, 9, 11)
+            _daily(vault, "2026-09-11.md", mtime=today)
+            _note(
+                vault,
+                "ayni-gun-not",
+                updated=today.isoformat(),
+                sources=["2026-09-11.md"],
+            )
+
+            findings = stale_review.review(vault, days=90, now=today)
+
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(
+            any(
+                "kaynak değişim zamanı belirsiz" in reason
+                for reason in findings[0].reasons
+            )
+        )
 
     def test_missing_source_and_broken_date_are_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -130,6 +153,42 @@ class StaleReviewTests(unittest.TestCase):
             preserved = target.read_bytes()
 
         self.assertEqual(preserved, original)
+
+    def test_default_report_rejects_linked_command_center_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            outside = root / "outside"
+            vault.mkdir()
+            outside.mkdir()
+            parent = vault / stale_review.REPORT_RELATIVE.parent
+            try:
+                parent.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            target = outside / stale_review.REPORT_RELATIVE.name
+            _note(vault, "eski-not", updated="2026-01-02", sources=[])
+            try:
+                with self.assertRaisesRegex(ValueError, "report-target-invalid"):
+                    stale_review.write_report(vault, now=datetime.date(2026, 9, 11))
+            finally:
+                parent.unlink(missing_ok=True)
+
+        self.assertFalse(target.exists())
+
+    def test_report_stays_unwritten_when_compile_lock_is_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _note(vault, "eski-not", updated="2026-01-02", sources=[])
+            target = vault / "report.md"
+            with mock.patch.object(
+                stale_review, "locked", side_effect=LockUnavailable("lock-busy")
+            ):
+                with self.assertRaises(LockUnavailable):
+                    stale_review.write_report(vault, output=target)
+
+        self.assertFalse(target.exists())
 
     def test_cli_overwrite_replaces_existing_report_explicitly(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

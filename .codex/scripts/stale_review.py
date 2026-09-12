@@ -17,6 +17,7 @@ import re
 import stat
 from typing import Sequence
 
+from file_lock import locked
 from knowledge_schema import DAILY_SOURCE, parse_frontmatter
 from memory_ledger import (
     MemoryPreferenceError,
@@ -25,7 +26,7 @@ from memory_ledger import (
     memory_read,
     suppression_guard,
 )
-from state_store import atomic_write_text
+from state_store import atomic_write_text, state_dir_of
 from vault_corpus import DAILY_ROOT, KNOWLEDGE_ROOT, NoteIndex, markdown_paths
 
 REPORT_RELATIVE = Path("🎯 100-Command-Center") / "Cevo Bayat İnceleme.md"
@@ -34,6 +35,30 @@ DERIVED_SUBDIRS = frozenset({"concepts", "connections"})
 MAX_SOURCE_FIELDS = 64
 MAX_SOURCE_CHARS = 256
 _SAFE_SOURCE_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
+
+
+def _default_report_target(vault: Path) -> Path:
+    target = vault / REPORT_RELATIVE
+    parent = target.parent
+    try:
+        parent_stat = parent.lstat()
+        if (
+            stat.S_ISLNK(parent_stat.st_mode)
+            or parent.is_junction()
+            or not stat.S_ISDIR(parent_stat.st_mode)
+        ):
+            raise ValueError("report-target-invalid")
+    except FileNotFoundError:
+        pass
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("report-target-invalid") from exc
+    try:
+        resolved_parent = parent.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("report-target-invalid") from exc
+    if not resolved_parent.is_relative_to(vault):
+        raise ValueError("report-target-invalid")
+    return target
 
 
 @dataclasses.dataclass(frozen=True)
@@ -131,6 +156,8 @@ def _source_reasons(
             continue
         if modified > note_date:
             reasons.append(f"kaynağı sonradan değişmiş: {source} ({modified})")
+        elif modified == note_date:
+            reasons.append(f"kaynak değişim zamanı belirsiz: {source} ({modified})")
     return reasons
 
 
@@ -259,25 +286,27 @@ def write_report(
 ) -> tuple[Path, int]:
     vault = Path(vault).resolve()
     today = now or datetime.date.today()
-    target = output if output is not None else vault / REPORT_RELATIVE
+    state_dir = state_dir_of(vault)
     private_root = vault / ".codex/private-memory"
-    hashes = load_suppressed_hashes(private_root)
-    with suppression_guard(private_root, hashes):
-        with memory_read(vault) as memory:
-            findings = _review_notes(
-                vault,
-                _snapshot_notes(vault, memory),
-                days=days,
-                today=today,
-                memory=memory,
-            )
-            memory.check_knowledge_snapshot()
-            atomic_write_text(
-                target,
-                render(findings, days=days, today=today),
-                overwrite=overwrite,
-            )
-            return target, len(findings)
+    with locked(state_dir / "compile", timeout=0):
+        target = output if output is not None else _default_report_target(vault)
+        hashes = load_suppressed_hashes(private_root)
+        with suppression_guard(private_root, hashes):
+            with memory_read(vault) as memory:
+                findings = _review_notes(
+                    vault,
+                    _snapshot_notes(vault, memory),
+                    days=days,
+                    today=today,
+                    memory=memory,
+                )
+                memory.check_knowledge_snapshot()
+                atomic_write_text(
+                    target,
+                    render(findings, days=days, today=today),
+                    overwrite=overwrite,
+                )
+                return target, len(findings)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
