@@ -93,6 +93,15 @@ class AtomicWriteTests(unittest.TestCase):
             state_store.atomic_write_text(created, "generated\n", overwrite=False)
             self.assertEqual(created.read_text(encoding="utf-8"), "generated\n")
 
+    def test_atomic_write_text_no_clobber_uses_bounded_replace_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "note.md"
+            with mock.patch.object(state_store, "replace_with_retry") as replace:
+                state_store.atomic_write_text(target, "generated\n", overwrite=False)
+
+            replace.assert_called_once()
+            self.assertIsNone(replace.call_args.kwargs["expected_digest"])
+
     def test_stale_temporary_does_not_corrupt_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
