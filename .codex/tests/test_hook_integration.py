@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -905,6 +906,118 @@ class HookIntegrationTests(unittest.TestCase):
         self.assertEqual(report["status"], "ok")
         self.assertEqual(seen[0][0], state / "worker-queue")
         self.assertIsNotNone(seen[0][1])
+
+    def test_queue_scan_stops_when_deadline_expires_during_receipt_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            for index in range(4):
+                workers.enqueue_job(
+                    state,
+                    "flush",
+                    {"source": f"scan-{index}"},
+                    start_supervisor=False,
+                    now=100 + index,
+                )
+            real_load_job = workers._load_job
+            loaded: list[Path] = []
+
+            def slow_load(path: Path) -> dict[str, object]:
+                loaded.append(path)
+                time.sleep(0.04)
+                return real_load_job(path)
+
+            deadline = time.monotonic() + 0.07
+            with mock.patch.object(workers, "_load_job", side_effect=slow_load):
+                with self.assertRaises(workers.WorkerDeliveryTimeout):
+                    workers.inspect_worker_queue(state, deadline=deadline)
+
+        self.assertGreaterEqual(len(loaded), 1)
+        self.assertLess(len(loaded), 4)
+
+    def test_queue_quarantine_hash_scan_receives_deadline_and_streams(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            workers._ensure_job_dirs(state)
+            job_id = "a" * 32
+            quarantine = workers._job_root(state) / "quarantined"
+            payload_path = quarantine / f"job-{job_id}.payload"
+            payload = b"queue-payload\n" * 200_000
+            payload_path.write_bytes(payload)
+            tombstone = quarantine / f"job-{job_id}.json"
+            tombstone.write_text(
+                json.dumps(
+                    {
+                        "schema_version": workers.JOB_SCHEMA_VERSION,
+                        "job_id": job_id,
+                        "status": "quarantined",
+                        "reason_code": "worker-job-json-invalid",
+                        "payload_sha256": hashlib.sha256(payload).hexdigest(),
+                        "payload_file": payload_path.name,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            deadline = time.monotonic() + 30
+            with mock.patch.object(
+                workers,
+                "_sha256_file_with_deadline",
+                wraps=workers._sha256_file_with_deadline,
+            ) as digest:
+                report = workers.inspect_worker_queue(state, deadline=deadline)
+
+        self.assertEqual(report["counts"]["quarantined"], 1)
+        digest.assert_called_once_with(payload_path, deadline=deadline)
+
+    def test_stop_profile_block_survives_telemetry_timeout(self) -> None:
+        for failed_telemetry in ("write_hook_health", "record_hook_runtime"):
+            with self.subTest(failed_telemetry=failed_telemetry):
+                with tempfile.TemporaryDirectory() as temporary:
+                    vault = Path(temporary)
+                    state = vault / ".codex/scripts/.state"
+                    deadline = time.monotonic() + 30
+                    payload = {
+                        "session_id": "stop-profile-timeout",
+                        "cwd": str(vault),
+                        "transcript_path": str(vault / "transcript.jsonl"),
+                        "stop_hook_active": False,
+                    }
+                    profile = mock.Mock()
+                    profile.profile_issues.return_value = ("profile-invalid",)
+                    memory_context = mock.MagicMock()
+                    memory_context.__enter__.return_value = profile
+                    memory_context.__exit__.return_value = False
+                    output = io.StringIO()
+                    failure = hook.LockUnavailable("telemetry-busy")
+                    health_side_effect = failure if failed_telemetry == "write_hook_health" else None
+                    runtime_side_effect = failure if failed_telemetry == "record_hook_runtime" else None
+                    with (
+                        mock.patch.object(hook, "VAULT_ROOT", vault),
+                        mock.patch.object(hook, "STATE_DIR", state),
+                        mock.patch.object(hook, "_validate_hook_scope"),
+                        mock.patch.object(hook, "_hook_deadline", return_value=deadline),
+                        mock.patch.object(hook, "enqueue_flush"),
+                        mock.patch.object(hook, "memory_read", return_value=memory_context),
+                        mock.patch.object(
+                            hook,
+                            "write_hook_health",
+                            side_effect=health_side_effect,
+                        ),
+                        mock.patch.object(
+                            hook,
+                            "record_hook_runtime",
+                            side_effect=runtime_side_effect,
+                        ),
+                        mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                        mock.patch.object(sys, "stdout", output),
+                    ):
+                        result = hook.main(["turn-end", "--strict"])
+
+                lines = output.getvalue().splitlines()
+                self.assertEqual(result, 1)
+                self.assertEqual(len(lines), 1)
+                emitted = json.loads(lines[0])
+                self.assertEqual(emitted["decision"], "block")
+                self.assertIn("Profil kontrolü başarısız", emitted["reason"])
 
 
 if __name__ == "__main__":

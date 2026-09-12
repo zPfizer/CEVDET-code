@@ -1428,6 +1428,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 profile_issues = memory.profile_issues()
             if profile_issues:
                 warning = _profile_warning(profile_issues)
+                if read_only:
+                    # Salt okunur görev profil bakımına yetki vermez; yalnız bildir.
+                    result = {'systemMessage': warning +
+                              ' Salt okunur görev: profil bakımı bu turda yapılmadı; sorunu raporla.'}
+                elif payload.get('stop_hook_active') is True:
+                    # One correction pass; a persistent failure stays visible without a loop.
+                    result = {'systemMessage': warning}
+                else:
+                    result = {'decision': 'block', 'reason': warning +
+                              ' Mevcut yetkili profil bakımını düzelt ve kontrolü yeniden çalıştır; '
+                              'kaynak yoksa tamamlandı deme, eksikliği açıkla.'}
+                print(json.dumps(result, ensure_ascii=True))
+                response_emitted = True
                 write_hook_health(
                     STATE_DIR,
                     payload,
@@ -1442,18 +1455,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     context=warning,
                     deadline=hook_deadline,
                 )
-                if read_only:
-                    # Salt okunur görev profil bakımına yetki vermez; yalnız bildir.
-                    result = {'systemMessage': warning +
-                              ' Salt okunur görev: profil bakımı bu turda yapılmadı; sorunu raporla.'}
-                elif payload.get('stop_hook_active') is True:
-                    # One correction pass; a persistent failure stays visible without a loop.
-                    result = {'systemMessage': warning}
-                else:
-                    result = {'decision': 'block', 'reason': warning +
-                              ' Mevcut yetkili profil bakımını düzelt ve kontrolü yeniden çalıştır; '
-                              'kaynak yoksa tamamlandı deme, eksikliği açıkla.'}
-                print(json.dumps(result, ensure_ascii=True))
                 return 1 if args.strict else 0
         else:
             _run_session_end_cleanup(
@@ -1503,7 +1504,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except (OSError, ValueError, LockUnavailable):
             pass
-        if args.event == "turn-end":
+        if args.event == "turn-end" and not response_emitted:
             print(json.dumps({
                 "systemMessage": "Son konuşma kaydının durumunu doğrulayamıyorum."
             }, ensure_ascii=True))

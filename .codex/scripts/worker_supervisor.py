@@ -379,12 +379,16 @@ def _hook_input_references(payload: object) -> set[Path] | None:
 def _find_hook_input_job_locked(
     state_dir: Path,
     payload: object,
+    *,
+    deadline: float | None = None,
 ) -> tuple[Path, str] | None:
     target = _hook_input_reference(payload)
     if target is None:
         return None
     for state in JOB_STATES:
+        _check_deadline(deadline)
         for path in (_job_root(state_dir) / state).glob("*.json"):
+            _check_deadline(deadline)
             if state == "quarantined":
                 try:
                     tombstone = _load_job(path)
@@ -436,11 +440,14 @@ def _referenced_hook_inputs_locked(
     state_dir: Path,
     *,
     excluded_paths: set[Path] | None = None,
+    deadline: float | None = None,
 ) -> set[Path] | None:
     references: set[Path] = set()
     excluded = excluded_paths or set()
     for state in ("pending", "claimed", "running", "dead-letter"):
+        _check_deadline(deadline)
         for job_path in (_job_root(state_dir) / state).glob("*.json"):
+            _check_deadline(deadline)
             if job_path.resolve(strict=False) in excluded:
                 continue
             try:
@@ -452,6 +459,7 @@ def _referenced_hook_inputs_locked(
                 return None
             references.update(job_references)
     for tombstone in (_job_root(state_dir) / "quarantined").glob("*.json"):
+        _check_deadline(deadline)
         if tombstone.resolve(strict=False) in excluded:
             continue
         try:
@@ -468,9 +476,14 @@ def _referenced_hook_inputs_locked(
     return references
 
 
-def _succeeded_hook_inputs_locked(state_dir: Path) -> set[Path] | None:
+def _succeeded_hook_inputs_locked(
+    state_dir: Path,
+    *,
+    deadline: float | None = None,
+) -> set[Path] | None:
     references: set[Path] = set()
     for job_path in (_job_root(state_dir) / "succeeded").glob("*.json"):
+        _check_deadline(deadline)
         try:
             payload = _load_job(job_path).get("payload", {})
         except ValueError:
@@ -866,6 +879,26 @@ class WorkerDeliveryTimeout(RuntimeError):
     """The hook deadline expired before queue or supervisor admission."""
 
 
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise WorkerDeliveryTimeout("worker-queue-deadline")
+
+
+def _sha256_file_with_deadline(
+    path: Path,
+    *,
+    deadline: float | None = None,
+) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            _check_deadline(deadline)
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                return digest.hexdigest()
+            digest.update(chunk)
+
+
 class WorkerDeliveryTerminal(RuntimeError):
     """A transport already has a terminal queue record and cannot be replayed."""
 
@@ -1035,9 +1068,11 @@ def _recover_orphan_hook_inputs_locked(
 
 def _orphan_reference_sets_locked(
     state_dir: Path,
+    *,
+    deadline: float | None = None,
 ) -> tuple[set[Path], set[Path]] | None:
-    references = _referenced_hook_inputs_locked(state_dir)
-    completed = _succeeded_hook_inputs_locked(state_dir)
+    references = _referenced_hook_inputs_locked(state_dir, deadline=deadline)
+    completed = _succeeded_hook_inputs_locked(state_dir, deadline=deadline)
     if references is None or completed is None:
         return None
     return references, completed
@@ -1073,14 +1108,19 @@ def recover_orphan_hook_inputs(
         return _recover_orphan_hook_inputs_locked(state_dir, now=observed_now)
 
 
-def count_orphan_hook_inputs(state_dir: Path) -> int:
+def count_orphan_hook_inputs(
+    state_dir: Path,
+    *,
+    deadline: float | None = None,
+) -> int:
     """Read-only wake-up hint for SessionStart; races are resolved by recovery."""
-    reference_sets = _orphan_reference_sets_locked(state_dir)
+    reference_sets = _orphan_reference_sets_locked(state_dir, deadline=deadline)
     if reference_sets is None:
         return 0
     references, completed = reference_sets
     count = 0
     for candidate in state_dir.glob("hookin-*.json"):
+        _check_deadline(deadline)
         payload = _hook_input_delivery_payload(state_dir, candidate)
         if payload is None:
             continue
@@ -1088,7 +1128,11 @@ def count_orphan_hook_inputs(state_dir: Path) -> int:
         if (
             reference not in references
             and reference not in completed
-            and _find_hook_input_job_locked(state_dir, payload) is None
+            and _find_hook_input_job_locked(
+                state_dir,
+                payload,
+                deadline=deadline,
+            ) is None
         ):
             count += 1
     return count
@@ -1373,7 +1417,13 @@ def migrate_legacy_failed_jobs(
     return migrated
 
 
-def _has_verified_successor(root: Path, job: dict[str, Any]) -> bool:
+def _has_verified_successor(
+    root: Path,
+    job: dict[str, Any],
+    *,
+    deadline: float | None = None,
+) -> bool:
+    _check_deadline(deadline)
     if (
         job.get("terminal_reason") != "recovered-by-successor"
         or job.get("retryable") is not False
@@ -1600,29 +1650,42 @@ def inspect_worker_queue(
 ) -> dict[str, Any]:
     try:
         with locked(state_dir / "worker-queue", timeout=_lock_timeout(deadline)):
-            return _inspect_worker_queue_locked(state_dir)
+            return _inspect_worker_queue_locked(state_dir, deadline=deadline)
     except LockUnavailable as exc:
         if deadline is None:
             raise
         raise WorkerDeliveryTimeout("worker-queue-deadline") from exc
 
 
-def _inspect_worker_queue_locked(state_dir: Path) -> dict[str, Any]:
+def _inspect_worker_queue_locked(
+    state_dir: Path,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    _check_deadline(deadline)
     root = _job_root(state_dir)
     counts = {state: 0 for state in JOB_STATES}
     invalid = 0
     generation = 0
     terminal = {"recovered": 0, "unresolved": 0}
-    orphan_hook_inputs = count_orphan_hook_inputs(state_dir)
+    orphan_hook_inputs = count_orphan_hook_inputs(
+        state_dir,
+        deadline=deadline,
+    )
     for state in JOB_STATES:
-        for path in sorted((root / state).glob("*.json")):
+        _check_deadline(deadline)
+        for path in (root / state).glob("*.json"):
+            _check_deadline(deadline)
             try:
                 job = _load_job(path)
                 if state == "quarantined":
                     payload_path = path.with_name(str(job.get("payload_file", "")))
                     if (
                         not payload_path.is_file()
-                        or hashlib.sha256(payload_path.read_bytes()).hexdigest()
+                        or _sha256_file_with_deadline(
+                            payload_path,
+                            deadline=deadline,
+                        )
                         != job["payload_sha256"]
                     ):
                         raise ValueError("worker-quarantine-payload-invalid")
@@ -1638,8 +1701,13 @@ def _inspect_worker_queue_locked(state_dir: Path) -> dict[str, Any]:
             if state == "quarantined":
                 terminal["unresolved"] += 1
             elif state == "dead-letter":
-                outcome = "recovered" if _has_verified_successor(root, job) else "unresolved"
+                outcome = (
+                    "recovered"
+                    if _has_verified_successor(root, job, deadline=deadline)
+                    else "unresolved"
+                )
                 terminal[outcome] += 1
+    _check_deadline(deadline)
     cleanup_unverified = has_unverified_process_tree(state_dir)
     status = (
         "error"
