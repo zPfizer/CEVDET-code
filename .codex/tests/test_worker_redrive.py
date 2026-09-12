@@ -652,6 +652,69 @@ class RedriveDeadLetterTests(unittest.TestCase):
         wake.assert_called_once_with(state, vault_root=vault)
         self.assertIn("stale işler toparlandı: 1", output.getvalue())
 
+    def test_cli_redrive_all_wakes_interrupted_pending_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            vault = root / "vault"
+            vault.mkdir()
+            workers.enqueue_job(
+                state,
+                "maintenance",
+                {"reason": "interrupted-pending-recovery"},
+                start_supervisor=False,
+                now=100,
+            )
+            running, job = workers._claim_next_job(state, now=101)
+            real_replace = workers.os.replace
+
+            def fail_pending_transition(source: Path, destination: Path) -> None:
+                if (
+                    source.parent.name == "running"
+                    and destination.parent.name == "pending"
+                ):
+                    raise OSError("simulated pending move interruption")
+                real_replace(source, destination)
+
+            with mock.patch.object(
+                workers.os, "replace", side_effect=fail_pending_transition
+            ):
+                with self.assertRaisesRegex(
+                    OSError, "simulated pending move interruption"
+                ):
+                    workers._finish_job(
+                        state,
+                        running,
+                        job,
+                        status="failed",
+                        error="synthetic failure",
+                        now=102,
+                    )
+
+            argv = [
+                "worker_supervisor.py",
+                "--vault",
+                str(vault),
+                "--state-dir",
+                str(state),
+                "--redrive",
+            ]
+            output = io.StringIO()
+            with (
+                mock.patch.object(workers.sys, "argv", argv),
+                mock.patch.object(workers, "ensure_supervisor") as wake,
+                redirect_stdout(output),
+            ):
+                result = workers.main()
+
+            pending = state / "worker-jobs" / "pending" / running.name
+            recovered = workers._load_job(pending)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(recovered["status"], "pending")
+        wake.assert_called_once_with(state, vault_root=vault)
+        self.assertIn("stale işler toparlandı: 1", output.getvalue())
+
     def test_cli_targeted_recovery_ignores_unreadable_unrelated_pending_job(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
