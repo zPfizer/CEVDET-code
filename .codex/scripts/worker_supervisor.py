@@ -1601,7 +1601,7 @@ def redrive_dead_letter(
     redriven: list[str] = []
     skipped: list[tuple[str, str]] = []
     with locked(state_dir / "worker-queue"):
-        seen_records: dict[str, dict[str, Any]] = {}
+        seen_records: dict[str, dict[str, Any] | None] = {}
         seen_redriven: dict[str, dict[str, Any]] = {}
         for state in (
             "pending",
@@ -1640,8 +1640,15 @@ def redrive_dead_letter(
                     else:
                         job = _load_job(path)
                 except ValueError:
+                    record_id = _job_id_from_path(path)
+                    if record_id is not None:
+                        seen_records.setdefault(record_id, None)
                     continue
-                seen_records.setdefault(job["job_id"], job)
+                if (
+                    job["job_id"] not in seen_records
+                    or seen_records[job["job_id"]] is None
+                ):
+                    seen_records[job["job_id"]] = job
                 if (
                     state != "quarantined"
                     and _has_redrive_marker(job)
@@ -1666,16 +1673,18 @@ def redrive_dead_letter(
             ):
                 skipped.append((job["job_id"], "redrive çakışması"))
                 continue
-            active = seen_redriven.get(job["job_id"])
-            if active is None:
+            if job["job_id"] in seen_redriven:
+                active = seen_redriven[job["job_id"]]
+            else:
                 active = seen_records.get(job["job_id"])
-            if active is not None:
+            if job["job_id"] in seen_redriven or job["job_id"] in seen_records:
                 # Persist the conflict so a later receipt prune cannot reopen it.
                 # The ID may be reused for a different logical job; retain both
                 # records as an explicit unresolved identity conflict.
                 job["terminal_reason"] = (
                     "redrive-conflict"
-                    if _same_redrive_identity(active, job)
+                    if isinstance(active, dict)
+                    and _same_redrive_identity(active, job)
                     else "redrive-identity-conflict"
                 )
                 job["retryable"] = False

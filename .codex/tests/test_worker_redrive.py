@@ -559,6 +559,28 @@ class RedriveDeadLetterTests(unittest.TestCase):
             self.assertFalse(pending.exists())
             self.assertTrue(conflict_still_there)
 
+    def test_redrive_rejects_unreadable_same_id_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            job_id = "a" * 32
+            receipt = state / "worker-jobs" / "succeeded" / f"job-{job_id}.json"
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text("{bozuk", encoding="utf-8")
+            dead_letter = _dead_letter_job(
+                state, job_id, payload={"reason": "stale-copy"}
+            )
+
+            redriven, skipped = workers.redrive_dead_letter(
+                state, job_id=job_id
+            )
+            conflict = workers._load_job(dead_letter)
+            pending = state / "worker-jobs" / "pending" / dead_letter.name
+
+        self.assertEqual(redriven, [])
+        self.assertEqual(skipped, [(job_id, "redrive çakışması")])
+        self.assertEqual(conflict["terminal_reason"], "redrive-identity-conflict")
+        self.assertFalse(pending.exists())
+
     def test_cli_redrive_output_is_safe_for_legacy_encoding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
