@@ -2,12 +2,13 @@ import datetime
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
 from _fixtures import CODEX_DIR  # noqa: F401
 import compile_state
-from file_lock import LockUnavailable
+from file_lock import LockUnavailable, locked as file_locked
 import memory_ledger as ledger
 import stale_review
 from state_store import state_dir_of
@@ -172,10 +173,9 @@ class StaleReviewTests(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(ValueError, "report-target-invalid"):
                     stale_review.write_report(vault, now=datetime.date(2026, 9, 11))
+                self.assertFalse(target.exists())
             finally:
                 parent.unlink(missing_ok=True)
-
-        self.assertFalse(target.exists())
 
     def test_report_stays_unwritten_when_compile_lock_is_busy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -187,8 +187,40 @@ class StaleReviewTests(unittest.TestCase):
             ):
                 with self.assertRaises(LockUnavailable):
                     stale_review.write_report(vault, output=target)
+            self.assertFalse(target.exists())
 
-        self.assertFalse(target.exists())
+    def test_compile_lock_covers_atomic_write_and_is_released_after_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _note(vault, "eski-not", updated="2026-01-02", sources=[])
+            target = vault / "report.md"
+            state_dir = state_dir_of(vault)
+            probe_result: list[str] = []
+
+            def probe_compile_lock() -> None:
+                try:
+                    with file_locked(state_dir / "compile", timeout=0):
+                        probe_result.append("acquired")
+                except LockUnavailable:
+                    probe_result.append("busy")
+
+            def observe_writer(_path: Path, _text: str, **_kwargs: object) -> None:
+                probe = threading.Thread(target=probe_compile_lock)
+                probe.start()
+                probe.join(timeout=2)
+                self.assertFalse(probe.is_alive())
+                self.assertEqual(probe_result, ["busy"])
+
+            with mock.patch.object(
+                stale_review, "atomic_write_text", side_effect=observe_writer
+            ):
+                result = stale_review.write_report(
+                    vault, output=target, now=datetime.date(2026, 9, 11)
+                )
+            self.assertEqual(result, (target, 1))
+            self.assertFalse(target.exists())
+            with file_locked(state_dir / "compile", timeout=0):
+                pass
 
     def test_cli_overwrite_replaces_existing_report_explicitly(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -261,8 +293,7 @@ class StaleReviewTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ledger.MemoryPreferenceError, "memory-suppression-invalid"):
                 stale_review.write_report(vault, output=target)
-
-        self.assertFalse(target.exists())
+            self.assertFalse(target.exists())
 
     def test_pending_publication_fails_closed_before_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -275,8 +306,7 @@ class StaleReviewTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ledger.MemoryPreferenceError, "publication-pending"):
                 stale_review.write_report(vault, output=target)
-
-        self.assertFalse(target.exists())
+            self.assertFalse(target.exists())
 
     def test_unreadable_eligible_source_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -287,8 +317,7 @@ class StaleReviewTests(unittest.TestCase):
 
             with self.assertRaises(UnicodeDecodeError):
                 stale_review.write_report(vault, output=target)
-
-        self.assertFalse(target.exists())
+            self.assertFalse(target.exists())
 
     def test_inventory_identity_mismatch_fails_closed_after_symlink_change(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
