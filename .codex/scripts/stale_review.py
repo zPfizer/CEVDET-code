@@ -94,7 +94,7 @@ def _source_reasons(
     note_date: datetime.date,
     *,
     memory: MemoryRead | None = None,
-    observations: dict[Path, tuple[int, int, int, int, int]] | None = None,
+    observations: dict[Path, tuple[int, int, int, int, int] | None] | None = None,
 ) -> list[str]:
     sources = note.frontmatter.get("sources")
     if isinstance(sources, list):
@@ -140,13 +140,15 @@ def _source_reasons(
             else:
                 reasons.append("kaynak yolu geçersiz")
             continue
+        daily = daily_root / source
         if daily_status == "missing":
+            if observations is not None:
+                observations.setdefault(daily, None)
             reasons.append(f"kaynağı yok: {source}")
             continue
         if daily_status != "safe":
             reasons.append("kaynak yolu güvensiz")
             continue
-        daily = daily_root / source
         try:
             source_stat = daily.lstat()
             resolved = daily.resolve(strict=False)
@@ -160,6 +162,8 @@ def _source_reasons(
                 continue
             modified = datetime.date.fromtimestamp(source_stat.st_mtime)
         except FileNotFoundError:
+            if observations is not None:
+                observations.setdefault(daily, None)
             reasons.append(f"kaynağı yok: {source}")
             continue
         except (OSError, OverflowError, ValueError):
@@ -200,7 +204,7 @@ def _source_reasons(
 
 def _validate_source_observations(
     vault: Path,
-    observations: dict[Path, tuple[int, int, int, int, int]],
+    observations: dict[Path, tuple[int, int, int, int, int] | None],
 ) -> None:
     if not observations:
         return
@@ -216,7 +220,12 @@ def _validate_source_observations(
         ):
             raise ValueError("daily-root-invalid")
         for path, expected in observations.items():
-            source_stat = path.lstat()
+            try:
+                source_stat = path.lstat()
+            except FileNotFoundError:
+                if expected is None:
+                    continue
+                raise
             resolved = path.resolve(strict=False)
             if (
                 stat.S_ISLNK(source_stat.st_mode)
@@ -225,6 +234,8 @@ def _validate_source_observations(
                 or not resolved.is_relative_to(daily_resolved)
             ):
                 raise ValueError("daily-source-invalid")
+            if expected is None:
+                raise ValueError("daily-source-created")
             current = (
                 source_stat.st_dev,
                 source_stat.st_ino,
@@ -234,7 +245,11 @@ def _validate_source_observations(
             )
             if current != expected:
                 raise ValueError("daily-source-changed")
-    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+    except FileNotFoundError:
+        if all(expected is None for expected in observations.values()):
+            return
+        raise MemoryPreferenceError("stale-review-source-changed")
+    except (OSError, RuntimeError, ValueError) as exc:
         raise MemoryPreferenceError("stale-review-source-changed") from exc
 
 
@@ -261,7 +276,10 @@ def _validate_vault(vault: Path) -> None:
 
 
 def _validate_runtime_paths(vault: Path) -> None:
-    for parts in ((".codex", "scripts", ".state"), (".codex", "private-memory")):
+    for parts in (
+        (".codex", "scripts", ".state"),
+        (".codex", "private-memory", "controls"),
+    ):
         current = vault
         for part in parts:
             current /= part
@@ -425,7 +443,7 @@ def _checked_markdown_paths(root: Path) -> Iterator[Path]:
 def _snapshot_notes(
     vault: Path,
     memory: MemoryRead,
-    observations: dict[Path, tuple[int, int, int, int, int]] | None = None,
+    observations: dict[Path, tuple[int, int, int, int, int] | None] | None = None,
 ) -> tuple[NoteIndex, ...]:
     notes = []
     for path in _eligible_note_paths(vault):
@@ -511,7 +529,7 @@ def review(
     _validate_runtime_paths(vault)
     today = now or datetime.date.today()
     with memory_read(vault) as memory:
-        observations: dict[Path, tuple[int, int, int, int, int]] = {}
+        observations: dict[Path, tuple[int, int, int, int, int] | None] = {}
         note_observations: dict[Path, tuple[int, int, int, int, int]] = {}
         notes = _snapshot_notes(vault, memory, note_observations)
         findings = _review_notes(
@@ -603,7 +621,9 @@ def write_report(
         hashes = load_suppressed_hashes(private_root)
         with suppression_guard(private_root, hashes):
             with memory_read(vault) as memory:
-                observations: dict[Path, tuple[int, int, int, int, int]] = {}
+                observations: dict[
+                    Path, tuple[int, int, int, int, int] | None
+                ] = {}
                 note_observations: dict[Path, tuple[int, int, int, int, int]] = {}
                 notes = _snapshot_notes(vault, memory, note_observations)
                 findings = _review_notes(

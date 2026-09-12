@@ -218,6 +218,36 @@ class StaleReviewTests(unittest.TestCase):
                     )
             self.assertFalse(target.exists())
 
+    def test_missing_daily_source_created_before_publish_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _note(
+                vault,
+                "sonradan-gelen-kaynak",
+                updated="2026-01-02",
+                sources=["2026-01-01.md"],
+            )
+            target = vault / "report.md"
+            real_review = stale_review._review_notes
+
+            def review_then_create(*args: object, **kwargs: object) -> list[stale_review.StaleFinding]:
+                findings = real_review(*args, **kwargs)
+                _daily(vault, "2026-01-01.md", mtime=datetime.date(2026, 1, 1))
+                return findings
+
+            with mock.patch.object(
+                stale_review,
+                "_review_notes",
+                new=review_then_create,
+            ):
+                with self.assertRaisesRegex(
+                    ledger.MemoryPreferenceError, "stale-review-source-changed"
+                ):
+                    stale_review.write_report(
+                        vault, output=target, now=datetime.date(2026, 9, 11)
+                    )
+            self.assertFalse(target.exists())
+
     def test_review_revalidates_derived_note_before_return(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -415,6 +445,32 @@ class StaleReviewTests(unittest.TestCase):
                         self.assertFalse(target.exists())
                     finally:
                         link.unlink(missing_ok=True)
+
+    def test_linked_suppression_controls_fail_closed_before_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            outside = root / "outside-controls"
+            vault.mkdir()
+            outside.mkdir()
+            (vault / "knowledge" / "concepts").mkdir(parents=True)
+            controls = vault / ".codex" / "private-memory" / "controls"
+            controls.parent.mkdir(parents=True)
+            try:
+                controls.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            target = vault / "report.md"
+            try:
+                with self.assertRaisesRegex(
+                    ledger.MemoryPreferenceError,
+                    "stale-review-runtime-path-invalid",
+                ):
+                    stale_review.write_report(vault, output=target)
+                self.assertFalse(target.exists())
+            finally:
+                controls.unlink(missing_ok=True)
 
     def test_report_stays_unwritten_when_compile_lock_is_busy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
