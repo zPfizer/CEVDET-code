@@ -392,6 +392,11 @@ Bağ.
         )
         self.assertIn("`#user-ID` bağlantısı", prompt)
         self.assertIn("mevcut kullanıcı kararını otomatik olarak `gecmis` yapma", prompt)
+        self.assertIn(
+            "Yeni doğrulanmış bir olgu önceki doğrulanmış olguyla çelişiyorsa",
+            prompt,
+        )
+        self.assertIn("yeni olguyu `gecerli` olarak ekle", prompt)
         self.assertIn("tek otorite olarak uygula", prompt)
         self.assertNotIn("user-source", prompt)
         self.assertNotIn(
