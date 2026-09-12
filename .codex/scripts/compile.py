@@ -48,13 +48,13 @@ from knowledge_schema import (
 )
 from state_store import (
     atomic_write_bytes,
-    clear_health as clear_component_health,
+    discard_health,
     REPLACE_RETRY_SECONDS,
     ReplacementConflict,
     replace_with_retry,
+    report_health,
     sha256_file as _sha256,
     sha256_file_locked as _sha256_locked,
-    write_health as write_component_health,
 )
 from tag_taxonomy import TaxonomyError, load_taxonomy, normalize_tree
 
@@ -157,22 +157,11 @@ def _iso_now() -> str:
 def write_health(state_dir: Path, error: str, warning: bool = False) -> None:
     """Record the latest compiler problem and preserve warning history."""
     error, _ = sanitize_text(error, max_chars=None)
-    try:
-        write_component_health(
-            state_dir,
-            component="compile",
-            error=error,
-            warning=warning,
-        )
-    except OSError:
-        pass
+    report_health(state_dir, component="compile", error=error, warning=warning)
 
 
 def clear_health(state_dir: Path, component: str) -> None:
-    try:
-        clear_component_health(state_dir, component=component)
-    except OSError:
-        pass
+    discard_health(state_dir, component=component)
 
 
 def _git(

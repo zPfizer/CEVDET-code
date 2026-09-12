@@ -536,3 +536,43 @@ def clear_health(
         _summarize_health(payload)
         atomic_write_json(path, payload)
         return payload
+
+
+def report_health(
+    state_dir: Path,
+    *,
+    component: str,
+    error: str,
+    warning: bool = False,
+    scope_key: str = "global",
+) -> None:
+    """Best-effort ``write_health``: reporting must never crash the caller."""
+    try:
+        write_health(
+            state_dir,
+            component=component,
+            error=error,
+            warning=warning,
+            scope_key=scope_key,
+        )
+    except OSError:
+        pass
+
+
+def discard_health(
+    state_dir: Path,
+    *,
+    component: str,
+    scope_key: str = "global",
+    expected_error: str | None = None,
+) -> None:
+    """Best-effort ``clear_health``: cleanup must never crash the caller."""
+    try:
+        clear_health(
+            state_dir,
+            component=component,
+            scope_key=scope_key,
+            expected_error=expected_error,
+        )
+    except OSError:
+        pass
