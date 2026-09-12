@@ -205,9 +205,9 @@ HISTORY_TURKISH_NOMINAL_CHANGE_QUERY = re.compile(
 HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS = frozenset({"hangi", "secenegi", "uygun"})
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
     r"(?ix)(?:"
-    r"\b(?:daha\s+once|onceden)\b(?:\s+\w+){0,8}\s+\w+m(?:isti|ustu)[mk]\b(?=\s*\?)"
+    r"\b(?:daha\s+once|onceden)\b(?:\s+\w+){0,8}\s+\w+m(?:isti|ustu)[mk]\b(?=\s*(?:\?|$))"
     r"|\b(?:daha\s+once|onceden)\b(?:\s+\w+){0,3}\s+karar\w*"
-    r"(?:\s+\w+){0,2}\s+neydi\b(?=\s*\?)"
+    r"(?:\s+\w+){0,2}\s+neydi\b(?=\s*(?:\?|$))"
     r")"
 )
 HISTORY_CHANGE_TAIL = (
@@ -1559,7 +1559,12 @@ def _retrospective_topic_cue_terms(query: str) -> frozenset[str]:
         past = re.search(r"\b\w+m(?:isti|ustu)[mk]\b", retrospective)
         if past:
             cue_terms.add(past.group())
-        if re.search(r"\b(?:hangi|ne)\b", retrospective):
+        question_terms = {
+            term for term in re.findall(r"\w+", retrospective)
+            if any(term == root or _matches_history_inflection(term, root) for root in ("hangi", "ne"))
+        }
+        cue_terms.update(question_terms)
+        if question_terms:
             cue_terms.update(
                 term
                 for term in _tokens(retrospective)
