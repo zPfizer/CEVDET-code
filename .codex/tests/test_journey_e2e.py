@@ -179,11 +179,13 @@ def _debug_state(state: Path) -> str:
         names = sorted(path.name for path in stage_dir.glob("*"))
         if names:
             lines.append(f"worker-jobs/{stage_dir.name}: {names}")
-    interesting = (
-        *state.glob("*health*.json"),
-        *(state / "worker-jobs" / "dead-letter").glob("*.json"),
-        *(state / "worker-jobs" / "failed").glob("*.json"),
-        *state.glob("flush-*.json"),
+    interesting = tuple(
+        path
+        for path in (
+            *state.glob("*.json"),
+            *(state / "worker-jobs").glob("*/*.json"),
+        )
+        if path.name != "worker-sequence.json"
     )
     for path in sorted(interesting):
         try:
@@ -191,6 +193,16 @@ def _debug_state(state: Path) -> str:
         except OSError:
             continue
     return "\n".join(lines)
+
+
+def _hook_result_diagnostics(result: subprocess.CompletedProcess[str] | None) -> str:
+    if result is None:
+        return ""
+    return (
+        f"\nhook-returncode: {result.returncode}"
+        f"\nhook-stdout: {result.stdout[:1000]}"
+        f"\nhook-stderr: {result.stderr[:1000]}"
+    )
 
 
 def _drain_worker(vault: Path, environment: dict[str, str]) -> None:
@@ -265,6 +277,7 @@ class JourneyE2ETests(unittest.TestCase):
     def _assert_session_runtime_succeeded(
         self, state: Path, event: str, session_id: str,
         expected_generation: int = 1,
+        result: subprocess.CompletedProcess[str] | None = None,
     ) -> None:
         session_key = hashlib.sha256(
             session_id.encode("utf-8")
@@ -277,7 +290,9 @@ class JourneyE2ETests(unittest.TestCase):
                 ),
                 DAILY_TIMEOUT_SECONDS,
             ),
-            f"{event} runtime makbuzu yok",
+            f"{event} runtime makbuzu yok;\n"
+            + _debug_state(state)
+            + _hook_result_diagnostics(result),
         )
         session_runtime = json.loads(
             session_receipt.read_text(encoding="utf-8")
@@ -303,9 +318,10 @@ class JourneyE2ETests(unittest.TestCase):
 
     def _assert_session_end_succeeded(
         self, state: Path, session_id: str, expected_generation: int = 1,
+        result: subprocess.CompletedProcess[str] | None = None,
     ) -> None:
         self._assert_session_runtime_succeeded(
-            state, "session-end", session_id, expected_generation,
+            state, "session-end", session_id, expected_generation, result,
         )
 
     def test_model_stub_rejects_missing_or_misordered_transcript(self) -> None:
@@ -385,7 +401,7 @@ class JourneyE2ETests(unittest.TestCase):
             event_date = datetime.date.today().isoformat()
             ended = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(ended.returncode, 0, ended.stderr)
-            self._assert_session_end_succeeded(state, session_id)
+            self._assert_session_end_succeeded(state, session_id, result=ended)
             _drain_worker(vault, environment)
 
             daily = vault / "daily" / f"{event_date}.md"
@@ -445,7 +461,7 @@ class JourneyE2ETests(unittest.TestCase):
             repeated = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
             self._assert_session_end_succeeded(
-                state, session_id, expected_generation=2
+                state, session_id, expected_generation=2, result=repeated,
             )
             _drain_worker(vault, environment)
             self.assertTrue(
@@ -473,7 +489,7 @@ class JourneyE2ETests(unittest.TestCase):
             )
             self.assertEqual(started.returncode, 0, started.stderr)
             self._assert_session_runtime_succeeded(
-                state, "session-start", next_session_id,
+                state, "session-start", next_session_id, result=started,
             )
             emitted = json.loads(started.stdout)
             context = emitted["hookSpecificOutput"]["additionalContext"]
@@ -510,7 +526,7 @@ class JourneyE2ETests(unittest.TestCase):
 
             ended = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(ended.returncode, 0, ended.stderr)
-            self._assert_session_end_succeeded(state, session_id)
+            self._assert_session_end_succeeded(state, session_id, result=ended)
 
             # Salt okunur kapanış hiçbir iş kuyruklamaz: bekleme gerekmez,
             # dönüş anında ne hookin taşıyıcısı ne pending iş ne daily olmalı.
