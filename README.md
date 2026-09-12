@@ -20,7 +20,7 @@ Bu depo CEVDET'in runtime kodunu, testlerini, geliştirme skill'lerini ve teknik
    ```
 
 4. Göreve ait diff'i incele ve yalnız ilgili dosyaları commit et.
-5. Branch'i özel GitHub deposuna push et; değişiklik ve test sonuçlarıyla PR aç.
+5. Branch'i CEVDET-code GitHub deposuna push et; değişiklik ve test sonuçlarıyla PR aç.
 6. PR incelemesi ve kullanıcı onayından sonra merge et.
 7. Yerel Vault'a yalnız onaylanan runtime kodu değişikliklerini uygula.
 
