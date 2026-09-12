@@ -1,6 +1,7 @@
 import datetime
 import json
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -245,6 +246,27 @@ class HealthReportTests(unittest.TestCase):
 
         self.assertEqual(preserved, original)
 
+    def test_overwrite_rejects_symlink_report_target_before_metadata_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            outside = root / "outside-secret.md"
+            vault.mkdir()
+            _seed_state(vault)
+            outside.write_text("created: 2020-01-01\nprivate\n", encoding="utf-8")
+            target = vault / "report.md"
+            try:
+                target.symlink_to(outside)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "report-target-invalid"):
+                health_report.write_report(vault, target, overwrite=True)
+            self.assertTrue(target.is_symlink())
+            preserved = outside.read_text(encoding="utf-8")
+
+        self.assertEqual(preserved, "created: 2020-01-01\nprivate\n")
+
     def test_default_report_rejects_linked_command_center_parent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -337,7 +359,10 @@ class HealthReportTests(unittest.TestCase):
 
     def test_previous_created_reads_only_bounded_prefix(self) -> None:
         reader = mock.mock_open(read_data="created: 2026-01-01\n")
-        with mock.patch.object(Path, "open", reader):
+        with (
+            mock.patch.object(Path, "lstat", return_value=mock.Mock(st_mode=stat.S_IFREG)),
+            mock.patch.object(Path, "open", reader),
+        ):
             created = health_report._previous_created(Path("panel.md"), "fallback")
 
         self.assertEqual(created, "2026-01-01")

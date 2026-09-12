@@ -268,6 +268,14 @@ def _format_ts(value: Any) -> str:
 
 def _previous_created(output: Path, fallback: str) -> str:
     try:
+        output_stat = output.lstat()
+        if stat.S_ISLNK(output_stat.st_mode) or not stat.S_ISREG(output_stat.st_mode):
+            raise ValueError("report-target-invalid")
+    except FileNotFoundError:
+        return fallback
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("report-target-invalid") from exc
+    try:
         with output.open("r", encoding="utf-8") as handle:
             head = handle.read(2048)
     except (OSError, UnicodeError):
