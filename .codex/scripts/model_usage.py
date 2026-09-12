@@ -246,6 +246,8 @@ def _iter_records(
                             yield None
                         discarding = not raw.endswith(b"\n")
                         continue
+                    if not raw.endswith(b"\n"):
+                        yield None  # A parseable tail can still be a torn write.
                     try:
                         value = json.loads(line.decode("utf-8"))
                     except (UnicodeError, ValueError):
