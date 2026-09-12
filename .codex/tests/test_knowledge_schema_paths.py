@@ -138,6 +138,25 @@ class KnowledgeSchemaPathTests(TestCase):
         self.assertIn("knowledge/index.md:coverage", report.issues)
         self.assertEqual(report.index_rows, 2)
 
+    def test_escaped_index_cell_pipe_is_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_control_tree(root)
+            index = root / "knowledge" / "index.md"
+            index.write_text(
+                index.read_text(encoding="utf-8").replace(
+                    "Özet. | 2026-08-27.md",
+                    r"Özet \| ek. | 2026-08-27.md",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            report = knowledge_schema.validate_knowledge_tree(root)
+
+        self.assertEqual(report.issues, ())
+        self.assertEqual(report.index_rows, 2)
+
     def test_escaped_connection_links_are_not_canonical_targets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
