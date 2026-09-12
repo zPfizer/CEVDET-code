@@ -692,7 +692,10 @@ def render(findings: Sequence[StaleFinding], *, days: int, today: datetime.date)
         return f"[[{note}]]"
 
     if not findings:
-        lines += ["Bayat aday yok — türetilmiş bilgi güncel görünüyor.", ""]
+        lines += [
+            "Taranan tarih ve kaynak ölçütleriyle bayat aday saptanmadı.",
+            "",
+        ]
         return "\n".join(lines)
     lines += [
         f"{len(findings)} aday:",

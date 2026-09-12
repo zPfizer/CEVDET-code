@@ -183,7 +183,7 @@ class StaleReviewTests(unittest.TestCase):
 
         self.assertEqual(count, 1)
         self.assertIn("kaynak okunamadı: 2026-01-01.md", text)
-        self.assertNotIn("Bayat aday yok", text)
+        self.assertNotIn("Taranan tarih ve kaynak ölçütleriyle bayat aday saptanmadı.", text)
 
     def test_daily_source_drift_before_publish_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -432,7 +432,7 @@ class StaleReviewTests(unittest.TestCase):
             text = target.read_text(encoding="utf-8")
 
         self.assertEqual(count, 0)
-        self.assertIn("Bayat aday yok", text)
+        self.assertIn("Taranan tarih ve kaynak ölçütleriyle bayat aday saptanmadı.", text)
 
     def test_default_report_write_does_not_clobber_existing_user_text(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
