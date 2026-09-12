@@ -1213,11 +1213,11 @@ def migrate_legacy_failed_jobs(
                 original = json.loads(source.read_text(encoding="utf-8"))
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
                 raise ValueError("worker-legacy-state-invalid") from exc
-            job_id = _job_id_from_path(source)
+            record_id = _job_id_from_path(source)
             if (
                 not isinstance(original, dict)
-                or job_id is None
-                or original.get("job_id") != job_id
+                or record_id is None
+                or original.get("job_id") != record_id
                 or original.get("status") != "failed"
                 or not isinstance(original.get("kind"), str)
                 or original["kind"] not in JOB_KINDS
@@ -1227,8 +1227,8 @@ def migrate_legacy_failed_jobs(
             seen_records, _ = _scan_redrive_records_locked(
                 state_dir, include_legacy_failed=False
             )
-            if job_id in seen_records:
-                active = seen_records[job_id]
+            if record_id in seen_records:
+                active = seen_records[record_id]
                 if not isinstance(active, dict) or not _same_redrive_identity(
                     active, original
                 ):
@@ -1295,13 +1295,13 @@ def migrate_legacy_failed_jobs(
                     _mark_redrive_conflict(existing, original, now=observed_now)
                     atomic_write_json(destination, existing, sort_keys=True)
                     continue
-                receipt = state_dir / f"worker-migration-{job_id}.json"
+                receipt = state_dir / f"worker-migration-{record_id}.json"
                 atomic_write_json(
                     receipt,
                     {
                         "schema_version": 1,
                         "status": "durable",
-                        "job_id": job_id,
+                        "job_id": record_id,
                         "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                         "destination_sha256": hashlib.sha256(
                             destination.read_bytes()
@@ -1316,13 +1316,13 @@ def migrate_legacy_failed_jobs(
             atomic_write_json(destination, after, sort_keys=True)
             if _fail_after == "destination":
                 raise RuntimeError("worker-migration-injected:destination")
-            receipt = state_dir / f"worker-migration-{job_id}.json"
+            receipt = state_dir / f"worker-migration-{record_id}.json"
             atomic_write_json(
                 receipt,
                 {
                     "schema_version": 1,
                     "status": "durable",
-                    "job_id": job_id,
+                    "job_id": record_id,
                     "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                     "destination_sha256": hashlib.sha256(
                         destination.read_bytes()
@@ -1364,7 +1364,7 @@ def _has_verified_successor(root: Path, job: dict[str, Any]) -> bool:
 
 def _has_redrive_marker(job: dict[str, Any]) -> bool:
     marker = job.get("redriven_ts")
-    return isinstance(marker, int) and not isinstance(marker, bool)
+    return isinstance(marker, int) and not isinstance(marker, bool) and marker > 0
 
 
 def _same_redrive_identity(left: dict[str, Any], right: dict[str, Any]) -> bool:

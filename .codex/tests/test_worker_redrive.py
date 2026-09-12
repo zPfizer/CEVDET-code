@@ -174,6 +174,30 @@ class RedriveDeadLetterTests(unittest.TestCase):
         self.assertTrue(stayed)
         self.assertFalse(moved)
 
+    def test_invalid_redrive_marker_stays_in_dead_letter_recovery(self) -> None:
+        for marker in (0, -1, True, "1757500000"):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                job_id = "c" * 32
+                dead_letter = _dead_letter_job(
+                    state,
+                    job_id,
+                    status="pending",
+                    payload={"reason": "invalid-marker"},
+                    redriven_ts=marker,
+                )
+
+                recovered = workers.recover_stale_jobs(
+                    state, now=1757500001
+                )
+                stayed = dead_letter.is_file()
+                pending = state / "worker-jobs" / "pending" / dead_letter.name
+                moved = pending.is_file()
+
+            self.assertEqual(recovered, 0)
+            self.assertTrue(stayed)
+            self.assertFalse(moved)
+
     def test_recovery_fences_marked_duplicate_before_moving_dead_letter(self) -> None:
         for same_identity in (True, False):
             with self.subTest(same_identity=same_identity), tempfile.TemporaryDirectory() as temporary:
@@ -440,6 +464,34 @@ class RedriveDeadLetterTests(unittest.TestCase):
             self.assertFalse(receipt_exists)
             self.assertEqual(migrated_again, 0)
             self.assertTrue(source_still_exists)
+
+    def test_legacy_migration_all_processes_each_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            job_ids = ("c" * 32, "d" * 32)
+            sources = [
+                _legacy_failed_job(
+                    state, job_id, payload={"reason": job_id[:1]}
+                )
+                for job_id in job_ids
+            ]
+
+            migrated = workers.migrate_legacy_failed_jobs(
+                state, now=1757500001
+            )
+            source_exists = [source.exists() for source in sources]
+            destinations = [
+                state / "worker-jobs" / "dead-letter" / source.name
+                for source in sources
+            ]
+            destination_statuses = [
+                workers._load_job(destination)["status"]
+                for destination in destinations
+            ]
+
+        self.assertEqual(migrated, 2)
+        self.assertEqual(source_exists, [False, False])
+        self.assertEqual(destination_statuses, ["dead-letter", "dead-letter"])
 
     def test_redrive_revives_job_as_valid_pending(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
