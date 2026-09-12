@@ -346,12 +346,20 @@ def atomic_write_text(
             temporary.chmod(mode)
         if overwrite:
             replace_with_retry(temporary, path, deadline=deadline)
-        elif os.name == "nt":
-            # Windows rename fails when the destination already exists.
-            os.rename(temporary, path)
         else:
-            # POSIX hard-link creation is atomic and refuses an existing name.
-            os.link(temporary, path)
+            # The guarded create-only path is atomic on both platforms and
+            # retries transient Windows sharing violations.
+            try:
+                replace_with_retry(
+                    temporary,
+                    path,
+                    deadline=deadline,
+                    expected_digest=None,
+                )
+            except ReplacementConflict as exc:
+                if str(exc) == "replace-target-created":
+                    raise FileExistsError(path) from exc
+                raise
     finally:
         temporary.unlink(missing_ok=True)
 

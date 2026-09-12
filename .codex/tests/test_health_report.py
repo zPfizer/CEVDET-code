@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import json
 from pathlib import Path
 import stat
@@ -268,6 +269,49 @@ class HealthReportTests(unittest.TestCase):
 
             with self.assertRaisesRegex(OSError, "worker-record-invalid"):
                 health_report.write_report(vault, target)
+            self.assertFalse(target.exists())
+
+    def test_quarantined_queue_record_is_not_reported_as_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            quarantine = state / "worker-jobs" / "quarantined"
+            job_id = "c" * 32
+            payload = quarantine / f"job-{job_id}.payload"
+            payload.write_bytes(b"unreadable worker payload")
+            (quarantine / f"job-{job_id}.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": worker_supervisor.JOB_SCHEMA_VERSION,
+                        "job_id": job_id,
+                        "status": "quarantined",
+                        "reason_code": "worker-job-json-invalid",
+                        "payload_sha256": hashlib.sha256(
+                            payload.read_bytes()
+                        ).hexdigest(),
+                        "payload_file": payload.name,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            text = health_report.render(
+                vault, now=datetime.datetime(2026, 9, 11)
+            )
+
+        self.assertIn("Quarantine'da çözülemeyen iş var", text)
+        self.assertNotIn("Boş — takılı iş yok.", text)
+
+    def test_nonexistent_vault_is_rejected_before_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "missing-vault"
+            target = root / "report.md"
+
+            with self.assertRaisesRegex(ValueError, "vault-invalid"):
+                health_report.write_report(vault, target)
+
+            self.assertFalse(vault.exists())
             self.assertFalse(target.exists())
 
     def test_orphan_hook_input_prevents_clean_queue_claim(self) -> None:

@@ -82,6 +82,19 @@ def _default_report_target(vault: Path) -> Path:
     return target
 
 
+def _validate_vault(vault: Path) -> None:
+    try:
+        vault_stat = vault.lstat()
+    except (FileNotFoundError, OSError, RuntimeError) as exc:
+        raise ValueError("vault-invalid") from exc
+    if (
+        stat.S_ISLNK(vault_stat.st_mode)
+        or not stat.S_ISDIR(vault_stat.st_mode)
+        or vault.is_junction()
+    ):
+        raise ValueError("vault-invalid")
+
+
 def _bounded_json(path: Path) -> dict[str, Any] | None:
     try:
         if path.stat().st_size > MAX_RECORD_BYTES:
@@ -516,6 +529,11 @@ def render(
             + ", ".join(fences)
             + "."
         )
+    elif counts["quarantined"]:
+        lines.append(
+            "Quarantine'da çözülemeyen iş var — "
+            f"{counts['quarantined']} kayıt incelenmeyi bekliyor."
+        )
     elif orphan_hook_inputs:
         lines.append(
             "Worker kurtarma bekliyor — "
@@ -546,7 +564,9 @@ def write_report(
     now: datetime.datetime | None = None,
     overwrite: bool = False,
 ) -> Path:
-    vault = Path(vault).resolve()
+    vault = Path(vault)
+    _validate_vault(vault)
+    vault = vault.resolve()
     target = output if output is not None else _default_report_target(vault)
     atomic_write_text(target, render(vault, now=now, output=target), overwrite=overwrite)
     return target
