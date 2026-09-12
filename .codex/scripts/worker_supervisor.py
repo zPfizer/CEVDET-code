@@ -1365,6 +1365,7 @@ def _scan_redrive_records_locked(
     state_dir: Path,
     *,
     include_legacy_failed: bool = True,
+    job_id: str | None = None,
 ) -> tuple[dict[str, dict[str, Any] | None], dict[str, dict[str, Any]]]:
     """Return queue identities and marked redrive receipts under queue ownership."""
     seen_records: dict[str, dict[str, Any] | None] = {}
@@ -1380,6 +1381,12 @@ def _scan_redrive_records_locked(
         states.append("failed")
     for state in states:
         for path in sorted((_job_root(state_dir) / state).glob("*.json")):
+            path_job_id = _job_id_from_path(path)
+            if (
+                job_id is not None
+                and path_job_id != job_id
+            ):
+                continue
             try:
                 if state == "failed":
                     record_id = _job_id_from_path(path)
@@ -1458,6 +1465,34 @@ def _has_pending_redrive(state_dir: Path, *, job_id: str | None = None) -> bool:
             ):
                 return True
     return False
+
+
+def _redrive_supervisor_state(state_dir: Path, *, now: float | None = None) -> str:
+    """Classify a supervisor handoff after a duplicate launch was suppressed."""
+    observed_now = time.time() if now is None else now
+    with locked(state_dir / "worker-admission"):
+        try:
+            receipt = json.loads(
+                _supervisor_receipt_path(state_dir).read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return "uncertain"
+        if not isinstance(receipt, dict):
+            return "uncertain"
+        if (
+            receipt.get("status") == "running"
+            and _process_owner_is_active(receipt)
+        ):
+            return "active"
+        lease_until = receipt.get("lease_until")
+        if (
+            receipt.get("status") == "launching"
+            and isinstance(lease_until, (int, float))
+            and not isinstance(lease_until, bool)
+            and lease_until > observed_now
+        ):
+            return "deferred"
+    return "uncertain"
 
 
 def _redrive_state(state_dir: Path, job_id: str) -> str | None:
@@ -1680,18 +1715,28 @@ def ensure_supervisor(
     return True
 
 
-def recover_stale_jobs(state_dir: Path, *, now: float | None = None) -> int:
+def recover_stale_jobs(
+    state_dir: Path, *, job_id: str | None = None, now: float | None = None
+) -> int:
     observed_now = time.time() if now is None else now
     _ensure_job_dirs(state_dir)
     recovered = 0
     with locked(state_dir / "worker-queue"):
         if has_unverified_process_tree(state_dir):
             return 0
-        seen_records, seen_redriven = _scan_redrive_records_locked(state_dir)
+        seen_records, seen_redriven = _scan_redrive_records_locked(
+            state_dir, job_id=job_id
+        )
         # A crash can occur between the atomic JSON update and directory move.
         # Complete only a valid recorded transition; never overwrite another job.
         for source_state, targets in RECOVERABLE_TRANSITIONS.items():
             for path in sorted((_job_root(state_dir) / source_state).glob('*.json')):
+                path_job_id = _job_id_from_path(path)
+                if (
+                    job_id is not None
+                    and path_job_id != job_id
+                ):
+                    continue
                 try:
                     value = json.loads(path.read_text(encoding='utf-8'))
                     target = value.get('status') if isinstance(value, dict) else None
@@ -1728,6 +1773,12 @@ def recover_stale_jobs(state_dir: Path, *, now: float | None = None) -> int:
                     continue
         for source_state in ("claimed", "running"):
             for path in sorted((_job_root(state_dir) / source_state).glob("*.json")):
+                path_job_id = _job_id_from_path(path)
+                if (
+                    job_id is not None
+                    and path_job_id != job_id
+                ):
+                    continue
                 job = _load_job_quarantined(state_dir, path)
                 if job is None:
                     continue
@@ -1788,7 +1839,9 @@ def redrive_dead_letter(
     redriven: list[str] = []
     skipped: list[tuple[str, str]] = []
     with locked(state_dir / "worker-queue"):
-        seen_records, all_redriven = _scan_redrive_records_locked(state_dir)
+        seen_records, all_redriven = _scan_redrive_records_locked(
+            state_dir, job_id=job_id
+        )
         seen_redriven = {
             identifier: job
             for identifier, job in all_redriven.items()
@@ -2421,14 +2474,22 @@ def main() -> int:
         target = None if args.redrive == "all" else args.redrive
         if target is not None and re.fullmatch(r"[0-9a-f]{32}", target) is None:
             raise ValueError("worker-redrive-job-id-invalid")
-        recover_stale_jobs(state_dir)
+        recover_stale_jobs(state_dir, job_id=target)
         redriven, skipped = redrive_dead_letter(state_dir, job_id=target)
+        supervisor_state = "started"
         if redriven and _has_pending_redrive(state_dir, job_id=target):
-            ensure_supervisor(state_dir, vault_root=vault_root)
+            if not ensure_supervisor(state_dir, vault_root=vault_root):
+                supervisor_state = _redrive_supervisor_state(state_dir)
         for identifier in redriven:
             current_state = _redrive_state(state_dir, identifier)
             if current_state == "pending":
-                print(_console_safe(f"pending'e döndü: {identifier}"))
+                if supervisor_state == "deferred":
+                    message = f"redrive beklemede; supervisor başlatma belirsiz: {identifier}"
+                elif supervisor_state == "uncertain":
+                    message = f"redrive durumu belirsiz; supervisor doğrulanamadı: {identifier}"
+                else:
+                    message = f"pending'e döndü: {identifier}"
+                print(_console_safe(message))
             elif current_state in {"claimed", "running"}:
                 print(_console_safe(f"redrive zaten sürüyor: {identifier}"))
             elif current_state == "succeeded":
@@ -2439,7 +2500,11 @@ def main() -> int:
             print(_console_safe(f"atlandı: {identifier} — {reason}"))
         if not redriven and not skipped:
             print(_console_safe("dead-letter boş ya da eşleşen iş yok"))
-        return 1 if skipped or (target is not None and not redriven) else 0
+        return 1 if (
+            skipped
+            or supervisor_state in {"deferred", "uncertain"}
+            or (target is not None and not redriven)
+        ) else 0
     if args.execute_job is not None:
         if not isinstance(args.claim_token, str) or re.fullmatch(
             r"[0-9a-f]{32}", args.claim_token

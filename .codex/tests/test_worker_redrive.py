@@ -554,6 +554,154 @@ class RedriveDeadLetterTests(unittest.TestCase):
         self.assertTrue(unrelated_stayed)
         wake.assert_called_once_with(state, vault_root=vault)
 
+    def test_cli_targeted_redrive_ignores_unreadable_unrelated_legacy_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            vault = root / "vault"
+            vault.mkdir()
+            job_id = "a" * 32
+            unrelated_id = "b" * 32
+            _dead_letter_job(state, job_id, payload={"reason": "target"})
+            unrelated = _legacy_failed_job(state, unrelated_id)
+            real_read_text = Path.read_text
+
+            def read_text(path: Path, *args: object, **kwargs: object) -> str:
+                if path == unrelated:
+                    raise OSError("legacy record temporarily locked")
+                return real_read_text(path, *args, **kwargs)
+
+            argv = [
+                "worker_supervisor.py",
+                "--vault",
+                str(vault),
+                "--state-dir",
+                str(state),
+                "--redrive",
+                job_id,
+            ]
+            with (
+                mock.patch.object(Path, "read_text", autospec=True, side_effect=read_text),
+                mock.patch.object(workers.sys, "argv", argv),
+                mock.patch.object(workers, "ensure_supervisor") as wake,
+            ):
+                result = workers.main()
+
+            pending = state / "worker-jobs" / "pending" / f"job-{job_id}.json"
+            moved = pending.is_file()
+            unrelated_stayed = unrelated.is_file()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(moved)
+        self.assertTrue(unrelated_stayed)
+        wake.assert_called_once_with(state, vault_root=vault)
+
+    def test_cli_redrive_defers_ownerless_launch_without_duplicate_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            vault = root / "vault"
+            vault.mkdir()
+            job_id = "a" * 32
+            _dead_letter_job(state, job_id, payload={"reason": "deferred"})
+            (state / "worker-supervisor.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "launching",
+                        "generation": 1,
+                        "launch_token": "c" * 32,
+                        "owner_pid": 0,
+                        "lease_until": int(workers.time.time()) + workers.LAUNCH_LEASE_SECONDS,
+                        "updated_ts": int(workers.time.time()),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            argv = [
+                "worker_supervisor.py",
+                "--vault",
+                str(vault),
+                "--state-dir",
+                str(state),
+                "--redrive",
+                job_id,
+            ]
+            real_ensure = workers.ensure_supervisor
+            launch = mock.Mock()
+
+            def ensure_without_duplicate(*args: object, **kwargs: object) -> bool:
+                kwargs["launcher"] = launch
+                return real_ensure(*args, **kwargs)
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(workers.sys, "argv", argv),
+                mock.patch.object(
+                    workers,
+                    "ensure_supervisor",
+                    side_effect=ensure_without_duplicate,
+                ) as wake,
+                redirect_stdout(output),
+            ):
+                first_result = workers.main()
+                second_result = workers.main()
+
+            pending = state / "worker-jobs" / "pending" / f"job-{job_id}.json"
+            pending_stayed = pending.is_file()
+
+        self.assertEqual(first_result, 1)
+        self.assertEqual(second_result, 1)
+        self.assertTrue(pending_stayed)
+        self.assertEqual(wake.call_count, 2)
+        launch.assert_not_called()
+        self.assertEqual(output.getvalue().count("redrive beklemede"), 2)
+
+    def test_cli_redrive_accepts_false_wake_when_supervisor_owner_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            vault = root / "vault"
+            vault.mkdir()
+            job_id = "a" * 32
+            _dead_letter_job(state, job_id, payload={"reason": "active-owner"})
+            (state / "worker-supervisor.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "running",
+                        "generation": 1,
+                        "launch_token": "c" * 32,
+                        "owner_pid": 123,
+                        "lease_until": int(workers.time.time()) + workers.SUPERVISOR_LEASE_SECONDS,
+                        "updated_ts": int(workers.time.time()),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            argv = [
+                "worker_supervisor.py",
+                "--vault",
+                str(vault),
+                "--state-dir",
+                str(state),
+                "--redrive",
+                job_id,
+            ]
+            output = io.StringIO()
+            with (
+                mock.patch.object(workers.sys, "argv", argv),
+                mock.patch.object(workers, "ensure_supervisor", return_value=False) as wake,
+                mock.patch.object(workers, "_process_owner_is_active", return_value=True),
+                redirect_stdout(output),
+            ):
+                result = workers.main()
+
+        self.assertEqual(result, 0)
+        wake.assert_called_once_with(state, vault_root=vault)
+        self.assertIn("pending'e döndü", output.getvalue())
+        self.assertNotIn("belirsiz", output.getvalue())
+
     def test_cli_redrive_retry_recognizes_jobs_after_pending(self) -> None:
         for status in ("claimed", "running", "succeeded"):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
