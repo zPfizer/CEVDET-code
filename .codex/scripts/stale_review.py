@@ -18,7 +18,7 @@ import stat
 from typing import Sequence
 
 from file_lock import locked
-from knowledge_schema import DAILY_SOURCE, parse_frontmatter
+from knowledge_schema import DAILY_SOURCE, DATE, parse_frontmatter
 from memory_ledger import (
     MemoryPreferenceError,
     MemoryRead,
@@ -72,8 +72,11 @@ def _note_date(note: NoteIndex) -> datetime.date | None:
     for field in ("updated", "created"):
         value = note.frontmatter.get(field)
         if isinstance(value, str):
+            value = value.strip()
+            if DATE.fullmatch(value) is None:
+                return None
             try:
-                return datetime.date.fromisoformat(value.strip())
+                return datetime.date.fromisoformat(value)
             except ValueError:
                 return None
     return None
@@ -91,11 +94,13 @@ def _source_reasons(
     if isinstance(sources, str):
         source_values: Sequence[object] = (sources,)
     elif isinstance(sources, list):
+        if not sources:
+            return ["kaynak alanı yok ya da bozuk"]
         if len(sources) > MAX_SOURCE_FIELDS:
             return ["kaynak listesi sınırı aşıldı"]
         source_values = sources
     else:
-        return []
+        return ["kaynak alanı yok ya da bozuk"]
     reasons = []
     daily_root = vault / DAILY_ROOT
     try:

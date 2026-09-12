@@ -92,6 +92,45 @@ class StaleReviewTests(unittest.TestCase):
             )
         )
 
+    def test_noncanonical_note_dates_are_reported_as_broken(self) -> None:
+        for value in ("20260911", "2026-W37-5"):
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as temporary:
+                    vault = Path(temporary)
+                    note = _note(
+                        vault,
+                        "bozuk-tarih",
+                        updated="2026-09-11",
+                        sources=[],
+                    )
+                    note.write_text(
+                        note.read_text(encoding="utf-8").replace(
+                            "updated: 2026-09-11", f"updated: {value}"
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    findings = stale_review.review(
+                        vault, days=90, now=datetime.date(2026, 9, 11)
+                    )
+
+                self.assertEqual(findings[0].age_days, -1)
+                self.assertEqual(
+                    findings[0].reasons, ("tarih alanı yok ya da bozuk",)
+                )
+
+    def test_missing_source_field_is_reported_as_unverifiable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _note(vault, "kaynaksiz", updated="2026-09-11", sources=[])
+            findings = stale_review.review(
+                vault, days=90, now=datetime.date(2026, 9, 11)
+            )
+
+        self.assertEqual(
+            findings[0].reasons, ("kaynak alanı yok ya da bozuk",)
+        )
+
     def test_daily_source_drift_before_publish_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
