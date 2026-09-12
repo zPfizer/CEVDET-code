@@ -32,7 +32,7 @@ Doküman veya skill değişikliğinde yalnız ilgili diff'i ve referans yolları
 
 ## Teslim akışı
 
-Branch -> yerel testler -> özel GitHub'a push -> PR -> kullanıcı onayı -> merge sırasını koru. Merge sonrasında yerel Vault'a yalnız onaylanmış runtime kodu aktarılır. Bu checkout'tan canlı hook veya model ingestion kendiliğinden çalıştırılmaz.
+Branch -> yerel testler -> CEVDET-code'a push -> PR -> kullanıcı onayı -> merge sırasını koru. Merge sonrasında yerel Vault'a yalnız onaylanmış runtime kodu aktarılır. Bu checkout'tan canlı hook veya model ingestion kendiliğinden çalıştırılmaz.
 
 ## PR düzeni
 

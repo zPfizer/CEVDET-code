@@ -12,6 +12,7 @@ from _fixtures import CODEX_DIR  # sys.path seam
 
 import hook  # noqa: E402
 import memory_ledger  # noqa: E402
+import state_store  # noqa: E402
 import vault_retrieval  # noqa: E402
 
 
@@ -845,6 +846,23 @@ class SuppressionTests(unittest.TestCase):
 
         self.assertTrue(marked)
         self.assertNotIn(session_id, "\n".join(names))
+
+    def test_session_only_marker_path_matches_canonical_session_scope(self) -> None:
+        # Yayıncılar dışlamayı bu yolu kilitleyerek serileştirir; işaret ile
+        # kilit hedefi ayrışırsa session-only kapısı sessizce kopar.
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            session_id = "raw-private-session"
+
+            marker = memory_ledger.session_only_path(state, session_id)
+            memory_ledger.mark_session_only(state, session_id)
+            created = marker.is_file()
+
+        self.assertTrue(created)
+        self.assertEqual(
+            marker.name,
+            "memory-session-only-" + state_store.session_scope(session_id),
+        )
 
     def test_read_only_marker_is_turn_scoped_and_keeps_raw_session_id_out_of_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
