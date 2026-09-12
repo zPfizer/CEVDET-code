@@ -142,12 +142,26 @@ def worker_counts(
     counts = {stage: 0 for stage in WORKER_STAGES}
     for jobs in jobs_roots:
         for stage in WORKER_STAGES:
-            counts[stage] += len(_json_files(jobs / stage))
+            paths = _json_files(jobs / stage)
+            if stage != "dead-letter":
+                _validate_worker_records(paths)
+            counts[stage] += len(paths)
     if include_dead_letter and jobs_roots:
         counts["dead-letter"] = _dead_letter_summary(
             state_dir, jobs=jobs_roots
         )[0]
     return counts
+
+
+def _validate_worker_records(paths: Sequence[Path]) -> None:
+    from worker_supervisor import _validate_job
+
+    for path in paths:
+        record = _bounded_json(path)
+        try:
+            _validate_job(path, record)
+        except (TypeError, ValueError):
+            raise OSError("worker-record-invalid") from None
 
 
 def _worker_jobs_root(state_dir: Path) -> Path | None:
@@ -262,6 +276,15 @@ def dead_letter_rows(state_dir: Path) -> list[dict[str, Any]]:
     return _dead_letter_summary(state_dir)[1]
 
 
+def orphan_hook_input_count(state_dir: Path) -> int:
+    from worker_supervisor import count_orphan_hook_inputs
+
+    try:
+        return count_orphan_hook_inputs(state_dir)
+    except (OSError, RuntimeError, TypeError, ValueError, UnicodeError) as exc:
+        raise OSError("worker-hook-input-unreadable") from exc
+
+
 def worker_fences(state_dir: Path) -> tuple[str, ...]:
     from worker_supervisor import has_unverified_process_tree
 
@@ -368,6 +391,9 @@ def flush_state_count(state_dir: Path) -> int:
         1
         for path in _json_files(state_dir, error_prefix="state")
         if path.name.startswith("flush-")
+        and not path.name.startswith(
+            ("flush-coverage-", "flush-batch-", "flush-index-")
+        )
     )
 
 
@@ -448,6 +474,7 @@ def render(
     last_run, last_status = compile_summary(state_dir)
     dead_count, dead_rows = _dead_letter_summary(state_dir)
     counts["dead-letter"] = dead_count
+    orphan_hook_inputs = orphan_hook_input_count(state_dir)
     fences = worker_fences(state_dir)
 
     lines = [
@@ -489,6 +516,11 @@ def render(
             + ", ".join(fences)
             + "."
         )
+    elif orphan_hook_inputs:
+        lines.append(
+            "Worker kurtarma bekliyor — "
+            f"{orphan_hook_inputs} hook girdisi kuyruğa alınmayı bekliyor."
+        )
     else:
         lines.append("Boş — takılı iş yok.")
     lines += [
@@ -498,6 +530,7 @@ def render(
         f"- Aktif read-only işareti: {markers['read_only']}",
         f"- Aktif session-only işareti: {markers['session_only']}",
         f"- Flush durum dosyası: {flush_state_count(state_dir)}",
+        f"- Kurtarılmayı bekleyen hook girdisi: {orphan_hook_inputs}",
         f"- Derleyici son çalışma: {last_run} (durum: {last_status})",
         f"- Sağlık kaydı (health.json): {health_summary(state_dir)}",
         f"- Worker temizleme fence'i: {', '.join(fences) if fences else 'yok'}",

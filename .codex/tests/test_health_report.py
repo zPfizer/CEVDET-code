@@ -47,14 +47,24 @@ def _dead_letter_record(
     return record
 
 
+def _pending_record(job_id: str) -> dict[str, object]:
+    record = _dead_letter_record(job_id, finished_ts=1)
+    record["status"] = "pending"
+    record.pop("terminal_reason")
+    record.pop("retryable")
+    record.pop("lease_until")
+    return record
+
+
 class HealthReportTests(unittest.TestCase):
     def test_report_reflects_queue_markers_and_dead_letter(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
             state = _seed_state(vault)
             for index in range(2):
-                (state / "worker-jobs" / "pending" / f"job-{index}.json").write_text(
-                    json.dumps({"job_id": f"{index}" * 32}), encoding="utf-8"
+                job_id = f"{index}" * 32
+                (state / "worker-jobs" / "pending" / f"job-{job_id}.json").write_text(
+                    json.dumps(_pending_record(job_id)), encoding="utf-8"
                 )
             job_id = "abcdef0123456789abcdef0123456789"
             (state / "worker-jobs" / "dead-letter" / f"job-{job_id}.json").write_text(
@@ -229,7 +239,10 @@ class HealthReportTests(unittest.TestCase):
             state = _seed_state(vault)
             pending = state / "maintenance" / "worker-jobs" / "pending"
             pending.mkdir(parents=True)
-            (pending / "job-maintenance.json").write_text("{}", encoding="utf-8")
+            job_id = "a" * 32
+            (pending / f"job-{job_id}.json").write_text(
+                json.dumps(_pending_record(job_id)), encoding="utf-8"
+            )
             fence = state / "maintenance" / "worker-tree-cleanup-unverified.json"
             fence.parent.mkdir(parents=True, exist_ok=True)
             fence.write_text("{}", encoding="utf-8")
@@ -242,6 +255,57 @@ class HealthReportTests(unittest.TestCase):
         self.assertIn("Worker temizleme fence'i etkin", text)
         self.assertIn("maintenance", text)
         self.assertNotIn("Boş — takılı iş yok.", text)
+
+    def test_invalid_queue_record_aborts_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            job_id = "b" * 32
+            (state / "worker-jobs" / "succeeded" / f"job-{job_id}.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            target = vault / "report.md"
+
+            with self.assertRaisesRegex(OSError, "worker-record-invalid"):
+                health_report.write_report(vault, target)
+            self.assertFalse(target.exists())
+
+    def test_orphan_hook_input_prevents_clean_queue_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            (state / "hookin-orphan.json").write_text(
+                json.dumps(
+                    {
+                        "delivery_schema_version": 1,
+                        "session_id": "orphan",
+                        "transcript_path": str(state / "source.jsonl"),
+                        "reason": "turnend",
+                        "event_iso": "2026-09-09T12:00:00+03:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            text = health_report.render(
+                vault, now=datetime.datetime(2026, 9, 11)
+            )
+
+        self.assertIn("Kurtarılmayı bekleyen hook girdisi: 1", text)
+        self.assertIn("Worker kurtarma bekliyor", text)
+        self.assertNotIn("Boş — takılı iş yok.", text)
+
+    def test_flush_support_artifacts_are_not_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            for prefix in ("flush-coverage-", "flush-batch-", "flush-index-"):
+                (state / f"{prefix}{'c' * 64}.json").write_text(
+                    "{}", encoding="utf-8"
+                )
+            (state / "flush-session.json").write_text("{}", encoding="utf-8")
+
+            self.assertEqual(health_report.flush_state_count(state), 1)
 
     def test_invalid_health_component_is_reported_as_unreadable(self) -> None:
         cases = (
