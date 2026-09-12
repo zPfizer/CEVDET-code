@@ -66,6 +66,7 @@
 !/.codex/scripts/stale_review.py
 !/.codex/scripts/quote_grammar.py
 !/.codex/scripts/state_store.py
+!/.codex/scripts/summary_contract.py
 !/.codex/scripts/tag_taxonomy.py
 !/.codex/scripts/transcript_index.py
 !/.codex/scripts/user_evidence.py
