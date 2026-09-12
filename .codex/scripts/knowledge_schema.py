@@ -72,8 +72,19 @@ DERIVED_RULES = (
         "kaynağı sources ve Kaynaklar bölümüne ekle."
     ),
     (
-        "Çelişkide eski kaydı koru ve `gecmis` yap; daha yeni `gecerli` kaydı ayrıca "
-        "ekle. Önceden kaynaklanmış bir kaydı silme."
+        "Çelişkiyi kaynağın türüne göre ayır. Önceki kullanıcı kararını yalnız "
+        "günlükte doğrulanmış `user-evidence` kaydı ve `#user-ID` bağlantısı yeni "
+        "kullanıcı değişikliğini açıkça destekliyorsa eski kaydı koru ve `gecmis` "
+        "yap; tarih ve kaynağı koruyarak yeni kullanıcı kaydını `gecerli` olarak "
+        "ekle. Yeni doğrulanmış bir olgu önceki doğrulanmış olguyla çelişiyorsa "
+        "önceki kaydı tarih ve kaynağıyla koru ve `gecmis`, yeni olguyu `gecerli` "
+        "olarak ekle. Farklı dış kaynakların görüş ayrılığını kullanıcının açık karar "
+        "değişikliğinden ayır; mevcut kullanıcı kararını otomatik olarak `gecmis` "
+        "yapma; kaynak sahipleri ve koşullarıyla "
+        "ortak sonucu, ayrışan iddiayı ve karar açısından eksik bilgiyi ayrı tut. "
+        "Dış görüş kullanıcının kararını tek başına geçersiz kılmaz. Kaynakta olmayan "
+        "açıklamayı `cevo-cikarimi` ve belirsiz olarak ayır; önceden kaynaklanmış bir "
+        "kaydı silme. Gerekçe, alternatif, koşul ve taahhüt ayrımını koru."
     ),
     (
         "sources değerlerini tekrarsız ve sıralı tut; her kayıt kendi kaynağına, "

@@ -386,8 +386,36 @@ Bağ.
         self.assertIn("`belirsiz`", prompt)
         self.assertIn("[[daily/2026-09-04|Kaynak]]", prompt)
         self.assertIn("eski kaydı koru", prompt)
+        self.assertIn(
+            "Önceki kullanıcı kararını yalnız günlükte doğrulanmış `user-evidence` kaydı",
+            prompt,
+        )
+        self.assertIn("`#user-ID` bağlantısı", prompt)
+        self.assertIn("mevcut kullanıcı kararını otomatik olarak `gecmis` yapma", prompt)
+        self.assertIn(
+            "Yeni doğrulanmış bir olgu önceki doğrulanmış olguyla çelişiyorsa",
+            prompt,
+        )
+        self.assertIn("yeni olguyu `gecerli` olarak ekle", prompt)
+        self.assertIn("tek otorite olarak uygula", prompt)
+        self.assertNotIn("user-source", prompt)
+        self.assertNotIn(
+            "Yeni bilgi mevcut bir kayıtla çelişiyorsa eski kaydı koru ve `gecmis` yap;",
+            prompt,
+        )
         self.assertIn("knowledge/concepts/*.md", prompt)
         self.assertNotIn("knowledge/concepts/**/*.md", prompt)
+        normalized_prompt = prompt.casefold()
+        for phrase in (
+            "görüş ayrılığını kullanıcının açık karar değişikliğinden ayır",
+            "dış görüş kullanıcının kararını tek başına geçersiz kılmaz",
+            "ortak sonucu",
+            "ayrışan iddiayı",
+            "karar açısından eksik bilgiyi",
+            "gerekçe, alternatif, koşul ve taahhüt ayrımını",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase.casefold(), normalized_prompt)
         repair_prompt = memory_compile.build_schema_repair_prompt(
             "knowledge-schema:knowledge/concepts/ornek.md:derived-schema"
         )
