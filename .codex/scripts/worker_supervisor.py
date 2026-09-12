@@ -16,7 +16,7 @@ from typing import Any, Callable
 import uuid
 
 import process_control
-from file_lock import LockUnavailable, locked
+from file_lock import LockUnavailable, locked, timeout_for_deadline
 from process_control import (
     ProcessTreeCleanupError,
     ProcessTreeTimeout,
@@ -250,7 +250,7 @@ def enqueue_flush(
     for field in FLUSH_CONTINUATION_FIELDS:
         if field in payload:
             transport[field] = payload[field]
-    atomic_write_json(hook_input, transport)
+    atomic_write_json(hook_input, transport, deadline=deadline)
     job_payload = {
         "hook_input": str(hook_input),
         "reason": reason,
@@ -273,22 +273,39 @@ class _UnrecoverableWorkerInput(RuntimeError):
 def enqueue_maintenance(
     state_dir: Path, *, vault_root: Path, start_supervisor: bool = True,
     launcher: Callable[..., Any] = subprocess.Popen,
+    deadline: float | None = None,
 ) -> Path:
     """A separate lane keeps slow compilation from delaying conversation saves."""
     lane = state_dir / "maintenance"
-    with locked(lane / "maintenance-admission"):
-        pending = None
-        with locked(lane / "worker-queue"):
-            for candidate in (_job_root(lane) / "pending").glob("*.json"):
-                job = _load_job_quarantined(lane, candidate)
-                if job is not None and job['kind'] == 'maintenance':
-                    pending = candidate
-                    break
-        if pending is None:
-            pending = enqueue_job(lane, "maintenance", {}, start_supervisor=False)
-    if start_supervisor:
-        ensure_supervisor(lane, vault_root=vault_root, launcher=launcher)
-    return pending
+    try:
+        with locked(lane / "maintenance-admission", timeout=_lock_timeout(deadline)):
+            pending = None
+            with locked(lane / "worker-queue", timeout=_lock_timeout(deadline)):
+                for candidate in (_job_root(lane) / "pending").glob("*.json"):
+                    job = _load_job_quarantined(lane, candidate, deadline=deadline)
+                    if job is not None and job['kind'] == 'maintenance':
+                        pending = candidate
+                        break
+            if pending is None:
+                pending = enqueue_job(
+                    lane,
+                    "maintenance",
+                    {},
+                    start_supervisor=False,
+                    deadline=deadline,
+                )
+        if start_supervisor:
+            ensure_supervisor(
+                lane,
+                vault_root=vault_root,
+                launcher=launcher,
+                deadline=deadline,
+            )
+        return pending
+    except LockUnavailable as exc:
+        if deadline is None:
+            raise
+        raise WorkerDeliveryTimeout("worker-maintenance-deadline") from exc
 
 
 def _job_timeout(kind: str) -> int:
@@ -362,12 +379,16 @@ def _hook_input_references(payload: object) -> set[Path] | None:
 def _find_hook_input_job_locked(
     state_dir: Path,
     payload: object,
+    *,
+    deadline: float | None = None,
 ) -> tuple[Path, str] | None:
     target = _hook_input_reference(payload)
     if target is None:
         return None
     for state in JOB_STATES:
+        _check_deadline(deadline)
         for path in (_job_root(state_dir) / state).glob("*.json"):
+            _check_deadline(deadline)
             if state == "quarantined":
                 try:
                     tombstone = _load_job(path)
@@ -419,11 +440,14 @@ def _referenced_hook_inputs_locked(
     state_dir: Path,
     *,
     excluded_paths: set[Path] | None = None,
+    deadline: float | None = None,
 ) -> set[Path] | None:
     references: set[Path] = set()
     excluded = excluded_paths or set()
     for state in ("pending", "claimed", "running", "dead-letter"):
+        _check_deadline(deadline)
         for job_path in (_job_root(state_dir) / state).glob("*.json"):
+            _check_deadline(deadline)
             if job_path.resolve(strict=False) in excluded:
                 continue
             try:
@@ -435,6 +459,7 @@ def _referenced_hook_inputs_locked(
                 return None
             references.update(job_references)
     for tombstone in (_job_root(state_dir) / "quarantined").glob("*.json"):
+        _check_deadline(deadline)
         if tombstone.resolve(strict=False) in excluded:
             continue
         try:
@@ -451,9 +476,14 @@ def _referenced_hook_inputs_locked(
     return references
 
 
-def _succeeded_hook_inputs_locked(state_dir: Path) -> set[Path] | None:
+def _succeeded_hook_inputs_locked(
+    state_dir: Path,
+    *,
+    deadline: float | None = None,
+) -> set[Path] | None:
     references: set[Path] = set()
     for job_path in (_job_root(state_dir) / "succeeded").glob("*.json"):
+        _check_deadline(deadline)
         try:
             payload = _load_job(job_path).get("payload", {})
         except ValueError:
@@ -591,7 +621,13 @@ def _load_job(path: Path) -> dict[str, Any]:
     return _validate_job(path, value)
 
 
-def _quarantine_job(state_dir: Path, path: Path, reason_code: str) -> None:
+def _quarantine_job(
+    state_dir: Path,
+    path: Path,
+    reason_code: str,
+    *,
+    deadline: float | None = None,
+) -> None:
     try:
         payload = path.read_bytes()
         job_id = _job_id_from_path(path) or hashlib.sha256(
@@ -601,7 +637,7 @@ def _quarantine_job(state_dir: Path, path: Path, reason_code: str) -> None:
         tombstone = quarantine / f"job-{job_id}.json"
         payload_path = tombstone.with_suffix(".payload")
         payload_sha256 = hashlib.sha256(payload).hexdigest()
-        atomic_write_bytes(payload_path, payload)
+        atomic_write_bytes(payload_path, payload, deadline=deadline)
         atomic_write_json(
             tombstone,
             {
@@ -615,13 +651,19 @@ def _quarantine_job(state_dir: Path, path: Path, reason_code: str) -> None:
                 "quarantined_ts": int(time.time()),
             },
             sort_keys=True,
+            deadline=deadline,
         )
         path.unlink()
     except OSError as exc:
         raise ValueError("worker-quarantine-failed") from exc
 
 
-def _load_job_quarantined(state_dir: Path, path: Path) -> dict[str, Any] | None:
+def _load_job_quarantined(
+    state_dir: Path,
+    path: Path,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any] | None:
     try:
         return _load_job(path)
     except ValueError as exc:
@@ -630,7 +672,7 @@ def _load_job_quarantined(state_dir: Path, path: Path) -> dict[str, Any] | None:
             if str(exc) == "worker-job-json-invalid"
             else "worker-job-schema-invalid"
         )
-        _quarantine_job(state_dir, path, reason)
+        _quarantine_job(state_dir, path, reason, deadline=deadline)
         return None
 
 
@@ -727,6 +769,7 @@ def _coalesce_pending_flush_locked(
     payload: dict[str, Any],
     *,
     now: float,
+    deadline: float | None = None,
 ) -> Path | None:
     incoming = {"payload": payload}
     scope = _flush_scope(incoming)
@@ -734,7 +777,8 @@ def _coalesce_pending_flush_locked(
         return None
     matches: list[tuple[Path, dict[str, Any]]] = []
     for path in (_job_root(state_dir) / "pending").glob("*.json"):
-        job = _load_job_quarantined(state_dir, path)
+        _check_deadline(deadline)
+        job = _load_job_quarantined(state_dir, path, deadline=deadline)
         if job is None or job.get("kind") != "flush":
             continue
         if _flush_scope(job) == scope:
@@ -770,7 +814,7 @@ def _coalesce_pending_flush_locked(
         retained["payload"].pop("superseded_hook_inputs", None)
     retained["generation"] = int(retained.get("generation", 0)) + 1
     retained["coalesced_ts"] = int(now)
-    atomic_write_json(retained_path, retained)
+    atomic_write_json(retained_path, retained, deadline=deadline)
     excluded_paths = {retained_path.resolve(strict=False)}
     for duplicate_path, _job in matches[1:]:
         try:
@@ -781,6 +825,7 @@ def _coalesce_pending_flush_locked(
     references = _referenced_hook_inputs_locked(
         state_dir,
         excluded_paths=excluded_paths,
+        deadline=deadline,
     )
     if references is not None:
         external_references = references
@@ -808,19 +853,27 @@ def _coalesce_pending_flush_locked(
             merged_payload.pop("superseded_hook_inputs", None)
         if merged_payload != retained.get("payload", {}):
             retained["payload"] = merged_payload
-            atomic_write_json(retained_path, retained)
+            atomic_write_json(retained_path, retained, deadline=deadline)
     return retained_path
 
 
-def _unresolved_job_count_locked(state_dir: Path) -> int:
+def _unresolved_job_count_locked(
+    state_dir: Path,
+    *,
+    deadline: float | None = None,
+) -> int:
     count = 0
     for state in ("pending", "claimed", "running", "dead-letter"):
+        _check_deadline(deadline)
         for path in (_job_root(state_dir) / state).glob("*.json"):
-            if _load_job_quarantined(state_dir, path) is not None:
+            _check_deadline(deadline)
+            if _load_job_quarantined(state_dir, path, deadline=deadline) is not None:
                 count += 1
     # A quarantine tombstone is unresolved work even when its original schema
     # is no longer readable, so it remains part of admission accounting.
-    count += sum(1 for _path in (_job_root(state_dir) / "quarantined").glob("*.json"))
+    for _path in (_job_root(state_dir) / "quarantined").glob("*.json"):
+        _check_deadline(deadline)
+        count += 1
     return count
 
 
@@ -832,14 +885,32 @@ class WorkerDeliveryTimeout(RuntimeError):
     """The hook deadline expired before queue or supervisor admission."""
 
 
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise WorkerDeliveryTimeout("worker-queue-deadline")
+
+
+def _sha256_file_with_deadline(
+    path: Path,
+    *,
+    deadline: float | None = None,
+) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            _check_deadline(deadline)
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                return digest.hexdigest()
+            digest.update(chunk)
+
+
 class WorkerDeliveryTerminal(RuntimeError):
     """A transport already has a terminal queue record and cannot be replayed."""
 
 
 def _lock_timeout(deadline: float | None) -> float | None:
-    if deadline is None:
-        return None
-    return max(0.0, deadline - time.monotonic())
+    return timeout_for_deadline(deadline)
 
 
 def _enqueue_job_locked(
@@ -848,9 +919,14 @@ def _enqueue_job_locked(
     payload: dict[str, Any],
     *,
     observed_now: float,
+    deadline: float | None = None,
 ) -> Path:
     if kind == "flush":
-        existing = _find_hook_input_job_locked(state_dir, payload)
+        existing = _find_hook_input_job_locked(
+            state_dir,
+            payload,
+            deadline=deadline,
+        )
         if existing is not None:
             existing_path, existing_state = existing
             if existing_state in {"dead-letter", "quarantined", "invalid"}:
@@ -868,13 +944,14 @@ def _enqueue_job_locked(
             state_dir,
             payload,
             now=observed_now,
+            deadline=deadline,
         )
         if kind == "flush"
         else None
     )
     if path is not None:
         return path
-    if _unresolved_job_count_locked(state_dir) >= MAX_UNRESOLVED_JOBS:
+    if _unresolved_job_count_locked(state_dir, deadline=deadline) >= MAX_UNRESOLVED_JOBS:
         raise WorkerQueueBackpressure("worker-queue-backpressure")
     sequence_path = state_dir / "worker-sequence.json"
     try:
@@ -897,6 +974,7 @@ def _enqueue_job_locked(
             "schema_version": JOB_SCHEMA_VERSION,
             "enqueue_sequence": enqueue_sequence,
         },
+        deadline=deadline,
     )
     job_id = uuid.uuid4().hex
     job = {
@@ -911,7 +989,7 @@ def _enqueue_job_locked(
         "payload": payload,
     }
     path = _job_root(state_dir) / "pending" / f"job-{job_id}.json"
-    atomic_write_json(path, job)
+    atomic_write_json(path, job, deadline=deadline)
     return path
 
 
@@ -1000,9 +1078,11 @@ def _recover_orphan_hook_inputs_locked(
 
 def _orphan_reference_sets_locked(
     state_dir: Path,
+    *,
+    deadline: float | None = None,
 ) -> tuple[set[Path], set[Path]] | None:
-    references = _referenced_hook_inputs_locked(state_dir)
-    completed = _succeeded_hook_inputs_locked(state_dir)
+    references = _referenced_hook_inputs_locked(state_dir, deadline=deadline)
+    completed = _succeeded_hook_inputs_locked(state_dir, deadline=deadline)
     if references is None or completed is None:
         return None
     return references, completed
@@ -1038,14 +1118,19 @@ def recover_orphan_hook_inputs(
         return _recover_orphan_hook_inputs_locked(state_dir, now=observed_now)
 
 
-def count_orphan_hook_inputs(state_dir: Path) -> int:
+def count_orphan_hook_inputs(
+    state_dir: Path,
+    *,
+    deadline: float | None = None,
+) -> int:
     """Read-only wake-up hint for SessionStart; races are resolved by recovery."""
-    reference_sets = _orphan_reference_sets_locked(state_dir)
+    reference_sets = _orphan_reference_sets_locked(state_dir, deadline=deadline)
     if reference_sets is None:
         return 0
     references, completed = reference_sets
     count = 0
     for candidate in state_dir.glob("hookin-*.json"):
+        _check_deadline(deadline)
         payload = _hook_input_delivery_payload(state_dir, candidate)
         if payload is None:
             continue
@@ -1053,7 +1138,11 @@ def count_orphan_hook_inputs(state_dir: Path) -> int:
         if (
             reference not in references
             and reference not in completed
-            and _find_hook_input_job_locked(state_dir, payload) is None
+            and _find_hook_input_job_locked(
+                state_dir,
+                payload,
+                deadline=deadline,
+            ) is None
         ):
             count += 1
     return count
@@ -1338,7 +1427,13 @@ def migrate_legacy_failed_jobs(
     return migrated
 
 
-def _has_verified_successor(root: Path, job: dict[str, Any]) -> bool:
+def _has_verified_successor(
+    root: Path,
+    job: dict[str, Any],
+    *,
+    deadline: float | None = None,
+) -> bool:
+    _check_deadline(deadline)
     if (
         job.get("terminal_reason") != "recovered-by-successor"
         or job.get("retryable") is not False
@@ -1558,22 +1653,49 @@ def _redrive_state(state_dir: Path, job_id: str) -> str | None:
     return None
 
 
-def inspect_worker_queue(state_dir: Path) -> dict[str, Any]:
+def inspect_worker_queue(
+    state_dir: Path,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    try:
+        with locked(state_dir / "worker-queue", timeout=_lock_timeout(deadline)):
+            return _inspect_worker_queue_locked(state_dir, deadline=deadline)
+    except LockUnavailable as exc:
+        if deadline is None:
+            raise
+        raise WorkerDeliveryTimeout("worker-queue-deadline") from exc
+
+
+def _inspect_worker_queue_locked(
+    state_dir: Path,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    _check_deadline(deadline)
     root = _job_root(state_dir)
     counts = {state: 0 for state in JOB_STATES}
     invalid = 0
     generation = 0
     terminal = {"recovered": 0, "unresolved": 0}
-    orphan_hook_inputs = count_orphan_hook_inputs(state_dir)
+    orphan_hook_inputs = count_orphan_hook_inputs(
+        state_dir,
+        deadline=deadline,
+    )
     for state in JOB_STATES:
-        for path in sorted((root / state).glob("*.json")):
+        _check_deadline(deadline)
+        for path in (root / state).glob("*.json"):
+            _check_deadline(deadline)
             try:
                 job = _load_job(path)
                 if state == "quarantined":
                     payload_path = path.with_name(str(job.get("payload_file", "")))
                     if (
                         not payload_path.is_file()
-                        or hashlib.sha256(payload_path.read_bytes()).hexdigest()
+                        or _sha256_file_with_deadline(
+                            payload_path,
+                            deadline=deadline,
+                        )
                         != job["payload_sha256"]
                     ):
                         raise ValueError("worker-quarantine-payload-invalid")
@@ -1589,8 +1711,13 @@ def inspect_worker_queue(state_dir: Path) -> dict[str, Any]:
             if state == "quarantined":
                 terminal["unresolved"] += 1
             elif state == "dead-letter":
-                outcome = "recovered" if _has_verified_successor(root, job) else "unresolved"
+                outcome = (
+                    "recovered"
+                    if _has_verified_successor(root, job, deadline=deadline)
+                    else "unresolved"
+                )
                 terminal[outcome] += 1
+    _check_deadline(deadline)
     cleanup_unverified = has_unverified_process_tree(state_dir)
     status = (
         "error"
@@ -1659,6 +1786,7 @@ def enqueue_job(
                 kind,
                 payload,
                 observed_now=observed_now,
+                deadline=deadline,
             )
     except LockUnavailable as exc:
         if deadline is None:
@@ -1692,41 +1820,47 @@ def ensure_supervisor(
     state_dir.mkdir(parents=True, exist_ok=True)
     admission_lock = state_dir / "worker-admission"
     token = ""
-    with locked(admission_lock, timeout=_lock_timeout(deadline)):
-        if has_unverified_process_tree(state_dir):
-            raise ValueError('worker-tree-cleanup-unverified')
-        receipt_path = _supervisor_receipt_path(state_dir)
-        try:
-            current = json.loads(receipt_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            current = {}
-        if isinstance(current, dict):
-            lease_until = current.get("lease_until", 0)
-            if ((current.get("status") == "launching"
-                 and isinstance(lease_until, (int, float)) and lease_until > observed_now)
-                    or (current.get("status") == "running"
-                        and _process_owner_is_active(current))):
-                return False
-        previous_generation = (
-            current.get("generation", 0) if isinstance(current, dict) else 0
-        )
-        token = uuid.uuid4().hex
-        atomic_write_json(
-            receipt_path,
-            {
-                "schema_version": SUPERVISOR_SCHEMA_VERSION,
-                "status": "launching",
-                "generation": (
-                    previous_generation + 1
-                    if isinstance(previous_generation, int)
-                    else 1
-                ),
-                "launch_token": token,
-                "owner_pid": 0,
-                "lease_until": observed_now + LAUNCH_LEASE_SECONDS,
-                "updated_ts": int(observed_now),
-            },
-        )
+    try:
+        with locked(admission_lock, timeout=_lock_timeout(deadline)):
+            if has_unverified_process_tree(state_dir):
+                raise ValueError('worker-tree-cleanup-unverified')
+            receipt_path = _supervisor_receipt_path(state_dir)
+            try:
+                current = json.loads(receipt_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                current = {}
+            if isinstance(current, dict):
+                lease_until = current.get("lease_until", 0)
+                if ((current.get("status") == "launching"
+                     and isinstance(lease_until, (int, float)) and lease_until > observed_now)
+                        or (current.get("status") == "running"
+                            and _process_owner_is_active(current))):
+                    return False
+            previous_generation = (
+                current.get("generation", 0) if isinstance(current, dict) else 0
+            )
+            token = uuid.uuid4().hex
+            atomic_write_json(
+                receipt_path,
+                {
+                    "schema_version": SUPERVISOR_SCHEMA_VERSION,
+                    "status": "launching",
+                    "generation": (
+                        previous_generation + 1
+                        if isinstance(previous_generation, int)
+                        else 1
+                    ),
+                    "launch_token": token,
+                    "owner_pid": 0,
+                    "lease_until": observed_now + LAUNCH_LEASE_SECONDS,
+                    "updated_ts": int(observed_now),
+                },
+                deadline=deadline,
+            )
+    except LockUnavailable as exc:
+        if deadline is None:
+            raise
+        raise WorkerDeliveryTimeout("worker-admission-deadline") from exc
     command = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -1760,7 +1894,11 @@ def ensure_supervisor(
                         "updated_ts": int(observed_now),
                     }
                 )
-                atomic_write_json(_supervisor_receipt_path(state_dir), current)
+                atomic_write_json(
+                    _supervisor_receipt_path(state_dir),
+                    current,
+                    deadline=deadline,
+                )
         raise
     return True
 

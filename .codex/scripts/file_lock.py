@@ -21,6 +21,20 @@ class LockUnavailable(RuntimeError):
     pass
 
 
+def timeout_for_deadline(
+    deadline: float | None,
+    *,
+    cap: float | None = None,
+) -> float | None:
+    """Return the remaining lock timeout, optionally bounded by ``cap``."""
+    if deadline is None:
+        return cap
+    remaining = max(0.0, deadline - time.monotonic())
+    if cap is not None:
+        remaining = min(remaining, max(0.0, cap))
+    return remaining
+
+
 @contextmanager
 def locked(path: Path, *, timeout: float | None = None) -> Iterator[IO[str]]:
     """Blok boyunca `path`in `.lock` sidecar'ı üzerinde dışlayıcı kilit tutar.
