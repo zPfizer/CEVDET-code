@@ -1,0 +1,11 @@
+# Satır kapsamı Windows/Python 3.14 üzerinde ölçülür; canlı App kabulü değildir.
+# CLI giriş satırları, POSIX dalları ve önceki doğrulamaların ulaşılmaz kıldığı
+# savunma dalları dışlanır. Her pragma kaynakta gerekçelendirilir; dosya sistemi
+# yarışları veya bağlantılarla ulaşılabilen güvenlik kontrolleri dışlanmaz.
+[run]
+source = .codex/scripts, .codex/hooks
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:

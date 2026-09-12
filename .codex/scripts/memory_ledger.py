@@ -8,11 +8,12 @@ import io
 import json
 from pathlib import Path, PurePosixPath
 import re
+import time
 import tokenize
 from typing import Callable, Iterator, Sequence
 import unicodedata
 
-from file_lock import locked
+from file_lock import locked, timeout_for_deadline
 from compile_state import PolicyError, PublicationSnapshot, require_publication_snapshot
 from state_store import atomic_write_text
 from profile_guard import PROFILE_RELATIVE, check_profile
@@ -464,7 +465,9 @@ def _mask_bounded_memory_controls(folded: str) -> str:
     for token_match in _MEMORY_TARGET_TOKEN.finditer(folded):
         target = token_match.group()
         final_component = re.split(r"[\\/]", target)[-1]
-        if ":" in target and _EXPLICIT_WRITE_PATH_PREFIX.match(target) is None:
+        # Bileşen karakter kümesi ':' içermez; ':' yalnız sürücü önekiyle
+        # eşleşebilir ve o önek yol-öneki desenine daima uyar.
+        if ":" in target and _EXPLICIT_WRITE_PATH_PREFIX.match(target) is None:  # pragma: no cover
             continue
         filename = _NAMED_FILENAME.fullmatch(final_component)
         if filename is None:
@@ -705,7 +708,9 @@ def _balanced_value_end(text: str, start: int) -> int | None:
         stack: list[str] = []
         try:
             for token in tokenize.generate_tokens(io.StringIO(fragment).readline):
-                if token.type == tokenize.ERRORTOKEN and token.string in {'"', "'", '\\'}:
+                # Py3.12+ tokenize bu girdilerde TokenError yükseltir; ERRORTOKEN
+                # dalı eski sürüm uyumluluğu için durur.
+                if token.type == tokenize.ERRORTOKEN and token.string in {'"', "'", '\\'}:  # pragma: no cover
                     break
                 if token.type != tokenize.OP:
                     continue
@@ -959,10 +964,10 @@ def _json_string_regions(
                 break
             try:
                 value, end = decoder.raw_decode(text, opening)
-            except (ValueError, RecursionError):
+            except (ValueError, RecursionError):  # pragma: no cover — bölge tam decode ile doğrulandı; iç dize decode edilememezlik savunması
                 cursor = opening + 1
                 continue
-            if end > region_end:
+            if end > region_end:  # pragma: no cover — dize, doğrulanmış bölgenin dışına taşamaz
                 break
             tail = end
             while tail < region_end and text[tail].isspace():
@@ -977,7 +982,7 @@ def _json_string_regions(
                     value_start += 1
                 try:
                     _, value_end = decoder.raw_decode(text, value_start)
-                except (ValueError, RecursionError):
+                except (ValueError, RecursionError):  # pragma: no cover — bölge decode garantisi: değer decode hatası savunma hattı
                     cursor = tail + 1
                     continue
             yield opening, end, is_value, value, value_start, value_end
@@ -1039,7 +1044,7 @@ def _redact_decoded_json(text: str) -> tuple[str, tuple[str, ...]]:
             ):
                 try:
                     decoded_value, decoded_end = json.JSONDecoder().raw_decode(text, value_start)
-                except (ValueError, RecursionError):
+                except (ValueError, RecursionError):  # pragma: no cover — bölge decode garantisi: authorization değeri çözülemezlik savunması
                     continue
                 if decoded_end == value_end and isinstance(decoded_value, str):
                     parts = decoded_value.split(None, 1)
@@ -1050,7 +1055,7 @@ def _redact_decoded_json(text: str) -> tuple[str, tuple[str, ...]]:
             continue
         try:
             nested, nested_redactions = sanitize_text(decoded, max_chars=None)
-        except RecursionError:
+        except RecursionError:  # pragma: no cover — iç sanitize RecursionError yerine MPE üretir; savunma hattı
             raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
         except MemoryPreferenceError:
             replacements.append((start, end, json.dumps("<REDACTED>")))
@@ -1068,7 +1073,7 @@ def _redact_decoded_json(text: str) -> tuple[str, tuple[str, ...]]:
     pieces: list[str] = []
     cursor = 0
     for start, end, replacement in sorted(replacements):
-        if start < cursor:
+        if start < cursor:  # pragma: no cover — aynı seviyedeki dize bölgeleri kesişemez; savunma hattı
             continue
         pieces.extend((text[cursor:start], replacement))
         cursor = end
@@ -1326,10 +1331,18 @@ def session_only_path(state_dir: Path, session_id: str) -> Path:
     return state_dir / f"memory-session-only-{_sha256_text(session_id)}"
 
 
-def mark_session_only(state_dir: Path, session_id: str) -> None:
+def mark_session_only(
+    state_dir: Path,
+    session_id: str,
+    *,
+    timeout: float | None = None,
+    deadline: float | None = None,
+) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     path = session_only_path(state_dir, session_id)
-    with locked(path):
+    with locked(path, timeout=timeout_for_deadline(deadline, cap=timeout)):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("memory-session-only-deadline")
         path.touch(exist_ok=True)
 
 
@@ -1341,7 +1354,12 @@ def _read_only_path(state_dir: Path, session_id: str) -> Path:
     return state_dir / f"memory-read-only-{_sha256_text(session_id)}"
 
 
-def mark_read_only_turn(state_dir: Path, session_id: str) -> None:
+def mark_read_only_turn(
+    state_dir: Path,
+    session_id: str,
+    *,
+    timeout: float | None = None,
+) -> None:
     """Salt okunur görev: bu turda otomatik kayıt, profil onarımı ve bakım yapılmaz.
 
     Oturum kapsamlıdır; sonraki kullanıcı mesajı veya tur sonu işareti kaldırmaz.
@@ -1350,7 +1368,7 @@ def mark_read_only_turn(state_dir: Path, session_id: str) -> None:
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     path = _read_only_path(state_dir, session_id)
-    with locked(path):
+    with locked(path, timeout=timeout):
         path.touch(exist_ok=True)
 
 
@@ -1360,6 +1378,21 @@ def is_read_only_turn(state_dir: Path, session_id: str) -> bool:
 
 class MemoryReadOnlyError(ValueError):
     pass
+
+
+@contextmanager
+def memory_scope_guard(
+    state_dir: Path,
+    session_id: str | None,
+    *,
+    timeout: float | None = None,
+) -> Iterator[None]:
+    """Serialize a session snapshot with read-only scope changes."""
+    if not session_id:
+        yield
+        return
+    with locked(_read_only_path(state_dir, session_id), timeout=timeout):
+        yield
 
 
 @contextmanager
@@ -1373,17 +1406,22 @@ def memory_write_guard(
     if not session_id:
         yield
         return
-    with locked(_read_only_path(state_dir, session_id), timeout=timeout):
+    with memory_scope_guard(state_dir, session_id, timeout=timeout):
         if is_read_only_turn(state_dir, session_id):
             raise MemoryReadOnlyError('memory-read-only')
         yield
 
 
-def clear_read_only_turn(state_dir: Path, session_id: str) -> None:
+def clear_read_only_turn(
+    state_dir: Path,
+    session_id: str,
+    *,
+    timeout: float | None = None,
+) -> None:
     path = _read_only_path(state_dir, session_id)
     if not path.exists():
         return
-    with locked(path):
+    with locked(path, timeout=timeout):
         path.unlink(missing_ok=True)
 
 
@@ -1596,6 +1634,7 @@ class MemoryRead:
         *,
         write: bool = True,
         alias_sources: Sequence[tuple[str, str]] | None = None,
+        deadline: float | None = None,
     ) -> dict[str, str]:
         if not self.active or not write:
             return {}
@@ -1607,6 +1646,7 @@ class MemoryRead:
                 sources,
                 self._hashes,
                 alias_sources=alias_sources,
+                deadline=deadline,
             )
             if self._publication is not None:
                 self.check_knowledge_snapshot()
@@ -1768,13 +1808,18 @@ def materialize_memory_views(
     hashes: frozenset[str],
     *,
     alias_sources: Sequence[tuple[str, str]] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, str]:
     """Disposable filtered read targets; never point the agent back at raw notes."""
     private = vault_root / '.codex/private-memory'
     if private.is_symlink() or private.resolve() != vault_root.resolve() / '.codex/private-memory':
         raise MemoryPreferenceError('memory-view-path-invalid')
     views = _checked_views_dir(private)
-    with suppression_guard(private, hashes):
+    with suppression_guard(
+        private,
+        hashes,
+        timeout=timeout_for_deadline(deadline),
+    ):
         rendered, paths = _render_memory_views(
             vault_root,
             sources,
@@ -1786,15 +1831,20 @@ def materialize_memory_views(
             if target.is_symlink() or target.resolve() != views.resolve() / target.name:
                 raise MemoryPreferenceError('memory-view-path-invalid')
             if not target.is_file() or target.read_text(encoding='utf-8') != projected:
-                atomic_write_text(target, projected)
+                atomic_write_text(target, projected, deadline=deadline)
     return paths
 
 
 @contextmanager
-def suppression_guard(private_root: Path, expected: frozenset[str]) -> Iterator[None]:
+def suppression_guard(
+    private_root: Path,
+    expected: frozenset[str],
+    *,
+    timeout: float | None = None,
+) -> Iterator[None]:
     """Fence a short publication against a concurrent forget request."""
     path = _suppression_path(private_root)
-    with locked(path):
+    with locked(path, timeout=timeout):
         lines = path.read_text(encoding='utf-8').splitlines() if path.exists() else []
         if _suppression_hashes_from_lines(lines) != expected:
             raise ValueError('memory-preferences-changed')
@@ -1806,11 +1856,14 @@ def suppress_derived_memory(
     target: str,
     *,
     now: float | None = None,
+    deadline: float | None = None,
 ) -> Path:
     target_hash = memory_text_hash(target)
     path = _suppression_path(private_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with locked(path):
+    with locked(path, timeout=timeout_for_deadline(deadline)):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("memory-suppression-deadline")
         lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
         if target_hash in _suppression_hashes_from_lines(lines):
             return path
@@ -1822,13 +1875,21 @@ def suppress_derived_memory(
         # Cached read targets must stop exposing the unit before accepting the rule.
         views = _checked_views_dir(private_root)
         for view in views.glob('*.md'):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("memory-suppression-deadline")
             if view.is_symlink() or view.resolve() != views.resolve() / view.name:
                 raise MemoryPreferenceError('memory-view-path-invalid')
             if not re.fullmatch(r'[0-9a-f]{64}\.md', view.name):
                 raise MemoryPreferenceError('memory-view-owner-unknown')
             # Links were rewritten in views, so source hashes cannot safely edit them.
             # Invalidate; the next search rebuilds from the unchanged raw sources.
-            atomic_write_text(view, '[Hafıza görünümü güncel değil; yeni arama gerekli.]\n')
+            atomic_write_text(
+                view,
+                '[Hafıza görünümü güncel değil; yeni arama gerekli.]\n',
+                deadline=deadline,
+            )
         lines.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-        atomic_write_text(path, '\n'.join(lines) + '\n')
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("memory-suppression-deadline")
+        atomic_write_text(path, '\n'.join(lines) + '\n', deadline=deadline)
     return path

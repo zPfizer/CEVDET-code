@@ -21,6 +21,20 @@ class LockUnavailable(RuntimeError):
     pass
 
 
+def timeout_for_deadline(
+    deadline: float | None,
+    *,
+    cap: float | None = None,
+) -> float | None:
+    """Return the remaining lock timeout, optionally bounded by ``cap``."""
+    if deadline is None:
+        return cap
+    remaining = max(0.0, deadline - time.monotonic())
+    if cap is not None:
+        remaining = min(remaining, max(0.0, cap))
+    return remaining
+
+
 @contextmanager
 def locked(path: Path, *, timeout: float | None = None) -> Iterator[IO[str]]:
     """Blok boyunca `path`in `.lock` sidecar'ı üzerinde dışlayıcı kilit tutar.
@@ -64,17 +78,17 @@ def _try_acquire(handle: IO[str]) -> bool:
                 return False
             raise
         return True
+    else:  # pragma: no cover — POSIX dalı Windows'ta (yerel + CI) koşamaz.
+        import fcntl
 
-    import fcntl
+        flock = getattr(fcntl, "flock", None)
+        lock_ex = getattr(fcntl, "LOCK_EX", None)
+        lock_nb = getattr(fcntl, "LOCK_NB", None)
+        if not callable(flock) or not isinstance(lock_ex, int) or not isinstance(lock_nb, int):
+            raise OSError(errno.ENOSYS, "fcntl locking is unavailable")
 
-    flock = getattr(fcntl, "flock", None)
-    lock_ex = getattr(fcntl, "LOCK_EX", None)
-    lock_nb = getattr(fcntl, "LOCK_NB", None)
-    if not callable(flock) or not isinstance(lock_ex, int) or not isinstance(lock_nb, int):
-        raise OSError(errno.ENOSYS, "fcntl locking is unavailable")
-
-    try:
-        flock(handle.fileno(), lock_ex | lock_nb)
-    except BlockingIOError:
-        return False
-    return True
+        try:
+            flock(handle.fileno(), lock_ex | lock_nb)
+        except BlockingIOError:
+            return False
+        return True

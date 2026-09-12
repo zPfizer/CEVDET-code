@@ -38,7 +38,7 @@ class ConversationContinuityTests(unittest.TestCase):
                   mock.patch.object(sys, 'stdout', output)):
                 result = hook.main(['session-start', '--strict'])
             self.assertEqual(result, 0)
-            wake.assert_called_once_with(state, vault_root=vault)
+            wake.assert_called_once_with(state, vault_root=vault, deadline=mock.ANY)
             self.assertIn('Hafıza Devamlılığı', json.loads(output.getvalue())['hookSpecificOutput']['additionalContext'])
 
     def test_session_start_surfaces_unresolved_terminal_flush(self):

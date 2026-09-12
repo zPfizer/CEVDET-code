@@ -531,7 +531,7 @@ def _wait_for_process(process: Any, timeout: float) -> None:
         raise OSError("process-tree-still-running") from exc
 
 
-def _posix_group_members(pgid: int) -> list[int] | None:
+def _posix_group_members(pgid: int) -> list[int] | None:  # pragma: no cover — POSIX yolu; Windows CI/yerelde koşamaz.
     if not os.path.isdir("/proc"):
         return None
     members: list[int] = []
@@ -558,7 +558,7 @@ def _posix_group_members(pgid: int) -> list[int] | None:
     return members
 
 
-def _posix_group_probe(pgid: int) -> bool:
+def _posix_group_probe(pgid: int) -> bool:  # pragma: no cover — POSIX yolu; Windows CI/yerelde koşamaz.
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
@@ -568,7 +568,7 @@ def _posix_group_probe(pgid: int) -> bool:
     return True
 
 
-def _wait_for_posix_group_empty(pgid: int, timeout: float) -> list[int]:
+def _wait_for_posix_group_empty(pgid: int, timeout: float) -> list[int]:  # pragma: no cover — POSIX yolu; Windows CI/yerelde koşamaz.
     deadline = time.monotonic() + timeout
     while True:
         members = _posix_group_members(pgid)
@@ -614,7 +614,7 @@ def _terminate_unowned_windows_process(process: Any) -> None:
     _wait_for_process(process, 2)
 
 
-def _terminate_posix_process(process: Any) -> None:
+def _terminate_posix_process(process: Any) -> None:  # pragma: no cover — POSIX yolu; Windows CI/yerelde koşamaz.
     if getattr(process, "_beyin_process_group", False) is True:
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -667,7 +667,7 @@ def terminate_process_tree(process: subprocess.Popen[Any]) -> None:
         raise _cleanup_error(process, cleanup_error) from cleanup_error
 
 
-def _posix_process_identity(pid: int) -> str | None:
+def _posix_process_identity(pid: int) -> str | None:  # pragma: no cover — POSIX yolu; Windows CI/yerelde koşamaz.
     try:
         with open(f"/proc/{pid}/stat", encoding="ascii") as source:
             raw = source.read()
@@ -753,15 +753,16 @@ def pid_is_alive(pid: int) -> bool:
                 _close_windows_handle(handle_value)
         except (OSError, TypeError, ValueError):
             return True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
+    else:  # pragma: no cover — POSIX dalı; Windows CI/yerelde koşamaz.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError as exc:
+            return exc.errno != errno.ESRCH
         return True
-    except OSError as exc:
-        return exc.errno != errno.ESRCH
-    return True
 
 
 def spawn_detached(

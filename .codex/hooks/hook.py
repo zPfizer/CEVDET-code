@@ -31,6 +31,10 @@ class HookScopeError(ValueError):
     """The hook must never write outside the checkout that launched it."""
 
 
+class HookPrivacyBoundaryError(RuntimeError):
+    """A requested privacy boundary could not be durably established."""
+
+
 HOOK_SCOPE_GIT_TIMEOUT_SECONDS = 0.75
 HOOK_EVENT_BUDGET_SECONDS = {
     "session-start": 9.5,
@@ -54,6 +58,11 @@ def _hook_deadline(event: str) -> float:
     if not math.isfinite(external_deadline) or external_deadline <= now:
         return now
     return min(external_deadline, local_deadline)
+
+
+def _check_hook_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise WorkerDeliveryTimeout("hook-deadline-expired")
 
 
 def _validate_hook_scope(
@@ -113,7 +122,7 @@ SESSION_SECTION_TARGET_CHARS = {
 }
 KNOWLEDGE_INDEX_CONTEXT_TARGET_CHARS = SESSION_SECTION_TARGET_CHARS["Bilgi İndeksi"]
 
-from file_lock import locked  # noqa: E402
+from file_lock import LockUnavailable, locked, timeout_for_deadline  # noqa: E402
 from companion_memory import has_pending_reflection, request_reflection  # noqa: E402
 from memory_ledger import (  # noqa: E402
     MemoryDirective,
@@ -129,6 +138,7 @@ from memory_ledger import (  # noqa: E402
     is_session_only,
     mark_read_only_turn,
     mark_session_only,
+    memory_scope_guard,
     memory_directive,
     suppress_derived_memory,
 )
@@ -142,6 +152,7 @@ from worker_supervisor import (  # noqa: E402
     enqueue_flush as enqueue_flush_job,
     ensure_supervisor,
     inspect_worker_queue,
+    WorkerDeliveryTimeout,
 )
 from state_store import (  # noqa: E402
     atomic_write_json,
@@ -156,6 +167,15 @@ MEMORY_PUBLICATION_WARNING = (
     '[Hafıza Güncellemesi] Bilgi yayınının tutarlılığı henüz doğrulanamadı. '
     'Ham bilgi dosyalarına veya eski önbelleğe geçme; bilgi yok sonucuna varma. '
     'Eksik doğrulamayı kısa biçimde bildir.'
+)
+MEMORY_CONTEXT_WARNING = (
+    '[Hafıza Bağlamı] SessionStart bağlamı güvenli biçimde doğrulanamadı; '
+    'bağlam üretimi tamamlanamadı. Ham notlara veya eski önbelleğe geçme; '
+    'bilgi yok sonucuna varma.'
+)
+MEMORY_PRIVACY_BOUNDARY_WARNING = (
+    '[Hafıza] Gizlilik kapsamı güvenli biçimde kaydedilemedi; bu istek engellendi. '
+    'Yeniden dene; başarı varsayma.'
 )
 
 _LEADING_SKILL_LINK = re.compile(
@@ -498,6 +518,7 @@ def build_session_context(
     consume_reflection: bool = True,
     now: dt.datetime | None = None,
     write_views: bool = True,
+    deadline: float | None = None,
 ) -> str:
     sections: list[str] = []
     if has_pending_reflection(state_dir):
@@ -513,6 +534,7 @@ def build_session_context(
             write=write_views,
             hashes=memory._hashes,
             memory=memory,
+            deadline=deadline,
         )
         virtual_companion = {
             f'🔮 850-Companion/{name}': text
@@ -533,7 +555,7 @@ def build_session_context(
         ]
         view_texts: dict[str, str] = {}
         if memory.active and write_views:
-            views = memory.views(view_sources)
+            views = memory.views(view_sources, deadline=deadline)
         elif memory.active:
             view_texts, views = memory.render_views(view_sources)
         else:
@@ -1029,6 +1051,7 @@ def write_hook_health(
     *,
     status: str,
     error: str = "",
+    deadline: float | None = None,
 ) -> None:
     key = health_session_scope(
         payload.get("session_id")
@@ -1036,7 +1059,7 @@ def write_hook_health(
         else None
     )
     path = state_dir / f"hook-health-{key}.json"
-    with locked(path):
+    with locked(path, timeout=timeout_for_deadline(deadline)):
         try:
             previous = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -1052,14 +1075,23 @@ def write_hook_health(
         }
         if error:
             receipt["error"] = error
-        atomic_write_json(path, receipt)
-        atomic_write_json(state_dir / "hook-health.json", receipt)
+        atomic_write_json(path, receipt, deadline=deadline)
+        with locked(
+            state_dir / "hook-health.json",
+            timeout=timeout_for_deadline(deadline),
+        ):
+            atomic_write_json(state_dir / "hook-health.json", receipt, deadline=deadline)
 
 
-def clear_hook_health(state_dir: Path, payload: dict[str, Any]) -> None:
+def clear_hook_health(
+    state_dir: Path,
+    payload: dict[str, Any],
+    *,
+    deadline: float | None = None,
+) -> None:
     try:
-        write_hook_health(state_dir, payload, status="ok")
-    except (OSError, ValueError):
+        write_hook_health(state_dir, payload, status="ok", deadline=deadline)
+    except (OSError, ValueError, LockUnavailable):
         pass
 
 
@@ -1073,11 +1105,12 @@ def record_hook_runtime(
     process_started_ns: int | None = None,
     handler_started_ns: int | None = None,
     finished_ns: int | None = None,
+    deadline: float | None = None,
 ) -> None:
     session_id = payload.get("session_id")
     key = session_key(session_id) if isinstance(session_id, str) and session_id else ""
     receipt_path = state_dir / (f"runtime-{event}-{key}.json" if key else f"runtime-{event}.json")
-    with locked(receipt_path):
+    with locked(receipt_path, timeout=timeout_for_deadline(deadline)):
         try:
             previous = json.loads(receipt_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -1125,15 +1158,15 @@ def record_hook_runtime(
                     "sections": list(dict.fromkeys(sections)),
                 }
             )
-        atomic_write_json(receipt_path, receipt)
+        atomic_write_json(receipt_path, receipt, deadline=deadline)
     if key:
         compatibility = state_dir / f"runtime-{event}.json"
-        with locked(compatibility):
-            atomic_write_json(compatibility, receipt)
+        with locked(compatibility, timeout=timeout_for_deadline(deadline)):
+            atomic_write_json(compatibility, receipt, deadline=deadline)
 
 
-def _emit_user_prompt_result(context: str) -> None:
-    if is_stop_message(context):
+def _emit_user_prompt_result(context: str, *, block: bool = False) -> None:
+    if block or is_stop_message(context):
         print(
             json.dumps(
                 {"decision": "block", "reason": context},
@@ -1184,6 +1217,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     hook_deadline = _hook_deadline(args.event)
     scope_validated = False
+    session_start_context_emitted = False
+    response_emitted = False
     try:
         payload = _load_payload()
         _validate_hook_scope(payload, deadline=hook_deadline)
@@ -1193,70 +1228,97 @@ def main(argv: Sequence[str] | None = None) -> int:
         emitted_context: str | None = None
         if args.event == "session-start":
             session_id = payload.get("session_id")
-            read_only = (
-                isinstance(session_id, str)
-                and bool(session_id)
-                and is_read_only_turn(STATE_DIR, session_id)
-            )
-            try:
-                emitted_context = build_session_context(
-                    VAULT_ROOT,
-                    STATE_DIR,
-                    write_views=not read_only,
+            scoped_session_id = session_id if isinstance(session_id, str) and session_id else None
+            with memory_scope_guard(
+                STATE_DIR,
+                scoped_session_id,
+                timeout=timeout_for_deadline(hook_deadline),
+            ):
+                _check_hook_deadline(hook_deadline)
+                read_only = (
+                    scoped_session_id is not None
+                    and is_read_only_turn(STATE_DIR, scoped_session_id)
                 )
-            except MemoryPreferenceError as exc:
-                if not str(exc).startswith('memory-publication-'):
-                    raise
-                emitted_context = MEMORY_PUBLICATION_WARNING
-            try:
-                queue_unresolved = 0
-                maintenance_quarantined = 0
-                if read_only:
-                    emitted_context += (
-                        '\n[Hafıza] Salt okunur kapsam korunuyor; bu oturum için yeni otomatik '
-                        'hafıza kaydı veya bakım başlatılmadı. Önceden kuyruğa alınmış işler durdurulmaz.'
+                try:
+                    emitted_context = build_session_context(
+                        VAULT_ROOT,
+                        STATE_DIR,
+                        write_views=not read_only,
+                        deadline=hook_deadline,
                     )
-                else:
-                    import flush
-                    flush.maybe_trigger_compile(VAULT_ROOT)
-                    maintenance = inspect_worker_queue(STATE_DIR / 'maintenance')
-                    maintenance_quarantined = _quarantined_count(maintenance)
-                    if any(maintenance['counts'].get(state, 0) for state in ('pending', 'claimed', 'running')):
-                        ensure_supervisor(STATE_DIR / 'maintenance', vault_root=VAULT_ROOT)
-                    health_path = STATE_DIR / 'health.json'
-                    health = json.loads(health_path.read_text(encoding='utf-8')) if health_path.is_file() else {}
-                    compile_issue = health.get('components', {}).get('compile:global', {}).get('error')
-                    if compile_issue:
-                        emitted_context += ('\n[Hafıza Devamlılığı] Bilgi düzenleme henüz tamamlanamadı: '
-                                            + str(compile_issue) + '. Başarılı sayma; önce mevcut günlük kaynaklarını kullan.')
-                    queue = inspect_worker_queue(STATE_DIR)
-                    queue_unresolved = _unresolved_terminal_count(queue)
-                    if (
-                        queue.get('invalid', 0)
-                        or queue.get('orphan_hook_inputs', 0)
-                        or any(queue['counts'].get(state, 0) for state in ('pending', 'claimed', 'running'))
-                    ):
-                        ensure_supervisor(STATE_DIR, vault_root=VAULT_ROOT)
+                except MemoryPreferenceError as exc:
+                    if not str(exc).startswith('memory-publication-'):
+                        raise
+                    emitted_context = MEMORY_PUBLICATION_WARNING
+                _check_hook_deadline(hook_deadline)
+                try:
+                    queue_unresolved = 0
+                    maintenance_quarantined = 0
+                    if read_only:
                         emitted_context += (
-                            '\n[Hafıza Devamlılığı] Önceki bekleyen kayıtlar yeniden işleniyor. '
-                            'Bu kayıtların durumu netleşmeden ilgili bilgi için yok sonucuna varma.'
+                            '\n[Hafıza] Salt okunur kapsam korunuyor; bu oturum için yeni otomatik '
+                            'hafıza kaydı veya bakım başlatılmadı. Önceden kuyruğa alınmış işler durdurulmaz.'
                         )
-                    if (
-                        queue_unresolved
-                        or _quarantined_count(queue)
-                        or maintenance_quarantined
-                        or _has_current_flush_error(health)
-                    ):
-                        emitted_context += (
-                            '\n[Hafıza Devamlılığı] Önceki arka plan kayıtlarından birinin sonucu '
-                            'doğrulanamadı veya kayıt bütünlüğü doğrulanamadı; içeriği kayıp veya bilgi yok sayma.'
+                    else:
+                        import flush
+                        flush.maybe_trigger_compile(
+                            VAULT_ROOT,
+                            deadline=hook_deadline,
                         )
-            except (OSError, ValueError):
-                _emit_context('SessionStart', emitted_context +
-                    '\n[Hafıza Devamlılığı] Bekleyen kayıtların işlenmesi doğrulanamadı. '
-                    'Mevcut bağlamı kullan; eksik kayıtları bilgi yokluğu sayma.')
-                raise
-            _emit_context("SessionStart", emitted_context)
+                        maintenance = inspect_worker_queue(
+                            STATE_DIR / 'maintenance',
+                            deadline=hook_deadline,
+                        )
+                        maintenance_quarantined = _quarantined_count(maintenance)
+                        if any(maintenance['counts'].get(state, 0) for state in ('pending', 'claimed', 'running')):
+                            ensure_supervisor(
+                                STATE_DIR / 'maintenance',
+                                vault_root=VAULT_ROOT,
+                                deadline=hook_deadline,
+                            )
+                        health_path = STATE_DIR / 'health.json'
+                        health = json.loads(health_path.read_text(encoding='utf-8')) if health_path.is_file() else {}
+                        compile_issue = health.get('components', {}).get('compile:global', {}).get('error')
+                        if compile_issue:
+                            emitted_context += ('\n[Hafıza Devamlılığı] Bilgi düzenleme henüz tamamlanamadı: '
+                                                + str(compile_issue) + '. Başarılı sayma; önce mevcut günlük kaynaklarını kullan.')
+                        queue = inspect_worker_queue(
+                            STATE_DIR,
+                            deadline=hook_deadline,
+                        )
+                        queue_unresolved = _unresolved_terminal_count(queue)
+                        if (
+                            queue.get('invalid', 0)
+                            or queue.get('orphan_hook_inputs', 0)
+                            or any(queue['counts'].get(state, 0) for state in ('pending', 'claimed', 'running'))
+                        ):
+                            ensure_supervisor(
+                                STATE_DIR,
+                                vault_root=VAULT_ROOT,
+                                deadline=hook_deadline,
+                            )
+                            emitted_context += (
+                                '\n[Hafıza Devamlılığı] Önceki bekleyen kayıtlar yeniden işleniyor. '
+                                'Bu kayıtların durumu netleşmeden ilgili bilgi için yok sonucuna varma.'
+                            )
+                        if (
+                            queue_unresolved
+                            or _quarantined_count(queue)
+                            or maintenance_quarantined
+                            or _has_current_flush_error(health)
+                        ):
+                            emitted_context += (
+                                '\n[Hafıza Devamlılığı] Önceki arka plan kayıtlarından birinin sonucu '
+                                'doğrulanamadı veya kayıt bütünlüğü doğrulanamadı; içeriği kayıp veya bilgi yok sayma.'
+                            )
+                except (OSError, ValueError, LockUnavailable, WorkerDeliveryTimeout):
+                    _emit_context('SessionStart', (emitted_context or '') +
+                        '\n[Hafıza Devamlılığı] Bekleyen kayıtların işlenmesi doğrulanamadı. '
+                        'Mevcut bağlamı kullan; eksik kayıtları bilgi yokluğu sayma.')
+                    session_start_context_emitted = True
+                    raise
+                _emit_context("SessionStart", emitted_context)
+                session_start_context_emitted = True
         elif args.event == "user-prompt":
             prompt = payload.get("prompt")
             directive = memory_directive(prompt) if isinstance(prompt, str) else None
@@ -1266,7 +1328,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             session_id = payload.get("session_id")
             if isinstance(session_id, str) and session_id:
                 if read_only_requested:
-                    mark_read_only_turn(STATE_DIR, session_id)
+                    try:
+                        mark_read_only_turn(
+                            STATE_DIR,
+                            session_id,
+                            timeout=timeout_for_deadline(hook_deadline),
+                        )
+                    except (OSError, ValueError, LockUnavailable) as exc:
+                        raise HookPrivacyBoundaryError(
+                            "read-only-scope-unavailable"
+                        ) from exc
                 elif (
                     isinstance(prompt, str)
                     and is_explicit_write_intent(prompt)
@@ -1279,20 +1350,47 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "session-only",
                     }
                 ):
-                    clear_read_only_turn(STATE_DIR, session_id)
+                    try:
+                        clear_read_only_turn(
+                            STATE_DIR,
+                            session_id,
+                            timeout=timeout_for_deadline(hook_deadline),
+                        )
+                    except (OSError, ValueError, LockUnavailable) as exc:
+                        raise HookPrivacyBoundaryError(
+                            "read-only-scope-clear-unavailable"
+                        ) from exc
             if (
                 directive is not None
                 and directive.kind == "session-only"
                 and isinstance(session_id, str)
                 and session_id
             ):
-                mark_session_only(STATE_DIR, session_id)
+                try:
+                    mark_session_only(
+                        STATE_DIR,
+                        session_id,
+                        deadline=hook_deadline,
+                    )
+                except (OSError, ValueError, LockUnavailable) as exc:
+                    raise HookPrivacyBoundaryError(
+                        "session-only-scope-unavailable"
+                    ) from exc
             if (
                 directive is not None
                 and directive.kind == "forget"
                 and not read_only_requested
             ):
-                suppress_derived_memory(LOCAL_MEMORY_ROOT, directive.target)
+                try:
+                    suppress_derived_memory(
+                        LOCAL_MEMORY_ROOT,
+                        directive.target,
+                        deadline=hook_deadline,
+                    )
+                except (OSError, ValueError, LockUnavailable) as exc:
+                    raise HookPrivacyBoundaryError(
+                        "forget-boundary-unavailable"
+                    ) from exc
             emitted_context = handle_user_prompt(
                 payload,
                 STATE_DIR,
@@ -1330,8 +1428,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 profile_issues = memory.profile_issues()
             if profile_issues:
                 warning = _profile_warning(profile_issues)
-                write_hook_health(STATE_DIR, payload, status='error', error=','.join(profile_issues))
-                record_hook_runtime(args.event, payload, STATE_DIR, context=warning)
                 if read_only:
                     # Salt okunur görev profil bakımına yetki vermez; yalnız bildir.
                     result = {'systemMessage': warning +
@@ -1344,6 +1440,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                               ' Mevcut yetkili profil bakımını düzelt ve kontrolü yeniden çalıştır; '
                               'kaynak yoksa tamamlandı deme, eksikliği açıkla.'}
                 print(json.dumps(result, ensure_ascii=True))
+                response_emitted = True
+                write_hook_health(
+                    STATE_DIR,
+                    payload,
+                    status='error',
+                    error=','.join(profile_issues),
+                    deadline=hook_deadline,
+                )
+                record_hook_runtime(
+                    args.event,
+                    payload,
+                    STATE_DIR,
+                    context=warning,
+                    deadline=hook_deadline,
+                )
                 return 1 if args.strict else 0
         else:
             _run_session_end_cleanup(
@@ -1353,6 +1464,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.event == "user-prompt":
             _emit_user_prompt_result(emitted_context or "")
+            response_emitted = bool(emitted_context)
         record_hook_runtime(
             args.event,
             payload,
@@ -1360,10 +1472,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             context=emitted_context,
             process_started_ns=_PROCESS_ENTRY_NS,
             handler_started_ns=handler_started_ns,
+            deadline=hook_deadline,
         )
-        clear_hook_health(STATE_DIR, payload)
+        clear_hook_health(STATE_DIR, payload, deadline=hook_deadline)
         if args.event == "turn-end":
             print(json.dumps({"continue": True}))
+            response_emitted = True
     except HookScopeError as exc:
         print(f"Cevo kanca kapsamı doğrulanamadı: {exc}", file=sys.stderr)
         return 1
@@ -1374,24 +1488,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+        if (
+            args.event == "session-start"
+            and not session_start_context_emitted
+        ):
+            _emit_context("SessionStart", MEMORY_CONTEXT_WARNING)
+            session_start_context_emitted = True
         try:
             write_hook_health(
                 STATE_DIR,
                 payload if "payload" in locals() else {},
                 status="error",
                 error=exc.__class__.__name__,
+                deadline=hook_deadline,
             )
-        except (OSError, ValueError):
+        except (OSError, ValueError, LockUnavailable):
             pass
-        if args.event == "turn-end":
+        if args.event == "turn-end" and not response_emitted:
             print(json.dumps({
                 "systemMessage": "Son konuşma kaydının durumunu doğrulayamıyorum."
             }, ensure_ascii=True))
-        elif args.event == 'user-prompt':
-            _emit_user_prompt_result(
-                '[Hafıza] Hafıza işlemi tamamlanamadı; kayıt veya unutma başarısı iddia etme. '
-                'Sorunu kullanıcıya kısa biçimde bildir ve kaynağı koru.'
-            )
+        elif args.event == 'user-prompt' and not response_emitted:
+            if isinstance(exc, HookPrivacyBoundaryError):
+                _emit_user_prompt_result(
+                    MEMORY_PRIVACY_BOUNDARY_WARNING,
+                    block=True,
+                )
+            else:
+                _emit_user_prompt_result(
+                    '[Hafıza] Hafıza işlemi tamamlanamadı; kayıt veya unutma başarısı iddia etme. '
+                    'Sorunu kullanıcıya kısa biçimde bildir ve kaynağı koru.'
+                )
         # Hook host'u fail-open bekler; yalnız doğrudan CLI/worker çağrısı
         # semantik hatayı işletim sistemine bildirir.
         if args.strict:
