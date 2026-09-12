@@ -50,8 +50,10 @@ from state_store import (
     atomic_write_bytes,
     clear_health as clear_component_health,
     REPLACE_RETRY_SECONDS,
+    ReplacementConflict,
     replace_with_retry,
     sha256_file as _sha256,
+    sha256_file_locked as _sha256_locked,
     write_health as write_component_health,
 )
 from tag_taxonomy import TaxonomyError, load_taxonomy, normalize_tree
@@ -66,6 +68,7 @@ TRIGGER_NAME = re.compile(r"compile-trigger-\d{4}-\d{2}-\d{2}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 PUBLICATION_OPERATION = re.compile(r"[0-9a-f]{32}\Z")
 PUBLICATION_STAGE = re.compile(r"compile-stage-[A-Za-z0-9._-]+\Z")
+_EXPECTED_DESTINATION_UNSET = object()
 _MAX_SOURCE_SNAPSHOT_BYTES = 64 * 1024 * 1024
 _SOURCE_PREFIX_CHUNK_BYTES = 1024 * 1024
 DIRECTIVE_SHAPED = re.compile(
@@ -879,6 +882,36 @@ def _validate_publication_source_relative(relative: object) -> str:
     return relative
 
 
+def _validate_publication_temporary_relative(
+    relative: str,
+    temporary_relative: object,
+) -> str:
+    if not isinstance(temporary_relative, str) or "\\" in temporary_relative:
+        raise PolicyError("publication-journal-invalid")
+    temporary = Path(temporary_relative)
+    if (
+        temporary.as_posix() != temporary_relative
+        or any(part in {".", ".."} for part in temporary.parts)
+        or temporary.parent != Path(relative).parent
+        or not temporary.name.startswith(f".{Path(relative).name}.")
+        or not temporary.name.endswith(".tmp")
+    ):
+        raise PolicyError("publication-journal-invalid")
+    return temporary_relative
+
+
+def _validate_publication_temporary_file_id(file_id: object) -> list[int] | None:
+    if file_id is None:
+        return None
+    if (
+        not isinstance(file_id, list)
+        or len(file_id) != 2
+        or any(type(part) is not int or part <= 0 for part in file_id)
+    ):
+        raise PolicyError("publication-journal-invalid")
+    return file_id
+
+
 def _publication_stage_path(state_dir: Path, relative: object, *, required: bool = True) -> Path:
     if (
         not isinstance(relative, str)
@@ -960,6 +993,33 @@ def _validate_publication_journal(
             raise PolicyError("publication-journal-invalid")
         if not isinstance(target.get("completed"), bool):
             raise PolicyError("publication-journal-invalid")
+        if "conflict" in target and not isinstance(target["conflict"], bool):
+            raise PolicyError("publication-journal-invalid")
+        if (
+            "backup_relative" in target
+            and target["backup_relative"] != _publication_backup_relative(relative, operation)
+        ):
+            raise PolicyError("publication-journal-invalid")
+        if (
+            "temporary_relative" in target
+            or "temporary_file_id" in target
+            or "marker_created" in target
+        ):
+            temporary_relative = target.get("temporary_relative")
+            temporary_file_id = target.get("temporary_file_id")
+            marker_created = target.get("marker_created")
+            if (
+                "temporary_relative" not in target
+                or not isinstance(marker_created, bool)
+                or marker_created and temporary_relative is None
+            ):
+                raise PolicyError("publication-journal-invalid")
+            if temporary_relative is not None:
+                _validate_publication_temporary_relative(relative, temporary_relative)
+            if "temporary_file_id" in target:
+                _validate_publication_temporary_file_id(temporary_file_id)
+                if temporary_relative is None and temporary_file_id is not None:
+                    raise PolicyError("publication-journal-invalid")
     return journal
 
 
@@ -984,10 +1044,20 @@ def _publication_record(
     suppression_digest: str,
     targets: list[dict[str, object]],
 ) -> dict[str, object]:
+    operation_id = uuid.uuid4().hex
+    for target in targets:
+        relative = target.get("relative")
+        if not isinstance(relative, str):
+            raise PolicyError("publication-journal-invalid")
+        target["backup_relative"] = _publication_backup_relative(relative, operation_id)
+        if target.get("before_sha256") is None:
+            target["temporary_relative"] = None
+            target["temporary_file_id"] = None
+            target["marker_created"] = False
     return {
         "schema_version": compile_state.PUBLICATION_SCHEMA_VERSION,
         "status": "pending",
-        "operation_id": uuid.uuid4().hex,
+        "operation_id": operation_id,
         "timestamp": timestamp,
         "source_relative": source_relative,
         "source_digest": source_digest,
@@ -998,12 +1068,207 @@ def _publication_record(
     }
 
 
+def _publication_backup_relative(relative: str, operation_id: str) -> str:
+    relative_digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()
+    return f".codex/scripts/.state/.cevo-publication-{operation_id}-{relative_digest}.bak"
+
+
+def _publication_backup_path(
+    vault_root: Path,
+    relative: str,
+    operation_id: str,
+    backup_relative: object,
+) -> Path:
+    expected = _publication_backup_relative(relative, operation_id)
+    if backup_relative != expected:
+        raise PolicyError("publication-journal-invalid")
+    path = vault_root / expected
+    if path.resolve(strict=False).parent != (vault_root / ".codex/scripts/.state").resolve(strict=False):
+        raise PolicyError("publication-journal-invalid")
+    return path
+
+
+def _publication_temporary_path(
+    vault_root: Path,
+    relative: str,
+    target: dict[str, object],
+) -> Path | None:
+    temporary_relative = target.get("temporary_relative")
+    if temporary_relative is None:
+        return None
+    _validate_publication_temporary_relative(relative, temporary_relative)
+    path = vault_root / temporary_relative
+    if path.resolve(strict=False).parent != (vault_root / relative).parent.resolve(strict=False):
+        raise PolicyError("publication-journal-invalid")
+    return path
+
+
+def _publication_temporary_matches_stage(
+    vault_root: Path,
+    relative: str,
+    target: dict[str, object],
+    after: str,
+) -> bool:
+    temporary = _publication_temporary_path(vault_root, relative, target)
+    if temporary is None:
+        return False
+    try:
+        temporary_stat = temporary.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(temporary_stat.st_mode) or not stat.S_ISREG(temporary_stat.st_mode):
+        return False
+    temporary_file_id = target.get("temporary_file_id")
+    if (
+        not isinstance(temporary_file_id, list)
+        or len(temporary_file_id) != 2
+        or [temporary_stat.st_dev, temporary_stat.st_ino] != temporary_file_id
+    ):
+        return False
+    return _sha256_locked(temporary) == after
+
+
+def _publication_unpublished_marker_matches(
+    vault_root: Path,
+    relative: str,
+    target: dict[str, object],
+    operation_id: str,
+    backup_relative: object,
+    after: str,
+) -> bool:
+    temporary = _publication_temporary_path(vault_root, relative, target)
+    if temporary is None:
+        return False
+    if _publication_backup_digest(
+        vault_root,
+        relative,
+        operation_id,
+        backup_relative,
+    ) != after:
+        return False
+    if not _publication_temporary_matches_stage(vault_root, relative, target, after):
+        return False
+    backup = _publication_backup_path(vault_root, relative, operation_id, backup_relative)
+    try:
+        return os.path.samefile(backup, temporary)
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _bind_publication_temporary(
+    vault_root: Path,
+    relative: str,
+    target: dict[str, object],
+    temporary: Path,
+) -> None:
+    try:
+        temporary_stat = temporary.lstat()
+        temporary_resolved = temporary.resolve(strict=True)
+        root_resolved = vault_root.resolve(strict=True)
+        destination_parent = (vault_root / relative).parent.resolve(strict=True)
+        temporary_relative = temporary_resolved.relative_to(root_resolved).as_posix()
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise PolicyError("publication-journal-invalid") from exc
+    if (
+        stat.S_ISLNK(temporary_stat.st_mode)
+        or not stat.S_ISREG(temporary_stat.st_mode)
+        or temporary_resolved.parent != destination_parent
+    ):
+        raise PolicyError("publication-journal-invalid")
+    _validate_publication_temporary_relative(relative, temporary_relative)
+    temporary_file_id = [temporary_stat.st_dev, temporary_stat.st_ino]
+    _validate_publication_temporary_file_id(temporary_file_id)
+    target["temporary_relative"] = temporary_relative
+    target["temporary_file_id"] = temporary_file_id
+    target["marker_created"] = False
+
+
+def _reset_unpublished_publication_attempt(
+    vault_root: Path,
+    state_dir: Path,
+    journal: dict[str, object],
+    relative: str,
+    target: dict[str, object],
+    operation_id: str,
+    backup_relative: object,
+) -> None:
+    backup = _publication_backup_path(vault_root, relative, operation_id, backup_relative)
+    temporary = _publication_temporary_path(vault_root, relative, target)
+    target["marker_created"] = False
+    compile_state.save_publication(state_dir, journal)
+    backup.unlink()
+    if temporary is not None:
+        temporary.unlink(missing_ok=True)
+
+
+def _clear_publication_backup(
+    vault_root: Path,
+    relative: str,
+    before: str | None,
+    operation_id: str,
+    backup_relative: object,
+) -> None:
+    backup = _publication_backup_path(vault_root, relative, operation_id, backup_relative)
+    backup_digest = _publication_backup_digest(
+        vault_root,
+        relative,
+        operation_id,
+        backup_relative,
+    )
+    if backup_digest is None:
+        return
+    if before is None:
+        if not _publication_backup_is_destination(
+            vault_root,
+            relative,
+            operation_id,
+            backup_relative,
+        ):
+            raise PolicyError(f"publication-conflict-backup-changed:{relative}")
+    elif backup_digest != before:
+        raise PolicyError(f"publication-conflict-backup-changed:{relative}")
+    backup.unlink()
+
+
+def _publication_backup_digest(
+    vault_root: Path,
+    relative: str,
+    operation_id: str,
+    backup_relative: object,
+) -> str | None:
+    backup = _publication_backup_path(vault_root, relative, operation_id, backup_relative)
+    try:
+        backup_stat = backup.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(backup_stat.st_mode) or not stat.S_ISREG(backup_stat.st_mode):
+        raise PolicyError("publication-conflict-backup-invalid")
+    return _sha256_locked(backup)
+
+
+def _publication_backup_is_destination(
+    vault_root: Path,
+    relative: str,
+    operation_id: str,
+    backup_relative: object,
+) -> bool:
+    backup = _publication_backup_path(vault_root, relative, operation_id, backup_relative)
+    try:
+        return os.path.samefile(backup, vault_root / relative)
+    except (FileNotFoundError, OSError):
+        return False
+
+
 def _atomic_copy(
     source: Path,
     destination: Path,
     *,
     deadline: float | None = None,
     validate_destination: Callable[[], object] | None = None,
+    expected_destination_digest: str | None | object = _EXPECTED_DESTINATION_UNSET,
+    backup_path: Path | None = None,
+    on_temporary_ready: Callable[[Path], object] | None = None,
+    on_marker_created: Callable[[], object] | None = None,
 ) -> None:
     existing_mode = 0o644
     if destination.exists():
@@ -1014,17 +1279,53 @@ def _atomic_copy(
         dir=destination.parent,
     )
     temporary = Path(temporary_name)
+    replacement_succeeded = False
     try:
         with os.fdopen(descriptor, "wb") as target, source.open("rb") as source_file:
             shutil.copyfileobj(source_file, target)
             target.flush()
             os.fsync(target.fileno())
         temporary.chmod(existing_mode)
-        # Recheck the original target before every attempt, including sharing retries.
-        # This is optimistic conflict detection, not an atomic filesystem compare-and-swap.
-        replace_with_retry(temporary, destination, deadline=deadline, before_replace=validate_destination)
+        if on_temporary_ready is not None:
+            on_temporary_ready(temporary)
+        # Recheck the target before every attempt; guarded Windows publication
+        # also holds a native target handle across ReplaceFileW.
+        if expected_destination_digest is _EXPECTED_DESTINATION_UNSET:
+            replace_with_retry(
+                temporary,
+                destination,
+                deadline=deadline,
+                before_replace=validate_destination,
+            )
+        else:
+            replace_with_retry(
+                temporary,
+                destination,
+                deadline=deadline,
+                before_replace=validate_destination,
+                expected_digest=expected_destination_digest,
+                backup=backup_path,
+                on_marker_created=on_marker_created,
+            )
+        replacement_succeeded = True
     finally:
-        temporary.unlink(missing_ok=True)
+        preserve_pending_temporary = False
+        if (
+            not replacement_succeeded
+            and expected_destination_digest is None
+            and backup_path is not None
+        ):
+            try:
+                marker_stat = backup_path.lstat()
+                temporary_stat = temporary.lstat()
+                preserve_pending_temporary = (
+                    stat.S_ISREG(marker_stat.st_mode)
+                    and stat.S_ISREG(temporary_stat.st_mode)
+                )
+            except FileNotFoundError:
+                pass
+        if not preserve_pending_temporary:
+            temporary.unlink(missing_ok=True)
 
 
 def _promote_changes(
@@ -1106,6 +1407,7 @@ def _promote_changes(
                 "before_sha256": before,
                 "after_sha256": after,
                 "completed": False,
+                "conflict": False,
             }
             for relative, _destination, before, after in destinations
         ],
@@ -1118,27 +1420,80 @@ def _promote_changes(
         if deadline is not None
         else time.monotonic() + REPLACE_RETRY_SECONDS
     )
+    operation_id = journal.get("operation_id")
+    if not isinstance(operation_id, str):
+        raise PolicyError("publication-journal-invalid")
     for index, (relative, destination, before, after) in enumerate(destinations):
-        current = _live_digest(vault_root, relative)
-        if current == after:
-            _validate_live_destination(vault_root, relative, after)
-        elif current == before:
-            _validate_live_destination(vault_root, relative, before)
-            _atomic_copy(
-                stage / relative,
-                destination,
-                deadline=replace_deadline,
-                validate_destination=lambda: _validate_live_destination(vault_root, relative, before),
-            )
-            if _live_digest(vault_root, relative) != after:
-                raise PolicyError(f"publication-target-drift:{relative}")
-        else:
-            _validate_live_destination(vault_root, relative, before)
         target = journal["targets"][index]
         if not isinstance(target, dict):
             raise PolicyError("publication-journal-invalid")
+        backup_relative = target.get("backup_relative")
+        backup = _publication_backup_path(
+            vault_root,
+            relative,
+            operation_id,
+            backup_relative,
+        )
+        current = _live_digest(vault_root, relative)
+        if target.get("conflict"):
+            raise PolicyError(f"publication-target-changed:{relative}")
+        if current == after:
+            raise PolicyError(f"publication-target-ambiguous:{relative}")
+        elif current == before:
+            _validate_live_destination(vault_root, relative, before)
+            on_temporary_ready = None
+            on_marker_created = None
+            if before is None:
+                def bind_temporary(temporary: Path) -> None:
+                    _bind_publication_temporary(vault_root, relative, target, temporary)
+                    compile_state.save_publication(state_dir, journal)
+
+                def mark_created() -> None:
+                    target["marker_created"] = True
+                    compile_state.save_publication(state_dir, journal)
+
+                on_temporary_ready = bind_temporary
+                on_marker_created = mark_created
+            if _publication_backup_digest(
+                vault_root,
+                relative,
+                operation_id,
+                backup_relative,
+            ) is not None:
+                raise PolicyError(f"publication-conflict-backup-exists:{relative}")
+            try:
+                _atomic_copy(
+                    stage / relative,
+                    destination,
+                    deadline=replace_deadline,
+                    validate_destination=lambda: _validate_live_destination(vault_root, relative, before),
+                    expected_destination_digest=before,
+                    backup_path=backup,
+                    on_temporary_ready=on_temporary_ready,
+                    on_marker_created=on_marker_created,
+                )
+            except Exception as exc:
+                target["completed"] = False
+                target["conflict"] = isinstance(exc, ReplacementConflict)
+                compile_state.save_publication(state_dir, journal)
+                raise
+            if _live_digest(vault_root, relative) != after:
+                target["conflict"] = True
+                target["completed"] = False
+                compile_state.save_publication(state_dir, journal)
+                raise PolicyError(f"publication-target-drift:{relative}")
+        else:
+            _validate_live_destination(vault_root, relative, before)
         target["completed"] = True
+        target["conflict"] = False
         compile_state.save_publication(state_dir, journal)
+        _clear_publication_backup(
+            vault_root,
+            relative,
+            before,
+            operation_id,
+            backup_relative,
+        )
     journal["status"] = "complete"
     compile_state.save_publication(state_dir, journal)
 
@@ -1411,6 +1766,9 @@ def _recover_pending_publication(
             if not isinstance(targets, list):
                 raise PolicyError("publication-journal-invalid")
             replace_deadline = time.monotonic() + REPLACE_RETRY_SECONDS
+            operation_id = journal.get("operation_id")
+            if not isinstance(operation_id, str):
+                raise PolicyError("publication-journal-invalid")
             for target in targets:
                 if not isinstance(target, dict):
                     raise PolicyError("publication-journal-invalid")
@@ -1422,26 +1780,187 @@ def _recover_pending_publication(
                     or not isinstance(after, str)
                 ):
                     raise PolicyError("publication-journal-invalid")
+                backup_relative = target.get("backup_relative")
+                if backup_relative is None:
+                    backup_relative = _publication_backup_relative(relative, operation_id)
+                    target["backup_relative"] = backup_relative
+                    compile_state.save_publication(state_dir, journal)
+                backup = _publication_backup_path(
+                    vault_root,
+                    relative,
+                    operation_id,
+                    backup_relative,
+                )
                 current = _live_digest(vault_root, relative)
+                if target.get("conflict"):
+                    raise PolicyError(f"publication-target-changed:{relative}")
                 if current == after:
+                    backup_digest = _publication_backup_digest(
+                        vault_root,
+                        relative,
+                        operation_id,
+                        backup_relative,
+                    )
+                    if before is None:
+                        receipt_matches = (
+                            backup_digest == after
+                            and _publication_backup_is_destination(
+                                vault_root,
+                                relative,
+                                operation_id,
+                                backup_relative,
+                            )
+                        )
+                        if not target.get("completed") and backup_digest is None:
+                            raise PolicyError(f"publication-target-ambiguous:{relative}")
+                        if backup_digest is not None and not receipt_matches:
+                            target["completed"] = False
+                            target["conflict"] = True
+                            compile_state.save_publication(state_dir, journal)
+                            raise PolicyError(f"publication-target-changed:{relative}")
+                    else:
+                        if backup_digest is not None and backup_digest != before:
+                            target["completed"] = False
+                            target["conflict"] = True
+                            compile_state.save_publication(state_dir, journal)
+                            raise PolicyError(f"publication-target-changed:{relative}")
+                        if (
+                            os.name == "nt"
+                            and not target.get("completed")
+                            and backup_digest != before
+                        ):
+                            raise PolicyError(f"publication-target-ambiguous:{relative}")
                     _validate_live_destination(vault_root, relative, after)
+                    target["completed"] = True
+                    target["conflict"] = False
+                    compile_state.save_publication(state_dir, journal)
+                    _clear_publication_backup(
+                        vault_root,
+                        relative,
+                        before,
+                        operation_id,
+                        backup_relative,
+                    )
                 elif current == before:
                     if journal["status"] == "complete":
+                        raise PolicyError(f"publication-target-drift:{relative}")
+                    if target.get("completed"):
                         raise PolicyError(f"publication-target-drift:{relative}")
                     if not stage.exists():
                         raise PolicyError("publication-stage-missing")
                     _validate_live_destination(vault_root, relative, before)
-                    _atomic_copy(
-                        stage / relative,
-                        vault_root / relative,
-                        deadline=replace_deadline,
-                        validate_destination=lambda: _validate_live_destination(vault_root, relative, before),
-                    )
+                    if before is None:
+                        if (
+                            "temporary_relative" not in target
+                            or "marker_created" not in target
+                        ):
+                            raise PolicyError(f"publication-target-ambiguous:{relative}")
+                        backup_digest = _publication_backup_digest(
+                            vault_root,
+                            relative,
+                            operation_id,
+                            backup_relative,
+                        )
+                        if backup_digest is not None:
+                            if not _publication_unpublished_marker_matches(
+                                vault_root,
+                                relative,
+                                target,
+                                operation_id,
+                                backup_relative,
+                                after,
+                            ):
+                                raise PolicyError(
+                                    f"publication-conflict-backup-exists:{relative}"
+                                )
+                            _reset_unpublished_publication_attempt(
+                                vault_root,
+                                state_dir,
+                                journal,
+                                relative,
+                                target,
+                                operation_id,
+                                backup_relative,
+                            )
+                        elif target.get("marker_created"):
+                            raise PolicyError(f"publication-target-ambiguous:{relative}")
+                        else:
+                            temporary = _publication_temporary_path(
+                                vault_root,
+                                relative,
+                                target,
+                            )
+                            if temporary is not None:
+                                try:
+                                    temporary.lstat()
+                                except FileNotFoundError:
+                                    pass
+                                else:
+                                    if not _publication_temporary_matches_stage(
+                                        vault_root,
+                                        relative,
+                                        target,
+                                        after,
+                                    ):
+                                        raise PolicyError(
+                                            f"publication-target-ambiguous:{relative}"
+                                        )
+                                    temporary.unlink()
+                    elif _publication_backup_digest(
+                        vault_root,
+                        relative,
+                        operation_id,
+                        backup_relative,
+                    ) is not None:
+                        raise PolicyError(f"publication-conflict-backup-exists:{relative}")
+                    on_temporary_ready = None
+                    on_marker_created = None
+                    if before is None:
+                        def bind_temporary(temporary: Path) -> None:
+                            _bind_publication_temporary(vault_root, relative, target, temporary)
+                            compile_state.save_publication(state_dir, journal)
+
+                        def mark_created() -> None:
+                            target["marker_created"] = True
+                            compile_state.save_publication(state_dir, journal)
+
+                        on_temporary_ready = bind_temporary
+                        on_marker_created = mark_created
+                    try:
+                        _atomic_copy(
+                            stage / relative,
+                            vault_root / relative,
+                            deadline=replace_deadline,
+                            validate_destination=lambda: _validate_live_destination(vault_root, relative, before),
+                            expected_destination_digest=before,
+                            backup_path=backup,
+                            on_temporary_ready=on_temporary_ready,
+                            on_marker_created=on_marker_created,
+                        )
+                    except Exception as exc:
+                        target["completed"] = False
+                        target["conflict"] = isinstance(exc, ReplacementConflict)
+                        compile_state.save_publication(state_dir, journal)
+                        raise
                     if _live_digest(vault_root, relative) != after:
+                        target["conflict"] = True
+                        target["completed"] = False
+                        compile_state.save_publication(state_dir, journal)
                         raise PolicyError(f"publication-target-drift:{relative}")
+                    target["completed"] = True
+                    target["conflict"] = False
+                    compile_state.save_publication(state_dir, journal)
+                    _clear_publication_backup(
+                        vault_root,
+                        relative,
+                        before,
+                        operation_id,
+                        backup_relative,
+                    )
                 else:
                     _validate_live_destination(vault_root, relative, before)
                 target["completed"] = True
+                target["conflict"] = False
                 compile_state.save_publication(state_dir, journal)
             journal["status"] = "complete"
             compile_state.save_publication(state_dir, journal)
