@@ -777,6 +777,7 @@ def _coalesce_pending_flush_locked(
         return None
     matches: list[tuple[Path, dict[str, Any]]] = []
     for path in (_job_root(state_dir) / "pending").glob("*.json"):
+        _check_deadline(deadline)
         job = _load_job_quarantined(state_dir, path, deadline=deadline)
         if job is None or job.get("kind") != "flush":
             continue
@@ -824,6 +825,7 @@ def _coalesce_pending_flush_locked(
     references = _referenced_hook_inputs_locked(
         state_dir,
         excluded_paths=excluded_paths,
+        deadline=deadline,
     )
     if references is not None:
         external_references = references
@@ -862,12 +864,16 @@ def _unresolved_job_count_locked(
 ) -> int:
     count = 0
     for state in ("pending", "claimed", "running", "dead-letter"):
+        _check_deadline(deadline)
         for path in (_job_root(state_dir) / state).glob("*.json"):
+            _check_deadline(deadline)
             if _load_job_quarantined(state_dir, path, deadline=deadline) is not None:
                 count += 1
     # A quarantine tombstone is unresolved work even when its original schema
     # is no longer readable, so it remains part of admission accounting.
-    count += sum(1 for _path in (_job_root(state_dir) / "quarantined").glob("*.json"))
+    for _path in (_job_root(state_dir) / "quarantined").glob("*.json"):
+        _check_deadline(deadline)
+        count += 1
     return count
 
 
@@ -916,7 +922,11 @@ def _enqueue_job_locked(
     deadline: float | None = None,
 ) -> Path:
     if kind == "flush":
-        existing = _find_hook_input_job_locked(state_dir, payload)
+        existing = _find_hook_input_job_locked(
+            state_dir,
+            payload,
+            deadline=deadline,
+        )
         if existing is not None:
             existing_path, existing_state = existing
             if existing_state in {"dead-letter", "quarantined", "invalid"}:

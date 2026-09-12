@@ -792,6 +792,76 @@ class HookIntegrationTests(unittest.TestCase):
         self.assertGreaterEqual(len(seen), 3)
         self.assertTrue(all(value == deadline for _path, value in seen))
 
+    def test_queue_admission_lookup_helpers_share_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / ".state"
+            transcript = root / "transcript.jsonl"
+            transcript.write_text("{}", encoding="utf-8")
+            workers._ensure_job_dirs(state)
+            event_iso = "2026-09-12T00:00:00+00:00"
+            payloads: list[dict[str, object]] = []
+            for name in ("hookin-first.json", "hookin-second.json"):
+                hook_input = state / name
+                hook_input.write_text(
+                    json.dumps(
+                        {
+                            "delivery_schema_version": workers.HOOK_INPUT_SCHEMA_VERSION,
+                            "session_id": "queue-admission-deadline",
+                            "transcript_path": str(transcript),
+                            "reason": "turnend",
+                            "event_iso": event_iso,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                payloads.append(
+                    {
+                        "hook_input": str(hook_input),
+                        "reason": "turnend",
+                        "event_iso": event_iso,
+                    }
+                )
+            deadline = time.monotonic() + 30
+            with (
+                mock.patch.object(
+                    workers,
+                    "_find_hook_input_job_locked",
+                    wraps=workers._find_hook_input_job_locked,
+                ) as find_job,
+                mock.patch.object(
+                    workers,
+                    "_referenced_hook_inputs_locked",
+                    wraps=workers._referenced_hook_inputs_locked,
+                ) as references,
+            ):
+                first = workers._enqueue_job_locked(
+                    state,
+                    "flush",
+                    payloads[0],
+                    observed_now=100,
+                    deadline=deadline,
+                )
+                retained = workers._enqueue_job_locked(
+                    state,
+                    "flush",
+                    payloads[1],
+                    observed_now=101,
+                    deadline=deadline,
+                )
+
+        self.assertEqual(find_job.call_args_list, [
+            mock.call(state, payloads[0], deadline=deadline),
+            mock.call(state, payloads[1], deadline=deadline),
+        ])
+        references.assert_called_once()
+        self.assertEqual(references.call_args.kwargs["deadline"], deadline)
+        self.assertIn(
+            first.resolve(strict=False),
+            references.call_args.kwargs["excluded_paths"],
+        )
+        self.assertEqual(retained, first)
+
     def test_maintenance_quarantine_writes_share_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
