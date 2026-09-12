@@ -91,6 +91,18 @@ class UserEvidenceTests(unittest.TestCase):
         self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
         self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
 
+    def test_indented_model_source_example_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '    ' + decision('Kısa yanıt tercihi.', quote)
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
     def test_visible_citation_with_backticks_in_json_is_parsed_from_raw_text(self):
         quote = 'Markdown `kod` kullan.'
         output = evidence.bind_evidence(

@@ -7,6 +7,7 @@ import re
 
 
 FENCE_LINE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^\r\n]*)$")
+INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 
 
@@ -109,6 +110,9 @@ def markdown_body(
                 continue
             fence_char = fence.group(1)[0]
             fence_length = len(fence.group(1))
+            _blank(chars, start, end)
+            continue
+        if INDENTED_CODE_LINE.match(content):
             _blank(chars, start, end)
             continue
     if mask_inline_code:
