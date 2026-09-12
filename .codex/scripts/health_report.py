@@ -177,7 +177,7 @@ def render(vault: Path, *, now: datetime.datetime | None = None) -> str:
         "---",
         "# Cevo Sağlık",
         "",
-        f"Üretilme: {moment.strftime('%Y-%m-%d %H:%M')} — bu notu `health_report.py` üretir; elle düzenleme bir sonraki çalıştırmada silinir.",
+        f"Üretilme: {moment.strftime('%Y-%m-%d %H:%M')} — bu notu `health_report.py` üretir; mevcut hedef yalnız açık `--overwrite` (veya API'de `overwrite=True`) ile değiştirilir.",
         "",
         "## İş kuyruğu",
         "",
