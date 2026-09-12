@@ -85,6 +85,7 @@ def _source_reasons(
     note_date: datetime.date,
     *,
     memory: MemoryRead | None = None,
+    observations: dict[Path, tuple[int, int, int, int, int]] | None = None,
 ) -> list[str]:
     sources = note.frontmatter.get("sources")
     if isinstance(sources, str):
@@ -154,6 +155,17 @@ def _source_reasons(
         except (OSError, OverflowError, ValueError):
             reasons.append(f"kaynak zamanı okunamadı: {source}")
             continue
+        if observations is not None:
+            observations.setdefault(
+                daily,
+                (
+                    source_stat.st_dev,
+                    source_stat.st_ino,
+                    source_stat.st_size,
+                    source_stat.st_mtime_ns,
+                    source_stat.st_ctime_ns,
+                ),
+            )
         if modified > note_date:
             reasons.append(f"kaynağı sonradan değişmiş: {source} ({modified})")
         elif modified == note_date:
@@ -161,17 +173,94 @@ def _source_reasons(
     return reasons
 
 
+def _validate_source_observations(
+    vault: Path,
+    observations: dict[Path, tuple[int, int, int, int, int]],
+) -> None:
+    if not observations:
+        return
+    daily_root = vault / DAILY_ROOT
+    try:
+        daily_stat = daily_root.lstat()
+        daily_resolved = daily_root.resolve(strict=False)
+        if (
+            stat.S_ISLNK(daily_stat.st_mode)
+            or not stat.S_ISDIR(daily_stat.st_mode)
+            or daily_root.is_junction()
+            or not daily_resolved.is_relative_to(vault)
+        ):
+            raise ValueError("daily-root-invalid")
+        for path, expected in observations.items():
+            source_stat = path.lstat()
+            resolved = path.resolve(strict=False)
+            if (
+                stat.S_ISLNK(source_stat.st_mode)
+                or not stat.S_ISREG(source_stat.st_mode)
+                or not resolved.is_relative_to(vault)
+                or not resolved.is_relative_to(daily_resolved)
+            ):
+                raise ValueError("daily-source-invalid")
+            current = (
+                source_stat.st_dev,
+                source_stat.st_ino,
+                source_stat.st_size,
+                source_stat.st_mtime_ns,
+                source_stat.st_ctime_ns,
+            )
+            if current != expected:
+                raise ValueError("daily-source-changed")
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+        raise MemoryPreferenceError("stale-review-source-changed") from exc
+
+
 def _eligible_note_paths(vault: Path) -> tuple[Path, ...]:
     root = vault.resolve()
     paths = []
-    for path in markdown_paths(root / KNOWLEDGE_ROOT):
+    knowledge = root / KNOWLEDGE_ROOT
+    try:
+        knowledge_stat = knowledge.lstat()
+    except FileNotFoundError:
+        return ()
+    except (OSError, RuntimeError) as exc:
+        raise MemoryPreferenceError("stale-review-knowledge-root-unreadable") from exc
+    try:
+        knowledge_resolved = knowledge.resolve(strict=False)
+        if (
+            stat.S_ISLNK(knowledge_stat.st_mode)
+            or not stat.S_ISDIR(knowledge_stat.st_mode)
+            or knowledge.is_junction()
+            or not knowledge_resolved.is_relative_to(root)
+        ):
+            raise ValueError("knowledge-root-invalid")
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise MemoryPreferenceError("stale-review-knowledge-root-invalid") from exc
+    for name in DERIVED_SUBDIRS:
+        derived = knowledge / name
         try:
-            relative = path.relative_to(root)
-        except ValueError:
+            derived_stat = derived.lstat()
+        except FileNotFoundError:
             continue
-        parts = relative.parts
-        if len(parts) >= 3 and parts[0] == KNOWLEDGE_ROOT and parts[1] in DERIVED_SUBDIRS:
-            paths.append(path)
+        except (OSError, RuntimeError) as exc:
+            raise MemoryPreferenceError("stale-review-knowledge-root-unreadable") from exc
+        try:
+            derived_resolved = derived.resolve(strict=False)
+            if (
+                stat.S_ISLNK(derived_stat.st_mode)
+                or not stat.S_ISDIR(derived_stat.st_mode)
+                or derived.is_junction()
+                or not derived_resolved.is_relative_to(knowledge_resolved)
+            ):
+                raise ValueError("derived-root-invalid")
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise MemoryPreferenceError("stale-review-knowledge-root-invalid") from exc
+        for path in markdown_paths(derived):
+            try:
+                relative = path.relative_to(root)
+            except ValueError:
+                continue
+            parts = relative.parts
+            if len(parts) >= 3 and parts[0] == KNOWLEDGE_ROOT and parts[1] in DERIVED_SUBDIRS:
+                paths.append(path)
     return tuple(sorted(paths))
 
 
@@ -202,6 +291,7 @@ def _review_notes(
     days: int,
     today: datetime.date,
     memory: MemoryRead,
+    observations: dict[Path, tuple[int, int, int, int, int]] | None = None,
 ) -> list[StaleFinding]:
     findings = []
     for note in notes:
@@ -210,7 +300,13 @@ def _review_notes(
             findings.append(StaleFinding(note.key, -1, ("tarih alanı yok ya da bozuk",)))
             continue
         age = (today - note_date).days
-        reasons = _source_reasons(vault, note, note_date, memory=memory)
+        reasons = _source_reasons(
+            vault,
+            note,
+            note_date,
+            memory=memory,
+            observations=observations,
+        )
         if age >= days:
             reasons.insert(0, f"{age} gündür güncellenmemiş")
         if reasons:
@@ -293,14 +389,17 @@ def write_report(
         hashes = load_suppressed_hashes(private_root)
         with suppression_guard(private_root, hashes):
             with memory_read(vault) as memory:
+                observations: dict[Path, tuple[int, int, int, int, int]] = {}
                 findings = _review_notes(
                     vault,
                     _snapshot_notes(vault, memory),
                     days=days,
                     today=today,
                     memory=memory,
+                    observations=observations,
                 )
                 memory.check_knowledge_snapshot()
+                _validate_source_observations(vault, observations)
                 atomic_write_text(
                     target,
                     render(findings, days=days, today=today),
