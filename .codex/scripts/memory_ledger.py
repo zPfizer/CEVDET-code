@@ -66,11 +66,6 @@ BATCH_CREDENTIAL_START = re.compile(
 )
 BATCH_CREDENTIAL_UNQUOTED = re.compile(
     r'''(?im)(?P<prefix>\bset[ \t]+)(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
-    r'''(?P<value>(?:\^[^\r\n]|[^&|^<()>;\r\n])*?)'''
-    r'''(?=[ \t]*(?:[&|<()>;]|\r?$))'''
-)
-BATCH_CREDENTIAL_UNQUOTED_START = re.compile(
-    r'''(?im)\bset[ \t]+(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
 )
 BATCH_ASSIGNMENT_PREFIX = re.compile(r'''(?im)\bset\s+["']?\Z''')
 TOKEN_PREFIX = re.compile(r"\b(?:sk(?=[-_])|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
@@ -754,6 +749,42 @@ def _batch_quoted_credential_value_end(text: str, start: int) -> int | None:
     return None
 
 
+def _batch_unquoted_credential_value_end(text: str, start: int) -> int | None:
+    """Find a Windows batch value boundary while honoring quote and caret state."""
+    quoted = False
+    index = start
+    while index < len(text):
+        character = text[index]
+        if character in {'\r', '\n'}:
+            if quoted:
+                return None
+            end = index
+            while end > start and text[end - 1] in {' ', '\t'}:
+                end -= 1
+            return end
+        if character == '^':
+            if index + 1 >= len(text) or text[index + 1] in {'\r', '\n'}:
+                return None
+            index += 2
+            continue
+        if character == '"':
+            quoted = not quoted
+            index += 1
+            continue
+        if not quoted and character in {'&', '|', '<', '>', '(', ')'}:
+            end = index
+            while end > start and text[end - 1] in {' ', '\t'}:
+                end -= 1
+            return end
+        index += 1
+    if quoted:
+        return None
+    end = index
+    while end > start and text[end - 1] in {' ', '\t'}:
+        end -= 1
+    return end
+
+
 def _json_regions(text: str) -> Iterator[tuple[int, int]]:
     """Validated JSON containers and complete top-level JSON strings."""
     decoder = json.JSONDecoder()
@@ -964,6 +995,7 @@ def sanitize_text(
         pattern: re.Pattern[str],
         replacement: str | Callable[[re.Match[str]], str],
         category: str,
+        end_resolver: Callable[[re.Match[str]], int | None] | None = None,
     ) -> None:
         nonlocal text
         spans = [(record[0], record[1]) for record in _json_string_regions(text) if record[2]]
@@ -976,9 +1008,11 @@ def sanitize_text(
                 span_index += 1
             if span_index < len(spans) and spans[span_index][0] <= match.start():
                 continue
-            end = match.end()
+            end = end_resolver(match) if end_resolver is not None else match.end()
+            if end is None or end < match.start():
+                raise MemoryPreferenceError('memory-credential-container-unverifiable')
             opening = re.search(r'[\[{]', match.group())
-            if opening is not None and pattern is not PRIVATE_KEY:
+            if opening is not None and pattern is not PRIVATE_KEY and end_resolver is None:
                 value_end = _balanced_value_end(text, match.start() + opening.start())
                 if value_end is None:
                     raise MemoryPreferenceError('memory-credential-container-unverifiable')
@@ -1005,12 +1039,6 @@ def sanitize_text(
     for match in BATCH_CREDENTIAL_START.finditer(text):
         if _batch_quoted_credential_value_end(text, match.start('quote')) is None:
             raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
-    json_string_spans = [(record[0], record[1]) for record in _json_string_regions(text)]
-    for match in BATCH_CREDENTIAL_UNQUOTED_START.finditer(text):
-        if any(start <= match.start() < end for start, end in json_string_spans):
-            continue
-        if BATCH_CREDENTIAL_UNQUOTED.match(text, match.start()) is None:
-            raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
     replace_outside_json_values(
         BATCH_CREDENTIAL,
         lambda match: f'{match.group("prefix")}{match.group("key")}=<REDACTED>{match.group("quote")}',
@@ -1020,6 +1048,7 @@ def sanitize_text(
         BATCH_CREDENTIAL_UNQUOTED,
         lambda match: f'{match.group("prefix")}{match.group("key")}=<REDACTED>',
         "credential",
+        lambda match: _batch_unquoted_credential_value_end(text, match.end()),
     )
     regions = _json_regions(text)
     json_strings = _json_string_regions(text)

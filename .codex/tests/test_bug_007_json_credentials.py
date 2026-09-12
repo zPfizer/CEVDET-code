@@ -473,6 +473,18 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 r'set DATABASE_PASSWORD=FIRST ^&^& SECOND_SECRET && echo keep-decision',
                 'set DATABASE_PASSWORD=<REDACTED> && echo keep-decision',
             ),
+            (
+                'set DATABASE_PASSWORD=FIRST;SECOND_SECRET',
+                'set DATABASE_PASSWORD=<REDACTED>',
+            ),
+            (
+                'set DATABASE_PASSWORD="FIRST&SECOND_SECRET"',
+                'set DATABASE_PASSWORD=<REDACTED>',
+            ),
+            (
+                'set DATABASE_PASSWORD=FIRST_SECRET && set MY_TOKEN=SECOND_SECRET && echo keep-decision',
+                'set DATABASE_PASSWORD=<REDACTED> && set MY_TOKEN=<REDACTED> && echo keep-decision',
+            ),
         )
         for text, expected in cases:
             with self.subTest(text=text):
@@ -481,7 +493,8 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertEqual(redactions, ('credential',))
                 self.assertNotIn('FIRST_SECRET', sanitized)
                 self.assertNotIn('SECOND_SECRET', sanitized)
-                self.assertIn('keep-decision', sanitized)
+                if 'keep-decision' in text:
+                    self.assertIn('keep-decision', sanitized)
 
     def test_unverifiable_unquoted_windows_batch_assignment_fails_closed(self) -> None:
         with self.assertRaisesRegex(
