@@ -41,6 +41,7 @@ RECOVERABLE_TRANSITIONS = {
     "pending": {"claimed"},
     "claimed": {"running", "pending", "dead-letter"},
     "running": {"pending", "succeeded", "dead-letter"},
+    "dead-letter": {"pending"},
 }
 JOB_KINDS = {"flush", "maintenance"}
 # Supervisor process'inin admission lease'i; iş süresiyle ilgisizdir.
@@ -1530,9 +1531,9 @@ def redrive_dead_letter(
     """Dead-letter kaydını operatör kararıyla aynı kimlikle pending'e döndürür.
 
     Kayıt yerinde güncellenip `os.replace` ile taşınır (recover_stale_jobs ile
-    aynı kalıp); yarım kalan taşımada pending kopya kazandığı için tekrar
-    çalıştırmak güvenlidir. Dead-letter zaten çözülmemiş iş sayıldığından
-    taşıma admission bütçesini değiştirmez.
+    aynı kalıp); yarım kalan taşıma, kaydedilmiş `pending` durumundan mevcut
+    recovery yolu tarafından tamamlanır. Dead-letter zaten çözülmemiş iş
+    sayıldığından taşıma admission bütçesini değiştirmez.
     """
     observed_now = time.time() if now is None else now
     _ensure_job_dirs(state_dir)
@@ -1559,6 +1560,10 @@ def redrive_dead_letter(
                 ):
                     skipped.append((job["job_id"], "girdi dosyası silinmiş"))
                     continue
+            destination = _job_root(state_dir) / "pending" / path.name
+            if destination.exists():
+                skipped.append((job["job_id"], "hedef kayıt mevcut"))
+                continue
             job["status"] = "pending"
             job["attempt"] = 0
             job["generation"] = int(job["generation"]) + 1
@@ -1578,7 +1583,6 @@ def redrive_dead_letter(
                 "retry_scheduled_ts",
             ):
                 job.pop(stale_key, None)
-            destination = _job_root(state_dir) / "pending" / path.name
             atomic_write_json(path, job)
             os.replace(path, destination)
             redriven.append(job["job_id"])

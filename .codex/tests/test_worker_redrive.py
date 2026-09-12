@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from _fixtures import CODEX_DIR  # noqa: F401
 import worker_supervisor as workers
@@ -30,6 +31,39 @@ def _dead_letter_job(state: Path, job_id: str, **overrides) -> Path:
 
 
 class RedriveDeadLetterTests(unittest.TestCase):
+    def test_interrupted_redrive_is_completed_by_queue_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            job_id = "c" * 32
+            dead_letter = _dead_letter_job(state, job_id, payload={"reason": "kesinti"})
+            real_replace = workers.os.replace
+
+            def fail_transition(source: Path, destination: Path) -> None:
+                if (
+                    source.parent.name == "dead-letter"
+                    and destination.parent.name == "pending"
+                ):
+                    raise OSError("simulated interruption")
+                real_replace(source, destination)
+
+            with mock.patch.object(workers.os, "replace", side_effect=fail_transition):
+                with self.assertRaisesRegex(OSError, "simulated interruption"):
+                    workers.redrive_dead_letter(state, now=1757500000)
+
+            self.assertTrue(dead_letter.is_file())
+            interrupted = json.loads(dead_letter.read_text(encoding="utf-8"))
+            self.assertEqual(interrupted["status"], "pending")
+
+            workers.recover_stale_jobs(state, now=1757500001)
+            pending = state / "worker-jobs" / "pending" / dead_letter.name
+            recovered = workers._load_job(pending)
+            self.assertFalse(dead_letter.is_file())
+
+        self.assertEqual(recovered["job_id"], job_id)
+        self.assertEqual(recovered["status"], "pending")
+        self.assertEqual(recovered["generation"], 3)
+        self.assertEqual(recovered["attempt"], 0)
+
     def test_redrive_revives_job_as_valid_pending(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -107,6 +141,34 @@ class RedriveDeadLetterTests(unittest.TestCase):
         self.assertEqual(skipped, [])
         self.assertTrue(moved)
         self.assertTrue(other_stayed)
+
+    def test_existing_pending_record_is_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            job_id = "f" * 32
+            dead_letter = _dead_letter_job(state, job_id, payload={"reason": "dead"})
+            pending = state / "worker-jobs" / "pending" / dead_letter.name
+            existing = {
+                "schema_version": 1,
+                "job_id": job_id,
+                "kind": "maintenance",
+                "status": "pending",
+                "generation": 9,
+                "attempt": 0,
+                "enqueue_sequence": 2,
+                "enqueued_ts": 1757500000,
+                "payload": {"reason": "existing"},
+            }
+            workers.atomic_write_json(pending, existing)
+
+            redriven, skipped = workers.redrive_dead_letter(state, now=1757500001)
+            saved = workers._load_job(pending)
+            still_there = dead_letter.is_file()
+
+        self.assertEqual(redriven, [])
+        self.assertEqual(skipped, [(job_id, "hedef kayıt mevcut")])
+        self.assertEqual(saved["payload"], {"reason": "existing"})
+        self.assertTrue(still_there)
 
     def test_invalid_record_is_reported_and_left_in_place(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
