@@ -31,10 +31,10 @@ from worker_supervisor import load_hook_input, resolve_hook_input
 from state_store import (
     atomic_write_json,
     atomic_write_text,
-    clear_health as clear_component_health,
+    discard_health,
+    report_health,
     session_scope,
     state_dir_of,
-    write_health as write_component_health,
 )
 
 
@@ -87,16 +87,13 @@ def write_health(
     session_id: str | None = None,
 ) -> None:
     """Record the latest flush problem without letting reporting crash."""
-    try:
-        write_component_health(
-            state_dir,
-            component="flush",
-            error=error,
-            warning=warning,
-            scope_key=session_scope(session_id),
-        )
-    except OSError:
-        pass
+    report_health(
+        state_dir,
+        component="flush",
+        error=error,
+        warning=warning,
+        scope_key=session_scope(session_id),
+    )
 
 
 def clear_health(
@@ -105,14 +102,11 @@ def clear_health(
     *,
     session_id: str | None = None,
 ) -> None:
-    try:
-        clear_component_health(
-            state_dir,
-            component=component,
-            scope_key=session_scope(session_id),
-        )
-    except OSError:
-        pass
+    discard_health(
+        state_dir,
+        component=component,
+        scope_key=session_scope(session_id),
+    )
 
 
 def clear_health_error(
@@ -122,22 +116,19 @@ def clear_health_error(
     *,
     session_id: str | None = None,
 ) -> None:
-    try:
-        clear_component_health(
+    discard_health(
+        state_dir,
+        component=component,
+        scope_key=session_scope(session_id),
+        expected_error=error,
+    )
+    if session_id is not None:
+        discard_health(
             state_dir,
             component=component,
-            scope_key=session_scope(session_id),
+            scope_key="global",
             expected_error=error,
         )
-        if session_id is not None:
-            clear_component_health(
-                state_dir,
-                component=component,
-                scope_key="global",
-                expected_error=error,
-            )
-    except OSError:
-        pass
 
 
 _ensure_daily_graph_link = graph_integrity.ensure_daily_graph_link
