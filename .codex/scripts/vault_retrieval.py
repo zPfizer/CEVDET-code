@@ -204,22 +204,31 @@ HISTORY_TURKISH_NOMINAL_CHANGE_QUERY = re.compile(
 # `daha önce`/`önceden` retrospective; imperative forms such as
 # `daha önce bitir` stay current.
 HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS = frozenset({"hangi", "uygun"})
-HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY = r"(?:m(?:iydi|uydu)[mk]|m[iu])"
-HISTORY_TURKISH_PAST_SUFFIX = r"[dt][iu](?:m|n|k|n[iu]z|lar|ler)?"
+HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY = (
+    r"m[iu](?:y[dt][iu](?:m|n|k|n[iu]z|lar|ler)?|y[iu][mz]|s[iu]n(?:[iu]z)?)?"
+)
+HISTORY_TURKISH_PAST_SUFFIX = (
+    r"(?:[dt][iu](?:m|n|k|n[iu]z|lar|ler)?"
+    r"|m[iu]s(?:[iu]m|[iu]z|s[iu]n(?:[iu]z)?|lar|ler)?)"
+)
 HISTORY_TURKISH_RETROSPECTIVE_PAST = (
-    rf"(?:\w+m(?:is|us)\s+{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY}"
-    rf"|\w+{HISTORY_TURKISH_PAST_SUFFIX}(?:\s+m[iu])?)"
+    rf"\w+{HISTORY_TURKISH_PAST_SUFFIX}(?:\s+{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY})?"
 )
 # Without explicit question punctuation/auxiliary, cover decision predicates
 # only. An embedded wh-word in `hangi ... olduğunu bilmemiştik` is not enough.
 HISTORY_TURKISH_DECISION_PAST = re.compile(
-    r"\b(?:karar\w*\s+(?:ver|al)|sec|tercih\s+et|uygun\s+gor|benimse)"
-    rf"(?:ma|me)?(?:m(?:is|us))?{HISTORY_TURKISH_PAST_SUFFIX}$"
+    rf"\b(?:(?:karar\w*|tercih|uygun)\s+{HISTORY_TURKISH_RETROSPECTIVE_PAST}"
+    rf"|(?:sec|benimse)\w*{HISTORY_TURKISH_PAST_SUFFIX})$"
+)
+HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY = (
+    rf"(?=\s*(?:[?,]|$|(?:ve|ile)\s+{CURRENT_QUERY_CUE}\b))"
 )
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
     rf"(?ix)\b(?:daha\s+once|onceden)\b[^.!?;:\r\n]*?\s+"
-    rf"(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b"
-    rf"(?=\s*(?:\?|$|(?:ve|ile)\s+{CURRENT_QUERY_CUE}\b))"
+    rf"(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b{HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY}"
+)
+HISTORY_TURKISH_RETROSPECTIVE_END = re.compile(
+    rf"(?ix)\b(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b{HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY}"
 )
 HISTORY_CHANGE_TAIL = (
     rf"(?:\s*(?:[?!.,;:]|$)|\s+{HISTORY_CHANGE_TEMPORAL}\b"
@@ -1570,10 +1579,23 @@ def _retrospective_question_terms(normalized: str) -> frozenset[str]:
 
 def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
     normalized = _unquoted_request(normalized, preserve_positions=True)
-    return [
-        match for match in HISTORY_TURKISH_RETROSPECTIVE_QUERY.finditer(normalized)
-        if (not match.group().endswith("neydi") or re.search(r"\bkarar\w*\b", match.group()))
-        and (
+    starts = [match.start() for match in re.finditer(r"\b(?:daha\s+once|onceden)\b", normalized)]
+    current_boundaries = [match.start() for match in re.finditer(
+        rf"(?:\b(?:ve|ile)\b|,)\s+{CURRENT_QUERY_CUE}\b", normalized,
+    )]
+    accepted: dict[int, re.Match[str]] = {}
+    for ending in HISTORY_TURKISH_RETROSPECTIVE_END.finditer(normalized):
+        index = bisect_right(starts, ending.start()) - 1
+        if index < 0 or starts[index] in accepted:
+            continue
+        start = starts[index]
+        boundary = bisect_left(current_boundaries, start)
+        if boundary < len(current_boundaries) and current_boundaries[boundary] < ending.start():
+            continue
+        # A rejected declarative prefix must not consume the temporal marker;
+        # a later predicate in the same clause may be the operative question.
+        match = HISTORY_TURKISH_RETROSPECTIVE_QUERY.fullmatch(normalized, start, ending.end())
+        if match is not None and (
             normalized[match.end():].lstrip().startswith("?")
             or re.search(rf"\b(?:{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY}|neydi)$", match.group())
             or (
@@ -1582,8 +1604,9 @@ def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
                 # inside a background explanation are not question evidence.
                 and _retrospective_question_terms(" ".join(match.group()[:decision.start()].split()[-2:]))
             )
-        )
-    ]
+        ):
+            accepted[start] = match
+    return list(accepted.values())
 
 
 def _retrospective_topic_cue_terms(query: str) -> frozenset[str]:
