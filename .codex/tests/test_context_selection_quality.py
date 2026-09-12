@@ -1271,6 +1271,8 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                 "Daha önce veri saklama kararı vermiş miydik?",
                 "Daha önce veri saklama kararı vermiş miydik",
                 "Önceden veri saklama seçeneğini uygun görmüş müydüm?",
+                "Daha önce veri saklama seçeneğinin sorunlu olduğunu görmüş müydük",
+                "Daha önce veri saklama konusunda hangi mantığı benimsemiştik",
                 "Daha önce veri saklama için hangi seçeneği uygun görmüştük?",
                 "Önceden veri saklama için hangi seçeneği uygun görmüştüm?",
                 "Güncel veri saklama kararı ve daha önce veri saklama konusunda ne karar vermiştik?",
@@ -1319,6 +1321,9 @@ Geçmiş veri saklama kararı: uzun günlükler.
             for query in (
                 "Daha önce veri saklama kararı vermiştik, şimdi nasıl değiştirelim?",
                 "Güncel veri saklama seçeneğini öner; daha önce bu konuda karar vermemiştik",
+                "Güncel veri saklama seçeneğini öner; daha önce hangi seçeneklerin sorunlu olduğunu bilmemiştik",
+                "Güncel veri saklama seçeneğini öner; daha önce ne seçtiğimizi unutmuştuk",
+                "Güncel veri saklama seçeneğini öner; daha önce ne seçeceğimizi unutmuştuk",
             ):
                 with self.subTest(query=query):
                     terms = retrieval._retrieval_terms(query)
@@ -1365,7 +1370,7 @@ status: completed
 type: work-packet
 ---
 # Başka Karar {index}
-Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun görmüştük; hangisini seçmiştik, neyi seçmiştik; kayıt {index}.
+Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun görmüştük; hangisini seçmiştik, neyi seçmiştik; hangisini tercih etmiştik; kayıt {index}.
 """,
                 )
             entries = retrieval.build_vault_map(root, write_cache=False)
@@ -1381,6 +1386,17 @@ Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun 
                 ("Güncel veri saklama kararı", "daha önce hangi seçeneği uygun görmüştük? veri saklama kararı"),
             )
             scaffold_hits = retrieval.search_vault(entries, scaffold_query, top_k=2)
+
+            preference_clause = "daha önce hangisini tercih etmiştik?"
+            preference_query = f"Güncel veri saklama kararı ve {preference_clause}"
+            self.assertEqual(
+                retrieval._split_current_history_query(preference_query),
+                ("Güncel veri saklama kararı", f"{preference_clause} veri saklama kararı"),
+            )
+            self.assertEqual(
+                {hit.entry.path for hit in retrieval.search_vault(entries, preference_query, top_k=2)},
+                {current, historical},
+            )
 
             for pronoun in ("hangisini", "neyi", "hangilerine", "neye"):
                 history_clause = f"önceden {pronoun} seçmiştik?"
@@ -1399,6 +1415,11 @@ Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun 
             self.assertEqual(
                 retrieval._split_current_history_query(explicit_topic_query),
                 ("Güncel veri saklama kararı", "daha önce TANSU kararı vermiştik?"),
+            )
+            preference_topic_query = "Güncel veri saklama kararı ve daha önce TANSU için hangisini tercih etmiştik?"
+            self.assertEqual(
+                retrieval._split_current_history_query(preference_topic_query),
+                ("Güncel veri saklama kararı", "daha önce TANSU için hangisini tercih etmiştik?"),
             )
 
         self.assertEqual(

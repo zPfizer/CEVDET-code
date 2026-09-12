@@ -207,6 +207,12 @@ HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY = r"m(?:iydi|uydu)[mk]"
 HISTORY_TURKISH_RETROSPECTIVE_PAST = (
     rf"\w+m(?:(?:isti|ustu)[mk]|(?:is|us)\s+{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY})"
 )
+# Without explicit question punctuation/auxiliary, cover decision predicates
+# only. An embedded wh-word in `hangi ... olduğunu bilmemiştik` is not enough.
+HISTORY_TURKISH_DECISION_PAST = re.compile(
+    r"\b(?:karar\w*\s+ver|sec|tercih\s+et|uygun\s+gor|benimse)"
+    r"m(?:isti|ustu)[mk]$"
+)
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
     r"(?ix)(?:"
     rf"\b(?:daha\s+once|onceden)\b(?:\s+\w+){{0,8}}\s+{HISTORY_TURKISH_RETROSPECTIVE_PAST}\b(?=\s*(?:\?|$))"
@@ -1565,7 +1571,11 @@ def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
     return [
         match for match in HISTORY_TURKISH_RETROSPECTIVE_QUERY.finditer(normalized)
         if normalized[match.end():].lstrip().startswith("?")
-        or _retrospective_question_terms(match.group())
+        or re.search(rf"\b(?:{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY}|neydi)$", match.group())
+        or (
+            HISTORY_TURKISH_DECISION_PAST.search(match.group())
+            and _retrospective_question_terms(match.group())
+        )
     ]
 
 
@@ -1594,6 +1604,8 @@ def _retrospective_topic_cue_terms(query: str) -> frozenset[str]:
         )
         if decision:
             cue_terms.add(decision.group("decision"))
+        if re.search(r"\btercih\s+etm", retrospective):
+            cue_terms.add("tercih")
         if re.search(r"\bneydi\b", retrospective):
             cue_terms.add("neydi")
     return frozenset(cue_terms)
