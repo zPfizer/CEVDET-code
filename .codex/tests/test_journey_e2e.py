@@ -63,6 +63,7 @@ def _copy_runtime(vault: Path) -> Path:
     codex = vault / ".codex"
     (codex / "hooks").mkdir(parents=True)
     (codex / "scripts").mkdir()
+    shutil.copy2(CODEX_DIR / "tag-taxonomy.json", codex / "tag-taxonomy.json")
     for source in (CODEX_DIR / "scripts").glob("*.py"):
         shutil.copy2(source, codex / "scripts" / source.name)
     shutil.copy2(CODEX_DIR / "hooks" / "hook.py", codex / "hooks" / "hook.py")
