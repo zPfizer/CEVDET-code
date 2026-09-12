@@ -123,6 +123,41 @@ class CoveragePolicyArms(unittest.TestCase):
                 1,
             )
 
+    def test_prepared_receipt_without_coverage_or_batch_requires_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault, state = _vault(Path(temporary))
+            payload = _payload(state, [{"role": "user", "content": TURN}])
+            with mock.patch.object(
+                flush, "append_daily", side_effect=OSError("disk")
+            ):
+                self.assertEqual(_run(vault, state, payload), 1)
+
+            key = flush._session_key("oturum")
+            coverage_path = state / f"flush-coverage-{key}.json"
+            batch_path = state / f"flush-batch-{key}.json"
+            session_path = state / f"flush-{key}.json"
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            receipts = session.get("receipts")
+            self.assertTrue(
+                isinstance(receipts, dict)
+                and any(
+                    isinstance(receipt, dict)
+                    and receipt.get("status") == "prepared"
+                    and receipt.get("policy_version") == transcript_index.POLICY_VERSION
+                    for receipt in receipts.values()
+                )
+            )
+            batch_path.unlink(missing_ok=True)
+            coverage_path.unlink(missing_ok=True)
+            Path(payload["transcript_path"]).write_text("", encoding="utf-8")
+
+            self.assertEqual(_run(vault, state, payload), 1)
+            failure = json.loads(session_path.read_text(encoding="utf-8"))
+            self.assertEqual(failure["status"], "fail")
+            self.assertEqual(failure["detail"], flush.POLICY_MIGRATION_REQUIRED)
+            self.assertFalse(coverage_path.exists())
+            self.assertFalse(batch_path.exists())
+
 
 class BatchMigrationArms(unittest.TestCase):
     def _prepared(self, temporary: Path):

@@ -480,12 +480,12 @@ class PromoteArms(unittest.TestCase):
             staged.write_text("yeni içerik", encoding="utf-8")
             live = vault / "knowledge" / "concepts" / "yeni.md"
 
-            # Canlı hedef zaten aynı içerikte: kopya atlanır.
-            live.write_text("yeni içerik", encoding="utf-8")
-            digest = memory_compile._sha256(staged)
+            # Producer baseline is the actual pre-promotion target image.
+            live.write_text("eski içerik", encoding="utf-8")
+            before_digest = memory_compile._sha256(live)
             self._journal_promote(
                 vault, state, stage,
-                baseline={"knowledge/concepts/yeni.md": digest},
+                baseline={"knowledge/concepts/yeni.md": before_digest},
             )
             compile_state.clear_publication(state)
             live.unlink()
@@ -795,26 +795,46 @@ class RecoveryArms(unittest.TestCase):
 
     def test_pending_copy_digest_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            vault, state, _daily, journal = self._seed(
-                Path(temporary),
-                targets=[{
-                    "relative": "knowledge/concepts/yeni.md",
-                    "before_sha256": None,
-                    "after_sha256": "f" * 64,
-                    "completed": False,
-                }],
-            )
-            stage = state / journal["stage"]
+            vault, state, daily = _compile_vault(Path(temporary))
+            stage = state / ("compile-stage-" + "0" * 32)
+            (stage / "daily").mkdir(parents=True)
             (stage / "knowledge" / "concepts").mkdir(parents=True)
+            (stage / "daily" / daily.name).write_bytes(daily.read_bytes())
             (stage / "knowledge" / "concepts" / "yeni.md").write_text(
                 "içerik", encoding="utf-8"
             )
+            relative = "knowledge/concepts/yeni.md"
+            live = vault / relative
+            live.write_text("eski içerik", encoding="utf-8")
+            baseline = {relative: memory_compile._sha256(live)}
             with mock.patch.object(
-                memory_compile, "_validate_publication_stage"
+                memory_compile, "_atomic_copy", side_effect=OSError("interrupt")
             ):
-                with self.assertRaises(memory_compile.PolicyError) as scope:
+                with self.assertRaises(OSError) as scope:
+                    memory_compile._promote_changes(
+                        stage, vault, [relative], baseline,
+                        state_dir=state,
+                        source_relative=f"daily/{daily.name}",
+                        source_digest=memory_compile._sha256(daily),
+                        source_size=daily.stat().st_size,
+                        timestamp="2026-09-11T10:00:00",
+                        suppression_digest=memory_compile._suppression_digest(
+                            frozenset()
+                        ),
+                    )
+            self.assertIn("interrupt", str(scope.exception))
+
+            def wrong_copy(source, destination, **_k):
+                destination.write_text("yanlış içerik", encoding="utf-8")
+
+            with mock.patch.object(
+                memory_compile, "_atomic_copy", side_effect=wrong_copy
+            ):
+                with self.assertRaisesRegex(
+                    memory_compile.PolicyError,
+                    r"publication-target-drift:knowledge/concepts/yeni\.md",
+                ):
                     memory_compile._recover_pending_publication(vault, state)
-        self.assertIn("target-drift", str(scope.exception))
 
 
 class FinalizeAndApplyArms(unittest.TestCase):

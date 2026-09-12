@@ -443,9 +443,7 @@ def _capture_one_core(
             and mapping['note_relative'] == destination.relative_to(vault_root).as_posix()
             and (destination.exists() or destination.is_symlink() or source_record is None)
         ):
-            # Hazırlanmış eşleme + yerinde not kombinasyonlarının tümü daha erken
-            # bütünlük kontrollerine (356/386/429) takılır; derinlemesine savunma.
-            if note_digest != mapping['note_sha256']:  # pragma: no cover
+            if note_digest != mapping['note_sha256']:
                 raise ValueError('attachment-prepared-note-drift')
         candidate = _mapping(
             attachment_id=attachment_id,

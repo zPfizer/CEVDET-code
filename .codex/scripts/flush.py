@@ -1284,7 +1284,7 @@ def flush_once(
                     for receipt in receipts.values()
                 )
                 and prepared is None
-            ):  # pragma: no cover — batch dosyası bu noktadan önce daima yazılır; savunma hattı.
+            ):
                 return fail_policy_migration()
         if coverage_update is not None:
             try:

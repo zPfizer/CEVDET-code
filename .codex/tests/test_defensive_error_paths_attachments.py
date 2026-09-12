@@ -441,6 +441,57 @@ class AttachmentCaptureGuards(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _capture(root, _envelope(source))
 
+    def test_prepared_note_drift_after_note_disappears_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _seed(root, content="Kept source.")
+            old_summary = "\n\n".join(
+                "## " + section + "\nOld summary."
+                for section in flush.EXPECTED_SECTIONS
+            )
+            new_summary = "\n\n".join(
+                "## " + section + "\nNew summary."
+                for section in flush.EXPECTED_SECTIONS
+            )
+            summary_calls = {"count": 0}
+
+            def summarize_and_disappear(_visible: str) -> str:
+                summary_calls["count"] += 1
+                if summary_calls["count"] == 2:
+                    note.unlink(missing_ok=True)
+                return old_summary if summary_calls["count"] == 1 else new_summary
+
+            summarize = mock.Mock(side_effect=summarize_and_disappear)
+            first = _capture(
+                root, _envelope(source), summarize=summarize,
+            )
+            self.assertTrue(first)
+            note = root / (first[0][0] + ".md")
+            mapping_files = list(
+                (root / ".codex" / "scripts" / ".state").glob(
+                    "attachment-*.json"
+                )
+            )
+            self.assertEqual(len(mapping_files), 1)
+            mapping_file = mapping_files[0]
+            mapping = json.loads(mapping_file.read_text(encoding="utf-8"))
+            mapping["status"] = "prepared"
+            mapping_file.write_text(json.dumps(mapping), encoding="utf-8")
+
+            private_memory = root / ".codex" / "private-memory"
+            suppress_derived_memory(private_memory, "Old summary.")
+            hashes = load_suppressed_hashes(private_memory)
+            source.unlink()
+            with self.assertRaisesRegex(
+                ValueError, "attachment-prepared-note-drift"
+            ):
+                _capture(
+                    root, _envelope(source), summarize=summarize,
+                    hashes=hashes,
+                )
+            self.assertFalse(note.exists())
+            self.assertEqual(summarize.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
