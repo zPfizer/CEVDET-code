@@ -1128,6 +1128,13 @@ def _worker_delayed_job_check(ctx: Context) -> Check:
             or isinstance(receipt.get("owner_pid"), bool)
             or not isinstance(receipt.get("owner_pid"), int)
             or receipt["owner_pid"] < 0
+            or (
+                receipt.get("owner_identity") is not None
+                and (
+                    not isinstance(receipt["owner_identity"], str)
+                    or not receipt["owner_identity"]
+                )
+            )
             or _finite_timestamp(receipt.get("lease_until")) is None
             or _finite_timestamp(receipt.get("updated_ts")) is None
         ):

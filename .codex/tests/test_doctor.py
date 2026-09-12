@@ -296,35 +296,37 @@ class DoctorTests(unittest.TestCase):
                 self.assertIn("ownership", check.evidence)
 
     def test_doctor_accepts_ready_pending_job_with_live_owner_after_lease_expiry(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary)
-            pending = state / "worker-jobs" / "pending"
-            pending.mkdir(parents=True)
-            (pending / "job-ready.json").write_text(
-                json.dumps({"status": "pending", "next_attempt_ts": 90}),
-                encoding="utf-8",
-            )
-            (state / "worker-supervisor.json").write_text(
-                json.dumps(
-                    {
-                        "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
-                        "status": "running",
-                        "generation": 1,
-                        "launch_token": "",
-                        "owner_pid": os.getpid(),
-                        "lease_until": 99,
-                        "updated_ts": 100,
-                    }
-                ),
-                encoding="utf-8",
-            )
+        for identity_case in ("absent", None):
+            with self.subTest(identity_case=identity_case), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                pending = state / "worker-jobs" / "pending"
+                pending.mkdir(parents=True)
+                (pending / "job-ready.json").write_text(
+                    json.dumps({"status": "pending", "next_attempt_ts": 90}),
+                    encoding="utf-8",
+                )
+                receipt = {
+                    "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
+                    "status": "running",
+                    "generation": 1,
+                    "launch_token": "",
+                    "owner_pid": os.getpid(),
+                    "lease_until": 99,
+                    "updated_ts": 100,
+                }
+                if identity_case != "absent":
+                    receipt["owner_identity"] = identity_case
+                (state / "worker-supervisor.json").write_text(
+                    json.dumps(receipt),
+                    encoding="utf-8",
+                )
 
-            check = doctor._worker_delayed_job_check(
-                doctor.Context(state_dir=state, now=100)
-            )
+                check = doctor._worker_delayed_job_check(
+                    doctor.Context(state_dir=state, now=100)
+                )
 
-        self.assertEqual(check.status, "OK")
-        self.assertIn("supervisor=running", check.evidence)
+            self.assertEqual(check.status, "OK")
+            self.assertIn("supervisor=running", check.evidence)
 
     def test_doctor_warns_when_running_supervisor_birth_identity_cannot_be_read(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -396,6 +398,39 @@ class DoctorTests(unittest.TestCase):
 
         self.assertEqual(check.status, "OK")
         self.assertIn("supervisor=running", check.evidence)
+
+    def test_doctor_rejects_running_supervisor_with_malformed_birth_identity(self) -> None:
+        for malformed_identity in (123, ""):
+            with self.subTest(malformed_identity=malformed_identity), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                pending = state / "worker-jobs" / "pending"
+                pending.mkdir(parents=True)
+                (pending / "job-ready.json").write_text(
+                    json.dumps({"status": "pending", "next_attempt_ts": 90}),
+                    encoding="utf-8",
+                )
+                (state / "worker-supervisor.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
+                            "status": "running",
+                            "generation": 1,
+                            "launch_token": "",
+                            "owner_pid": os.getpid(),
+                            "owner_identity": malformed_identity,
+                            "lease_until": 99,
+                            "updated_ts": 100,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                check = doctor._worker_delayed_job_check(
+                    doctor.Context(state_dir=state, now=100)
+                )
+
+            self.assertEqual(check.status, "FAIL")
+            self.assertIn("supervisor receipt alanları geçersiz", check.evidence)
 
     def test_doctor_warns_for_terminal_unrecoverable_input_dead_letter(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

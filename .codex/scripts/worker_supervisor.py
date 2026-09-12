@@ -164,16 +164,19 @@ def owner_identity_unreadable(record: dict[str, Any]) -> bool:
     Boyle bir kayitta sahiplik kaniti PID'e duser: `_process_owner_is_active`
     kasitli olarak koruma tarafinda kalir. Kanit zayifladigi icin saglik
     raporunun bu durumu ayrica gostermesi gerekir. Kimlik hic kaydedilmemisse
-    platform kimlik uretemiyor demektir; gerileme sinyali yoktur.
+    veya platform kimlik uretemedigi icin None yazilmissa gerileme sinyali
+    yoktur; baska bir gecersiz deger ise sahiplik kaniti degildir.
     """
-    expected_identity = record.get("owner_identity")
-    if not isinstance(expected_identity, str) or not expected_identity:
+    if "owner_identity" not in record or record["owner_identity"] is None:
         return False
     owner_pid = record.get("owner_pid")
     if not isinstance(owner_pid, int) or isinstance(owner_pid, bool) or owner_pid <= 0:
         return False
     if not pid_is_alive(owner_pid):
         return False
+    expected_identity = record["owner_identity"]
+    if not isinstance(expected_identity, str) or not expected_identity:
+        return True
     return _process_owner_identity(owner_pid) is None
 
 
