@@ -263,6 +263,34 @@ class ModelUsageTests(unittest.TestCase):
             self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel\n")
             self.assertEqual(summary, {})
 
+    def test_record_drops_daily_ledger_swapped_before_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir()
+            ledger = state / "model-usage-20260911.jsonl"
+            ledger.write_text("original\n", encoding="utf-8")
+            canary = root / "canary.jsonl"
+            canary.write_text("canary\n", encoding="utf-8")
+            original_open = Path.open
+
+            def swap_before_open(path: Path, *args: object, **kwargs: object):
+                if path == ledger and args and args[0] == "a+b":
+                    os.replace(canary, ledger)
+                return original_open(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "open", new=swap_before_open):
+                model_usage.record(
+                    state,
+                    purpose="compile",
+                    prompt_chars=10,
+                    duration_ms=5,
+                    outcome="ok",
+                    now=datetime.datetime(2026, 9, 11, 12, 0),
+                )
+
+            self.assertEqual(ledger.read_text(encoding="utf-8"), "canary\n")
+
     def test_record_drops_symlinked_lock_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

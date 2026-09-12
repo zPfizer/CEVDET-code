@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 import re
 import stat
-from typing import Any, Sequence
+from typing import Any, BinaryIO, Sequence
 
 from file_lock import LockUnavailable, locked
 
@@ -55,6 +55,10 @@ def _unsafe_usage_target(path: Path) -> bool:
         path_stat = path.lstat()
     except FileNotFoundError:
         return False
+    return _unsafe_usage_stat(path_stat)
+
+
+def _unsafe_usage_stat(path_stat: os.stat_result) -> bool:
     return (
         _link_or_reparse(path_stat)
         or not stat.S_ISREG(path_stat.st_mode)
@@ -90,18 +94,72 @@ def _unsafe_usage_directory(path: Path) -> bool:
         return True
 
 
-def _ensure_record_boundary(path: Path) -> None:
+def _usage_handle_matches(path: Path, handle: BinaryIO) -> bool:
+    try:
+        path_stat = path.lstat()
+        handle_stat = os.fstat(handle.fileno())
+    except OSError:
+        return False
+    return (
+        not _unsafe_usage_stat(path_stat)
+        and not _unsafe_usage_stat(handle_stat)
+        and path_stat.st_dev == handle_stat.st_dev
+        and path_stat.st_ino == handle_stat.st_ino
+    )
+
+
+def _open_usage_target(path: Path) -> BinaryIO | None:
+    """Open append-only without accepting a path replaced after its first check."""
+    try:
+        previous_stat = path.lstat()
+    except FileNotFoundError:
+        previous_stat = None
+    except OSError:
+        return None
+    if previous_stat is not None and _unsafe_usage_stat(previous_stat):
+        return None
+
+    handle: BinaryIO | None = None
+    try:
+        handle = path.open("a+b")
+        handle_stat = os.fstat(handle.fileno())
+        current_stat = path.lstat()
+        if (
+            _unsafe_usage_stat(handle_stat)
+            or _unsafe_usage_stat(current_stat)
+            or handle_stat.st_dev != current_stat.st_dev
+            or handle_stat.st_ino != current_stat.st_ino
+            or (
+                previous_stat is not None
+                and (
+                    previous_stat.st_dev != handle_stat.st_dev
+                    or previous_stat.st_ino != handle_stat.st_ino
+                )
+            )
+        ):
+            handle.close()
+            return None
+        return handle
+    except OSError:
+        if handle is not None:
+            handle.close()
+        return None
+
+
+def _ensure_record_boundary(path: Path, handle: BinaryIO) -> bool:
     """Separate a torn final write before appending the next JSONL record."""
-    with path.open("rb") as handle:
-        handle.seek(0, 2)
-        size = handle.tell()
-        if size == 0:
-            return
-        handle.seek(-1, 2)
-        if handle.read(1) == b"\n":
-            return
-    with path.open("ab") as handle:
-        handle.write(b"\n")
+    handle.seek(0, 2)
+    size = handle.tell()
+    if size == 0:
+        return True
+    handle.seek(-1, 2)
+    if handle.read(1) == b"\n":
+        return True
+    if not _usage_handle_matches(path, handle):
+        return False
+    handle.seek(0, 2)
+    handle.write(b"\n")
+    return True
 
 
 def record(
@@ -136,12 +194,17 @@ def record(
             return
         with locked(state_dir / "model-usage", timeout=0):
             usage_path = _usage_path(state_dir, moment.date())
-            if _unsafe_usage_target(usage_path):
+            handle = _open_usage_target(usage_path)
+            if handle is None:
                 return
-            if usage_path.exists():
-                _ensure_record_boundary(usage_path)
-            with usage_path.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
+            try:
+                if not _ensure_record_boundary(usage_path, handle):
+                    return
+                if not _usage_handle_matches(usage_path, handle):
+                    return
+                handle.write((line + "\n").encode("utf-8"))
+            finally:
+                handle.close()
             _prune(state_dir, moment.date())
     except LockUnavailable:
         return
