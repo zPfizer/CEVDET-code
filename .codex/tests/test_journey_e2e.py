@@ -271,7 +271,12 @@ class JourneyE2ETests(unittest.TestCase):
         ).hexdigest()
         session_receipt = state / f"runtime-{event}-{session_key}.json"
         self.assertTrue(
-            session_receipt.is_file(),
+            _wait_until(
+                lambda: self._session_receipt_has_generation(
+                    session_receipt, expected_generation,
+                ),
+                DAILY_TIMEOUT_SECONDS,
+            ),
             f"{event} runtime makbuzu yok",
         )
         session_runtime = json.loads(
@@ -281,6 +286,19 @@ class JourneyE2ETests(unittest.TestCase):
         self.assertEqual(session_runtime["session_key"], session_key)
         self.assertEqual(
             session_runtime["event_generation"], expected_generation
+        )
+
+    @staticmethod
+    def _session_receipt_has_generation(
+        path: Path, expected_generation: int,
+    ) -> bool:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+        return (
+            isinstance(value, dict)
+            and value.get("event_generation") == expected_generation
         )
 
     def _assert_session_end_succeeded(
