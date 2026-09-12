@@ -7,6 +7,7 @@ import re
 
 
 FENCE_LINE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^\r\n]*)$")
+BLOCKQUOTE_PREFIX = re.compile(r"^[ \t]{0,3}>[ \t]?")
 INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
 LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])(?P<gap>[ \t]+|$)"
@@ -64,6 +65,41 @@ def _blank_inline_code(chars: list[str], text: str) -> None:
         index = close + len(delimiter)
 
 
+def _fence_parts(content: str) -> tuple[int, str, str] | None:
+    match = FENCE_LINE.fullmatch(content)
+    if match is not None:
+        return 0, match.group(1), match.group(2)
+
+    remainder = content
+    depth = 0
+    while (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
+        depth += 1
+        remainder = remainder[prefix.end():]
+    if depth == 0:
+        return None
+    match = FENCE_LINE.fullmatch(remainder)
+    if match is None:
+        return None
+    return depth, match.group(1), match.group(2)
+
+
+def _is_paragraph_line(content: str) -> bool:
+    if not content.strip() or INDENTED_CODE_LINE.match(content):
+        return False
+    if _fence_parts(content) is not None:
+        return False
+    stripped = content.lstrip(" \t")
+    if stripped.startswith(">"):
+        return False
+    if re.match(r"^#{1,6}(?:[ \t]+|$)", stripped):
+        return False
+    if LIST_ITEM.match(content) is not None:
+        return False
+    if re.fullmatch(r"(?:[-*_][ \t]*){3,}|=+[ \t]*", stripped):
+        return False
+    return True
+
+
 def markdown_body(
     text: str,
     *,
@@ -102,27 +138,36 @@ def markdown_body(
 
     fence_char: str | None = None
     fence_length = 0
+    fence_depth = 0
     list_contexts: list[tuple[int, int]] = []
+    paragraph_active = False
     for index, (start, end, _line_end, content) in enumerate(lines):
         if index <= frontmatter_end:
             continue
-        fence = FENCE_LINE.fullmatch(content)
+        fence = _fence_parts(content)
         if fence_char is not None:
             _blank(chars, start, end)
             if (
                 fence is not None
-                and fence.group(1)[0] == fence_char
-                and len(fence.group(1)) >= fence_length
-                and not fence.group(2).strip()
+                and fence[0] == fence_depth
+                and fence[1][0] == fence_char
+                and len(fence[1]) >= fence_length
+                and not fence[2].strip()
             ):
                 fence_char = None
+                fence_length = 0
+                fence_depth = 0
+            paragraph_active = False
             continue
         if fence is not None:
-            if fence.group(1)[0] == "`" and "`" in fence.group(2):
+            if fence[1][0] == "`" and "`" in fence[2]:
+                paragraph_active = False
                 continue
-            fence_char = fence.group(1)[0]
-            fence_length = len(fence.group(1))
+            fence_char = fence[1][0]
+            fence_length = len(fence[1])
+            fence_depth = fence[0]
             _blank(chars, start, end)
+            paragraph_active = False
             continue
         indentation = len(content) - len(content.lstrip(" \t"))
         list_item = LIST_ITEM.match(content)
@@ -141,11 +186,15 @@ def markdown_body(
                     + (len(gap) if gap else 1)
                 )
                 list_contexts.append((indentation, content_indent))
+                paragraph_active = False
                 continue
             _blank(chars, start, end)
             list_contexts = []
+            paragraph_active = False
             continue
         if INDENTED_CODE_LINE.match(content):
+            if paragraph_active:
+                continue
             list_context = next(
                 (
                     context
@@ -160,9 +209,11 @@ def markdown_body(
             ):
                 continue
             _blank(chars, start, end)
+            paragraph_active = False
             continue
         if content.strip():
             list_contexts = []
+        paragraph_active = _is_paragraph_line(content)
     if mask_inline_code:
         _blank_inline_code(chars, "".join(chars))
     return "".join(chars)

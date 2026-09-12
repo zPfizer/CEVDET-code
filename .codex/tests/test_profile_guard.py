@@ -268,6 +268,19 @@ class ProfileGuardTests(unittest.TestCase):
 
         self.assertEqual(issues, ['profile-link-broken'])
 
+    def test_check_links_keeps_paragraph_continuation_links_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                'Paragraf devam ediyor.\n    [[missing-continuation]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-broken'])
+
     def test_broken_and_outside_links_are_rejected_without_echoing_content(self) -> None:
         broken = PROFILE_TEXT.replace("tercih-kisa#Kayıtlar", "kayip#Kayıtlar")
         outside = PROFILE_TEXT.replace(

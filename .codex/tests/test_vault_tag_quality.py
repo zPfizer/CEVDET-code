@@ -167,6 +167,17 @@ class VaultTagQualityTests(unittest.TestCase):
             ['nested-tag', 'gercek'],
         )
 
+        continuation = tag_taxonomy.NoteIndex(
+            Path('continuation.md'),
+            PurePosixPath('continuation.md'),
+            'Paragraf devam ediyor.\n'
+            '    #continuation-tag\n',
+        )
+        self.assertEqual(
+            [violation.tag for violation in tag_taxonomy._inline_tag_violations(continuation)],
+            ['continuation-tag'],
+        )
+
     def test_migration_patch_only_changes_tags_and_dry_run_keeps_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
