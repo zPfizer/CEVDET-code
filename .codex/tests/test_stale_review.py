@@ -138,6 +138,27 @@ class StaleReviewTests(unittest.TestCase):
         ])
         self.assertNotIn("[[knowledge/concepts/gizli-not.md]]", text)
 
+    def test_suppressed_daily_source_is_not_reemitted_in_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _daily(vault, "2026-01-02.md", mtime=datetime.date(2026, 8, 1))
+            _note(
+                vault,
+                "kaynakli-not",
+                updated="2026-01-03",
+                sources=["2026-01-02.md"],
+            )
+            ledger.suppress_derived_memory(
+                vault / ".codex/private-memory", "daily/2026-01-02.md"
+            )
+
+            target, _count = stale_review.write_report(
+                vault, now=datetime.date(2026, 9, 11)
+            )
+            text = target.read_text(encoding="utf-8")
+
+        self.assertNotIn("2026-01-02.md", text)
+
     def test_malformed_suppression_controls_fail_closed_before_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

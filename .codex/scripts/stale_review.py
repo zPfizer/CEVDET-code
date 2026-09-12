@@ -89,6 +89,11 @@ def _source_reasons(
             reasons.append("kaynak yolu geçersiz")
             continue
         source = raw_source.strip()
+        if len(source) <= MAX_SOURCE_CHARS and memory is not None and (
+            memory.excludes(source)
+            or memory.excludes(f"{DAILY_ROOT}/{source}")
+        ):
+            continue
         if (
             not source
             or len(source) > MAX_SOURCE_CHARS
@@ -98,11 +103,6 @@ def _source_reasons(
                 reasons.append(f"kaynağı yok: {source}")
             else:
                 reasons.append("kaynak yolu geçersiz")
-            continue
-        if memory is not None and (
-            memory.excludes(source)
-            or memory.excludes(f"{DAILY_ROOT}/{source}")
-        ):
             continue
         if daily_status == "missing":
             reasons.append(f"kaynağı yok: {source}")
