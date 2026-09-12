@@ -292,6 +292,17 @@ def _validate_guarded_snapshot(path: Path, expected_digest: str | None) -> None:
         raise ValueError(_MANUAL_WRITE_CONFLICT)
 
 
+def _guarded_backup_path(path: Path, state: Path | None) -> Path:
+    backup_dir = state or path.parent
+    backup_key = _sha(str(path.resolve(strict=False)).encode('utf-8'))
+    return backup_dir / f'.{path.name}.companion-{backup_key}.bak'
+
+
+def _guarded_backup_exists(path: Path, state: Path | None) -> bool:
+    backup = _guarded_backup_path(path, state)
+    return backup.exists() or backup.is_symlink() or backup.is_junction()
+
+
 def _guarded_write(
     path: Path,
     expected_digest: str | None,
@@ -303,7 +314,9 @@ def _guarded_write(
 ) -> None:
     backup_dir = state or path.parent
     backup_dir.mkdir(parents=True, exist_ok=True)
-    backup = backup_dir / f'.{path.name}.companion-{uuid.uuid4().hex}.bak'
+    backup = _guarded_backup_path(path, state)
+    if _guarded_backup_exists(path, state):
+        raise ValueError(_MANUAL_WRITE_CONFLICT)
 
     def before_replace() -> None:
         _validate_guarded_snapshot(path, expected_digest)
@@ -315,7 +328,8 @@ def _guarded_write(
     except ReplacementConflict as exc:
         raise ValueError(_MANUAL_WRITE_CONFLICT) from exc
     except Exception:
-        backup.unlink(missing_ok=True)
+        # After ReplaceFileW the backup may be the only copy of user bytes;
+        # leave it for a later retry/recovery decision on every failure.
         raise
     else:
         backup.unlink(missing_ok=True)
@@ -383,6 +397,8 @@ def _manual_for_view(
     view_snapshot: dict[str, str | None] | None = None,
 ):
     source_path, view_path = _source_path(root, name), _view_path(root, name)
+    if write_source and _guarded_backup_exists(source_path, state):
+        raise ValueError(_MANUAL_WRITE_CONFLICT)
     source_digest = None
     if canonical and not source_path.is_file():
         raise ValueError('companion-manual-source-missing')
@@ -601,6 +617,8 @@ def ensure_views(
         result = {}
         for name, payload in _render(records, manuals, hashes).items():
             path = _view_path(root, name)
+            if _guarded_backup_exists(path, state):
+                raise ValueError(_MANUAL_WRITE_CONFLICT)
             current = path.read_bytes() if path.is_file() else None
             current_digest = _sha(current) if current is not None else None
             expected_digest = view_snapshots.get(name, current_digest)
@@ -871,6 +889,8 @@ def publish(root: Path, state: Path, summary: str, event: dt.datetime,
             atomic_write_json(canonical_path, _catalog_payload(records, previous_metadata), sort_keys=True)
             for name, payload in _render(records, manuals, hashes).items():
                 path = _view_path(root, name)
+                if _guarded_backup_exists(path, state):
+                    raise ValueError(_MANUAL_WRITE_CONFLICT)
                 current = path.read_bytes() if path.is_file() else None
                 current_digest = _sha(current) if current is not None else None
                 expected_digest = view_snapshots.get(name, current_digest)

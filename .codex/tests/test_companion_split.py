@@ -1,6 +1,7 @@
 import datetime as dt
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -15,6 +16,7 @@ import hook
 import vault_retrieval
 import memory_ledger
 import doctor
+import state_store
 
 
 EVENT = dt.datetime(2026, 9, 8, 12, tzinfo=dt.timezone.utc)
@@ -363,6 +365,116 @@ class CompanionSplitTests(unittest.TestCase):
                             )
                 self.assertTrue(injected)
                 self.assertEqual(target.read_bytes(), user_bytes)
+
+    @unittest.skipUnless(os.name == "nt", "requires a Windows guarded replacement")
+    def test_guarded_projection_keeps_backup_after_backup_digest_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "Last-Session.md"
+            state = root / ".state"
+            original = b"user content\r\n"
+            target.write_bytes(original)
+
+            with mock.patch.object(
+                state_store,
+                "_locked_windows_digest",
+                side_effect=OSError("backup digest unavailable"),
+            ):
+                with self.assertRaisesRegex(OSError, "backup digest unavailable"):
+                    companion_memory._write_projection(
+                        target,
+                        b"generated\n",
+                        expected_digest=companion_memory._sha(original),
+                        state=state,
+                    )
+
+            backups = list(state.glob(".Last-Session.md.companion-*.bak"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_bytes(), original)
+            self.assertEqual(target.read_bytes(), b"generated\n")
+            target.write_bytes(original)
+            with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
+                companion_memory._write_projection(
+                    target,
+                    b"retry\n",
+                    expected_digest=companion_memory._sha(original),
+                    state=state,
+                )
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual(backups[0].read_bytes(), original)
+
+    @unittest.skipUnless(os.name == "nt", "requires a Windows guarded replacement")
+    def test_guarded_projection_keeps_backup_after_output_digest_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "Last-Session.md"
+            state = root / ".state"
+            original = b"user content\r\n"
+            target.write_bytes(original)
+            real_sha = state_store.sha256_file
+            calls = 0
+
+            def fail_output(path):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("output digest unavailable")
+                return real_sha(path)
+
+            with mock.patch.object(state_store, "sha256_file", side_effect=fail_output):
+                with self.assertRaisesRegex(OSError, "output digest unavailable"):
+                    companion_memory._write_projection(
+                        target,
+                        b"generated\n",
+                        expected_digest=companion_memory._sha(original),
+                        state=state,
+                    )
+
+            backups = list(state.glob(".Last-Session.md.companion-*.bak"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_bytes(), original)
+            self.assertEqual(target.read_bytes(), b"generated\n")
+
+    @unittest.skipUnless(os.name == "nt", "requires a Windows guarded replacement")
+    def test_publish_rejects_retry_with_unresolved_guarded_backup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            companion = _seed(root)
+            state = root / ".state"
+            companion_memory.migrate(root)
+            companion_memory.publish(root, state, _summary(), EVENT, "a" * 64, "one", frozenset())
+            source = companion / "Sources/Last-Session.md"
+            source.write_bytes(source.read_bytes().replace(b"# Last", b"# Source edit", 1))
+
+            with mock.patch.object(
+                state_store,
+                "_locked_windows_digest",
+                side_effect=OSError("backup digest unavailable"),
+            ):
+                with self.assertRaisesRegex(OSError, "backup digest unavailable"):
+                    companion_memory.publish(
+                        root,
+                        state,
+                        _summary("Yeni bağlam"),
+                        EVENT + dt.timedelta(minutes=1),
+                        "b" * 64,
+                        "one",
+                        frozenset(),
+                    )
+
+            backups = list(state.glob(".Last-Session.md.companion-*.bak"))
+            self.assertEqual(len(backups), 1)
+            with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
+                companion_memory.publish(
+                    root,
+                    state,
+                    _summary("Yeni bağlam"),
+                    EVENT + dt.timedelta(minutes=1),
+                    "b" * 64,
+                    "one",
+                    frozenset(),
+                )
+            self.assertTrue(backups[0].is_file())
 
     def test_anonymous_legacy_block_remains_tracked_manual_source(self):
         with tempfile.TemporaryDirectory() as temporary:
