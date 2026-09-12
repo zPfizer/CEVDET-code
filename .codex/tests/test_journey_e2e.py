@@ -229,6 +229,25 @@ def _drain_worker(vault: Path, environment: dict[str, str]) -> None:
     )
 
 
+def _reserve_manual_worker(state: Path) -> None:
+    """Keep queue admission independent from CI's detached-process policy."""
+    now = int(time.time())
+    (state / "worker-supervisor.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "running",
+                "generation": 1,
+                "launch_token": "journey-test",
+                "owner_pid": os.getpid(),
+                "lease_until": now + 90,
+                "updated_ts": now,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _queue_idle(state: Path) -> bool:
     jobs = state / "worker-jobs"
     return all(
@@ -399,6 +418,7 @@ class JourneyE2ETests(unittest.TestCase):
             self.assertEqual(list((state / "worker-jobs").glob("*/*.json")), [])
 
             event_date = datetime.date.today().isoformat()
+            _reserve_manual_worker(state)
             ended = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(ended.returncode, 0, ended.stderr)
             self._assert_session_end_succeeded(state, session_id, result=ended)
@@ -458,6 +478,7 @@ class JourneyE2ETests(unittest.TestCase):
             self.assertIn(evidence_link, daily_text)
 
             # Aynı kapanışın tekrarı ikinci bir kayıt üretmemeli (idempotency).
+            _reserve_manual_worker(state)
             repeated = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
             self._assert_session_end_succeeded(
