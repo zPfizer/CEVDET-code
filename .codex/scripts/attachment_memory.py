@@ -113,6 +113,15 @@ def _load_mapping(path: Path, attachment_id: str) -> dict[str, Any] | None:
         _note_path(Path('.'), payload['note_relative'], attachment_id, payload['source_sha256'])
     elif 'note_relative' in payload or 'note_sha256' in payload:
         raise ValueError('attachment-mapping-invalid')
+    if 'empty_result' in payload:
+        empty_result = payload['empty_result']
+        if (
+            status == 'empty'
+            or not isinstance(empty_result, dict)
+            or set(empty_result) != {'source_sha256', 'suppression_revision'}
+            or any(not isinstance(value, str) or not HEX64.fullmatch(value) for value in empty_result.values())
+        ):
+            raise ValueError('attachment-mapping-invalid')
     if not isinstance(payload.get('event_date'), str) or not _valid_date(payload['event_date']):
         raise ValueError('attachment-mapping-invalid')
     redactions = payload.get('redactions')
@@ -410,6 +419,13 @@ def _capture_one_core(
                     source_attachment=source_attachment,
                 )
 
+        if mapped_note is not None and mapping.get('empty_result') == {
+            'source_sha256': source_digest, 'suppression_revision': revision,
+        }:
+            with _publication_scope(state_dir, session_id):
+                with suppression_guard(vault_root / '.codex/private-memory', hashes):
+                    return None
+
         if mapping is not None and mapping['source_sha256'] == source_digest:
             if mapped_note is not None:
                 summary = filter_suppressed_text(mapped_note['summary'], hashes)
@@ -466,7 +482,11 @@ def _capture_one_core(
         if generated_summary is None:
             with _publication_scope(state_dir, session_id):
                 with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                    if mapping is None or mapping['status'] == 'empty':
+                    if (
+                        mapping is None
+                        or mapping['status'] == 'empty'
+                        or (mapping['status'] == 'prepared' and mapped_note is None)
+                    ):
                         _write_mapping(
                             mapping_path,
                             _empty_mapping(
@@ -480,6 +500,12 @@ def _capture_one_core(
                                 redactions=redactions,
                             ),
                         )
+                    else:
+                        updated = dict(mapping)
+                        updated['empty_result'] = {
+                            'source_sha256': source_digest, 'suppression_revision': revision,
+                        }
+                        _write_mapping(mapping_path, updated)
             return None
         summary = filter_suppressed_text(generated_summary, hashes)
         if not summary.strip():
