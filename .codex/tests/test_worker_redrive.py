@@ -475,6 +475,48 @@ class RedriveDeadLetterTests(unittest.TestCase):
         self.assertEqual(result, 0)
         wake.assert_called_once_with(state, vault_root=vault)
 
+    def test_cli_redrive_all_wakes_recovered_stale_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            vault = root / "vault"
+            vault.mkdir()
+            job_id = "a" * 32
+            stale = _active_job(
+                state,
+                job_id,
+                "running",
+                payload={"reason": "stale"},
+                redriven_ts=None,
+            )
+            argv = [
+                "worker_supervisor.py",
+                "--vault",
+                str(vault),
+                "--state-dir",
+                str(state),
+                "--redrive",
+            ]
+            output = io.StringIO()
+            with (
+                mock.patch.object(workers.sys, "argv", argv),
+                mock.patch.object(workers, "ensure_supervisor") as wake,
+                mock.patch.object(
+                    workers, "_process_owner_is_active", return_value=False
+                ),
+                redirect_stdout(output),
+            ):
+                result = workers.main()
+
+            pending = state / "worker-jobs" / "pending" / stale.name
+            recovered = workers._load_job(pending)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(recovered["status"], "pending")
+        self.assertFalse(recovered.get("redriven_ts"))
+        wake.assert_called_once_with(state, vault_root=vault)
+        self.assertIn("stale işler toparlandı: 1", output.getvalue())
+
     def test_cli_redrive_retry_recovers_transition_and_wakes_supervisor(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1041,6 +1083,22 @@ class RedriveDeadLetterTests(unittest.TestCase):
         self.assertEqual(result, 0)
         wake.assert_not_called()
         self.assertIn(r"redrive zaten tamamland\u0131", output.getvalue())
+
+    def test_cli_help_is_safe_for_legacy_encoding(self) -> None:
+        output = _Cp1252Stdout()
+        with (
+            mock.patch.object(
+                workers.sys,
+                "argv",
+                ["worker_supervisor.py", "--help"],
+            ),
+            mock.patch.object(workers.sys, "stdout", output),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                workers.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("move dead-letter jobs to pending", output.getvalue())
 
     def test_cli_targeted_missing_job_returns_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

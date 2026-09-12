@@ -2289,18 +2289,20 @@ def _run_claimed_job(
             raise RuntimeError("worker-child-result-missing")
 
 
-def _has_pending_locked(state_dir: Path) -> bool:
+def _has_pending_locked(
+    state_dir: Path, *, job_id: str | None = None
+) -> bool:
     """Return whether any pending job exists while the queue lock is held."""
     for path in (_job_root(state_dir) / "pending").glob("*.json"):
         job = _load_job_quarantined(state_dir, path)
-        if job is not None:
+        if job is not None and (job_id is None or job["job_id"] == job_id):
             return True
     return False
 
 
-def _has_pending(state_dir: Path) -> bool:
+def _has_pending(state_dir: Path, *, job_id: str | None = None) -> bool:
     with locked(state_dir / "worker-queue"):
-        return _has_pending_locked(state_dir)
+        return _has_pending_locked(state_dir, job_id=job_id)
 
 
 def _settle_supervisor(
@@ -2494,7 +2496,7 @@ def main() -> int:
         nargs="?",
         const="all",
         metavar="JOB_ID",
-        help="dead-letter işlerini pending'e döndürür (tek iş için 32 hex kimlik)",
+        help="move dead-letter jobs to pending (single job: 32-hex ID)",
     )
     args = parser.parse_args()
     vault_root = args.vault.resolve(strict=True)
@@ -2503,10 +2505,17 @@ def main() -> int:
         target = None if args.redrive == "all" else args.redrive
         if target is not None and re.fullmatch(r"[0-9a-f]{32}", target) is None:
             raise ValueError("worker-redrive-job-id-invalid")
-        recover_stale_jobs(state_dir, job_id=target)
+        recovered = recover_stale_jobs(state_dir, job_id=target)
         redriven, skipped = redrive_dead_letter(state_dir, job_id=target)
         supervisor_state = "started"
-        if redriven and _has_pending_redrive(state_dir, job_id=target):
+        should_wake = (
+            redriven
+            and _has_pending_redrive(state_dir, job_id=target)
+        ) or (
+            recovered > 0
+            and _has_pending(state_dir, job_id=target)
+        )
+        if should_wake:
             if not ensure_supervisor(state_dir, vault_root=vault_root):
                 supervisor_state = _redrive_supervisor_state(state_dir)
         for identifier in redriven:
@@ -2528,7 +2537,10 @@ def main() -> int:
         for identifier, reason in skipped:
             print(_console_safe(f"atlandı: {identifier} — {reason}"))
         if not redriven and not skipped:
-            print(_console_safe("dead-letter boş ya da eşleşen iş yok"))
+            if recovered:
+                print(_console_safe(f"stale işler toparlandı: {recovered}"))
+            else:
+                print(_console_safe("dead-letter boş ya da eşleşen iş yok"))
         return 1 if (
             skipped
             or supervisor_state in {"deferred", "uncertain"}
