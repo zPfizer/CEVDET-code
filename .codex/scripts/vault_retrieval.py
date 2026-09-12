@@ -21,6 +21,7 @@ from urllib.parse import unquote, urlsplit
 import companion_memory
 from file_lock import LockUnavailable, locked
 from memory_ledger import (
+    _unquoted_request,
     MEMORY_READ_RULE,
     MemoryPreferenceError,
     MemoryRead,
@@ -30,7 +31,6 @@ from memory_ledger import (
 )
 from knowledge_schema import CLAIM_ROW, parse_frontmatter
 from profile_guard import PROFILE_RELATIVE
-from quote_grammar import QUOTED_CONTENT
 from state_store import atomic_write_text
 from vault_corpus import ARCHIVE_ROOT, TEMPLATES_ROOT, COMPANION_ROOT, DAILY_ROOT, RETRIEVAL_CONTENT_ROOTS, markdown_paths
 
@@ -215,7 +215,7 @@ HISTORY_TURKISH_DECISION_PAST = re.compile(
     r"m(?:isti|ustu)[mk]$"
 )
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
-    rf"(?ix)\b(?:daha\s+once|onceden)\b(?:[\s,]+\w+)*?\s+"
+    rf"(?ix)\b(?:daha\s+once|onceden)\b[^.!?;:\r\n]*?\s+"
     rf"(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b"
     rf"(?=\s*(?:\?|$|(?:ve|ile)\s+{CURRENT_QUERY_CUE}\b))"
 )
@@ -1567,11 +1567,10 @@ def _retrospective_question_terms(normalized: str) -> frozenset[str]:
 
 
 def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
-    quoted_spans = tuple((match.start(), match.end()) for match in QUOTED_CONTENT.finditer(normalized))
+    normalized = _unquoted_request(normalized, preserve_positions=True)
     return [
         match for match in HISTORY_TURKISH_RETROSPECTIVE_QUERY.finditer(normalized)
-        if not any(start <= match.start() < end for start, end in quoted_spans)
-        and (not match.group().endswith("neydi") or re.search(r"\bkarar\w*\b", match.group()))
+        if (not match.group().endswith("neydi") or re.search(r"\bkarar\w*\b", match.group()))
         and (
             normalized[match.end():].lstrip().startswith("?")
             or re.search(rf"\b(?:{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY}|neydi)$", match.group())
