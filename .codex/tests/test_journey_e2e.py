@@ -25,6 +25,11 @@ import uuid
 from _fixtures import CODEX_DIR
 
 CANNED_TODO = "Atlas planını yaz."
+TRANSCRIPT_MESSAGES = (
+    "Atlas projesine başlayalım; hızlı ve net ilerleyelim.",
+    "Atlas için ilk adım planı çıkarıyorum.",
+    "Tamam, planı yarın yazalım.",
+)
 CANNED_SUMMARY = f"""## Bağlam
 Kullanıcı Atlas hedefini konuştu.
 
@@ -73,6 +78,9 @@ def _write_stub_codex(root: Path) -> Path:
     script.write_text(
         "import sys\n"
         "raw = sys.stdin.buffer.read()\n"
+        f"expected = {TRANSCRIPT_MESSAGES!r}\n"
+        "if any(message not in raw.decode('utf-8') for message in expected):\n"
+        "    raise SystemExit('journey-transcript-missing')\n"
         "args = sys.argv[1:]\n"
         "target = None\n"
         "for index, value in enumerate(args):\n"
@@ -102,11 +110,11 @@ def _write_stub_codex(root: Path) -> Path:
 def _write_transcript(root: Path, session_id: str) -> Path:
     lines = [
         {"type": "event_msg", "payload": {"type": "user_message",
-         "message": "Atlas projesine başlayalım; hızlı ve net ilerleyelim."}},
+         "message": TRANSCRIPT_MESSAGES[0]}},
         {"type": "event_msg", "payload": {"type": "agent_message",
-         "message": "Atlas için ilk adım planı çıkarıyorum."}},
+         "message": TRANSCRIPT_MESSAGES[1]}},
         {"type": "event_msg", "payload": {"type": "user_message",
-         "message": "Tamam, planı yarın yazalım."}},
+         "message": TRANSCRIPT_MESSAGES[2]}},
     ]
     transcript = root / "sessions" / f"rollout-2026-09-11-{session_id}.jsonl"
     transcript.parent.mkdir(parents=True, exist_ok=True)
@@ -221,6 +229,23 @@ class JourneyE2ETests(unittest.TestCase):
         environment["CODEX_HOME"] = str(home)
         return environment
 
+    def test_model_stub_rejects_missing_transcript_content(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cevo-journey-stub-") as temporary:
+            root = Path(temporary)
+            _write_stub_codex(root)
+            output = root / "answer.md"
+            for prompt in ("unrelated input", "\n".join(TRANSCRIPT_MESSAGES[:-1])):
+                with self.subTest(prompt=prompt):
+                    result = subprocess.run(
+                        [sys.executable, str(root / "fake_codex.py"),
+                         "--output-last-message", str(output)],
+                        input=prompt, text=True, encoding="utf-8",
+                        capture_output=True, timeout=10, creationflags=FLAGS,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("journey-transcript-missing", result.stderr)
+                    self.assertFalse(output.exists())
+
     def test_full_memory_journey_survives_process_boundaries(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cevo-journey-", ignore_cleanup_errors=True) as temporary:
             root = Path(temporary)
@@ -334,10 +359,8 @@ class JourneyE2ETests(unittest.TestCase):
             # Salt okunur kapanış hiçbir iş kuyruklamaz: bekleme gerekmez,
             # dönüş anında ne hookin taşıyıcısı ne pending iş ne daily olmalı.
             self.assertEqual(list(state.glob("hookin-*.json")), [])
-            pending = state / "worker-jobs" / "pending"
-            self.assertEqual(
-                list(pending.glob("*.json")) if pending.is_dir() else [], []
-            )
+            self.assertEqual(list((state / "worker-jobs").glob("*/*.json")), [])
+            self.assertFalse((state / "worker-sequence.json").exists())
             self.assertFalse((vault / "daily" / f"{datetime.date.today().isoformat()}.md").exists())
 
 
