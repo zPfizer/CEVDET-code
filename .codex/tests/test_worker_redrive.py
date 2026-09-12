@@ -1,4 +1,6 @@
+import io
 import json
+from contextlib import redirect_stdout
 from pathlib import Path
 import tempfile
 import unittest
@@ -45,6 +47,31 @@ def _succeeded_job(state: Path, job_id: str, **overrides) -> Path:
     }
     record.update(overrides)
     path = state / "worker-jobs" / "succeeded" / f"job-{job_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return path
+
+
+def _active_job(state: Path, job_id: str, status: str, **overrides) -> Path:
+    record = {
+        "schema_version": 1,
+        "job_id": job_id,
+        "kind": "maintenance",
+        "status": status,
+        "generation": 4,
+        "attempt": 1,
+        "enqueue_sequence": 2,
+        "enqueued_ts": 1757400000,
+        "claimed_ts": 1757400001,
+        "running_ts": 1757400002,
+        "claim_token": "d" * 32,
+        "owner_pid": 1,
+        "lease_until": 1757500000,
+        "payload": {"reason": "retry"},
+        "redriven_ts": 1757500000,
+    }
+    record.update(overrides)
+    path = state / "worker-jobs" / status / f"job-{job_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record), encoding="utf-8")
     return path
@@ -299,6 +326,108 @@ class RedriveDeadLetterTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         wake.assert_called_once_with(state, vault_root=vault)
+
+    def test_cli_targeted_redrive_ignores_unrelated_invalid_dead_letter(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            vault = root / "vault"
+            vault.mkdir()
+            job_id = "a" * 32
+            unrelated_id = "b" * 32
+            _dead_letter_job(state, job_id, payload={"reason": "target"})
+            unrelated = (
+                state / "worker-jobs" / "dead-letter" / f"job-{unrelated_id}.json"
+            )
+            unrelated.write_text("{bozuk", encoding="utf-8")
+            argv = [
+                "worker_supervisor.py",
+                "--vault",
+                str(vault),
+                "--state-dir",
+                str(state),
+                "--redrive",
+                job_id,
+            ]
+            with (
+                mock.patch.object(workers.sys, "argv", argv),
+                mock.patch.object(workers, "ensure_supervisor") as wake,
+            ):
+                result = workers.main()
+
+            pending = state / "worker-jobs" / "pending" / f"job-{job_id}.json"
+            moved = pending.is_file()
+            unrelated_stayed = unrelated.is_file()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(moved)
+        self.assertTrue(unrelated_stayed)
+        wake.assert_called_once_with(state, vault_root=vault)
+
+    def test_cli_redrive_retry_recognizes_jobs_after_pending(self) -> None:
+        for status in ("claimed", "running", "succeeded"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                state = root / "state"
+                vault = root / "vault"
+                vault.mkdir()
+                job_id = "a" * 32
+                if status == "succeeded":
+                    _succeeded_job(
+                        state,
+                        job_id,
+                        payload={"reason": "retry"},
+                        redriven_ts=1757500000,
+                    )
+                else:
+                    _active_job(state, job_id, status)
+                argv = [
+                    "worker_supervisor.py",
+                    "--vault",
+                    str(vault),
+                    "--state-dir",
+                    str(state),
+                    "--redrive",
+                    job_id,
+                ]
+                output = io.StringIO()
+                with (
+                    mock.patch.object(workers.sys, "argv", argv),
+                    mock.patch.object(workers, "ensure_supervisor") as wake,
+                    mock.patch.object(
+                        workers, "_process_owner_is_active", return_value=True
+                    ),
+                    redirect_stdout(output),
+                ):
+                    result = workers.main()
+
+            self.assertEqual(result, 0)
+            wake.assert_not_called()
+            message = output.getvalue()
+            if status == "succeeded":
+                self.assertIn("redrive zaten tamamlandı", message)
+            else:
+                self.assertIn("redrive zaten sürüyor", message)
+
+    def test_redrive_does_not_duplicate_marked_active_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            job_id = "a" * 32
+            _active_job(state, job_id, "running")
+            dead_letter = _dead_letter_job(
+                state, job_id, payload={"reason": "stale-copy"}
+            )
+
+            redriven, skipped = workers.redrive_dead_letter(state, job_id=job_id)
+
+            pending = state / "worker-jobs" / "pending" / dead_letter.name
+            duplicate_pending = pending.exists()
+            dead_letter_stayed = dead_letter.is_file()
+
+        self.assertEqual(redriven, [job_id])
+        self.assertEqual(skipped, [])
+        self.assertFalse(duplicate_pending)
+        self.assertTrue(dead_letter_stayed)
 
     def test_cli_targeted_missing_job_returns_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

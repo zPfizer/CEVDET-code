@@ -1257,6 +1257,38 @@ def _has_verified_successor(root: Path, job: dict[str, Any]) -> bool:
     )
 
 
+def _has_redrive_marker(job: dict[str, Any]) -> bool:
+    marker = job.get("redriven_ts")
+    return isinstance(marker, int) and not isinstance(marker, bool)
+
+
+def _has_pending_redrive(state_dir: Path, *, job_id: str | None = None) -> bool:
+    with locked(state_dir / "worker-queue"):
+        for path in sorted((_job_root(state_dir) / "pending").glob("*.json")):
+            try:
+                job = _load_job(path)
+            except ValueError:
+                continue
+            if _has_redrive_marker(job) and (
+                job_id is None or job["job_id"] == job_id
+            ):
+                return True
+    return False
+
+
+def _redrive_state(state_dir: Path, job_id: str) -> str | None:
+    with locked(state_dir / "worker-queue"):
+        for state in ("pending", "claimed", "running", "succeeded"):
+            path = _job_root(state_dir) / state / f"job-{job_id}.json"
+            try:
+                job = _load_job(path)
+            except ValueError:
+                continue
+            if job["job_id"] == job_id and _has_redrive_marker(job):
+                return state
+    return None
+
+
 def inspect_worker_queue(state_dir: Path) -> dict[str, Any]:
     root = _job_root(state_dir)
     counts = {state: 0 for state in JOB_STATES}
@@ -1532,8 +1564,10 @@ def redrive_dead_letter(
 
     Kayıt yerinde güncellenip `os.replace` ile taşınır (recover_stale_jobs ile
     aynı kalıp); yarım kalan taşıma, kaydedilmiş `pending` durumundan mevcut
-    recovery yolu tarafından tamamlanır. Önceki redrive'dan kalan `pending`
-    kaydı da tekrar çalıştırmada tanınır ve supervisor yeniden uyandırılır.
+    recovery yolu tarafından tamamlanır. Önceki redrive'dan kalan `pending`,
+    `claimed`, `running` veya `succeeded` kaydı da aynı kimlikle tekrar
+    çalıştırmada tanınır; yalnızca hâlâ pending olan kayıt için supervisor
+    yeniden uyandırılır.
     Dead-letter zaten çözülmemiş iş sayıldığından taşıma admission bütçesini
     değiştirmez.
     """
@@ -1542,26 +1576,32 @@ def redrive_dead_letter(
     redriven: list[str] = []
     skipped: list[tuple[str, str]] = []
     with locked(state_dir / "worker-queue"):
-        for path in sorted((_job_root(state_dir) / "pending").glob("*.json")):
-            try:
-                job = _load_job(path)
-            except ValueError:
-                continue
-            redriven_ts = job.get("redriven_ts")
-            if (
-                not isinstance(redriven_ts, int)
-                or isinstance(redriven_ts, bool)
-                or (job_id is not None and job["job_id"] != job_id)
-            ):
-                continue
-            redriven.append(job["job_id"])
+        seen_redriven: set[str] = set()
+        for state in ("pending", "claimed", "running", "succeeded"):
+            for path in sorted((_job_root(state_dir) / state).glob("*.json")):
+                try:
+                    job = _load_job(path)
+                except ValueError:
+                    continue
+                if (
+                    _has_redrive_marker(job)
+                    and (job_id is None or job["job_id"] == job_id)
+                    and job["job_id"] not in seen_redriven
+                ):
+                    seen_redriven.add(job["job_id"])
+                    redriven.append(job["job_id"])
         for path in sorted((_job_root(state_dir) / "dead-letter").glob("*.json")):
+            if job_id is not None and _job_id_from_path(path) != job_id:
+                continue
             try:
                 job = _load_job(path)
             except ValueError as exc:
                 skipped.append((path.name, str(exc)))
                 continue
             if job_id is not None and job["job_id"] != job_id:
+                continue
+            if job["job_id"] in seen_redriven:
+                # A stale duplicate must never create a second executable record.
                 continue
             if _has_verified_successor(_job_root(state_dir), job):
                 skipped.append((job["job_id"], "zaten kurtarılmış"))
@@ -2160,10 +2200,18 @@ def main() -> int:
             raise ValueError("worker-redrive-job-id-invalid")
         recover_stale_jobs(state_dir)
         redriven, skipped = redrive_dead_letter(state_dir, job_id=target)
-        if redriven:
+        if redriven and _has_pending_redrive(state_dir, job_id=target):
             ensure_supervisor(state_dir, vault_root=vault_root)
         for identifier in redriven:
-            print(f"pending'e döndü: {identifier}")
+            current_state = _redrive_state(state_dir, identifier)
+            if current_state == "pending":
+                print(f"pending'e döndü: {identifier}")
+            elif current_state in {"claimed", "running"}:
+                print(f"redrive zaten sürüyor: {identifier}")
+            elif current_state == "succeeded":
+                print(f"redrive zaten tamamlandı: {identifier}")
+            else:
+                print(f"redrive kabul edildi: {identifier}")
         for identifier, reason in skipped:
             print(f"atlandı: {identifier} — {reason}")
         if not redriven and not skipped:
