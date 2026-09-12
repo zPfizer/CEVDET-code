@@ -414,17 +414,26 @@ class PublicationRecoveryTests(unittest.TestCase):
             staged.parent.mkdir()
             staged.write_text("yeni dosya\n", encoding="utf-8")
             destination = fixture.root / relative
-            real_rename = state_store.os.rename
+            real_publish = state_store.os.rename if os.name == "nt" else state_store.os.link
             calls = 0
 
-            def fail_before_rename(source: Path, target: Path) -> None:
+            def fail_before_publish(source: Path, target: Path) -> None:
                 nonlocal calls
                 calls += 1
-                if calls == 1:
+                if (
+                    os.name == "nt" and calls == 1
+                ) or (
+                    os.name != "nt" and Path(target) == destination
+                ):
                     raise OSError("injected-pre-rename-failure")
-                real_rename(source, target)
+                real_publish(source, target)
 
-            with mock.patch.object(state_store.os, "rename", side_effect=fail_before_rename):
+            publish_patch = mock.patch.object(
+                state_store.os,
+                "rename" if os.name == "nt" else "link",
+                side_effect=fail_before_publish,
+            )
+            with publish_patch:
                 with self.assertRaisesRegex(OSError, "pre-rename-failure"):
                     compiler._promote_changes(
                         fixture.stage,
