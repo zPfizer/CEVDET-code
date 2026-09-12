@@ -201,6 +201,17 @@ def _queue_idle(state: Path) -> bool:
     )
 
 
+def _successful_session_ends(state: Path) -> set[str]:
+    receipts = (state / "worker-jobs" / "succeeded").glob("*.json")
+    return {
+        job["job_id"]
+        for path in receipts
+        if (job := json.loads(path.read_text(encoding="utf-8")))["kind"] == "flush"
+        and job["status"] == "succeeded"
+        and job["payload"]["reason"] == "sessionend"
+    }
+
+
 class JourneyE2ETests(unittest.TestCase):
     """Yolculuklar süreç sınırlarını gerçek geçer; model stub'ı bile ikili."""
 
@@ -229,10 +240,13 @@ class JourneyE2ETests(unittest.TestCase):
 
             prompt = _run_hook(
                 vault, "user-prompt",
-                {**payload, "prompt": "Atlas projesine başlayalım; hızlı ilerleyelim."},
+                {"session_id": session_id, "cwd": str(vault),
+                 "prompt": "Atlas projesine başlayalım; hızlı ilerleyelim."},
                 environment,
             )
             self.assertEqual(prompt.returncode, 0, prompt.stderr)
+            # Prompt yalnız oturumu açar; kayıt session-end'den gelmeli.
+            self.assertEqual(list((state / "worker-jobs").glob("*/*.json")), [])
 
             ended = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(ended.returncode, 0, ended.stderr)
@@ -247,20 +261,29 @@ class JourneyE2ETests(unittest.TestCase):
                     return False
 
             self.assertTrue(
-                _wait_until(daily_has_summary, DAILY_TIMEOUT_SECONDS),
+                _wait_until(
+                    lambda: daily_has_summary() and bool(_successful_session_ends(state)),
+                    DAILY_TIMEOUT_SECONDS,
+                ),
                 "daily yazılmadı;\n"
                 + _debug_state(state)
                 + f"\nprompt-stdout: {prompt.stdout[:500]}"
                 + f"\nend-stdout: {ended.stdout[:500]}\nend-stderr: {ended.stderr[:500]}",
             )
+            first_receipts = _successful_session_ends(state)
+            self.assertEqual(len(first_receipts), 1)
 
             # Aynı kapanışın tekrarı ikinci bir kayıt üretmemeli (idempotency).
             repeated = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
             _drain_worker(vault, environment)
             self.assertTrue(
-                _wait_until(lambda: _queue_idle(state), DAILY_TIMEOUT_SECONDS),
-                "kuyruk boşalmadı",
+                _wait_until(
+                    lambda: _queue_idle(state)
+                    and bool(_successful_session_ends(state) - first_receipts),
+                    DAILY_TIMEOUT_SECONDS,
+                ),
+                "tekrar kapanış başarılı bir makbuz üretmedi;\n" + _debug_state(state),
             )
             self.assertEqual(
                 daily.read_text(encoding="utf-8").count(CANNED_TODO), 1
