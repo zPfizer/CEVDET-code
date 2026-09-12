@@ -472,6 +472,28 @@ class StaleReviewTests(unittest.TestCase):
             finally:
                 controls.unlink(missing_ok=True)
 
+    def test_custom_report_target_rejects_linked_parent_inside_vault(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            outside = root / "outside-output"
+            vault.mkdir()
+            outside.mkdir()
+            (vault / "knowledge" / "concepts").mkdir(parents=True)
+            parent = vault / "custom-output"
+            try:
+                parent.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            target = parent / "report.md"
+            try:
+                with self.assertRaisesRegex(ValueError, "report-target-invalid"):
+                    stale_review.write_report(vault, output=target)
+                self.assertFalse((outside / "report.md").exists())
+            finally:
+                parent.unlink(missing_ok=True)
+
     def test_report_stays_unwritten_when_compile_lock_is_busy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

@@ -68,6 +68,32 @@ def _default_report_target(vault: Path) -> Path:
     return target
 
 
+def _validate_report_target(vault: Path, target: Path) -> None:
+    lexical = target if target.is_absolute() else Path.cwd() / target
+    lexical = lexical.absolute()
+    try:
+        relative_parent = lexical.parent.relative_to(vault)
+    except ValueError:
+        return
+    current = vault
+    for part in relative_parent.parts:
+        current /= part
+        try:
+            current_stat = current.lstat()
+            resolved = current.resolve(strict=False)
+        except FileNotFoundError:
+            continue
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("report-target-invalid") from exc
+        if (
+            stat.S_ISLNK(current_stat.st_mode)
+            or not stat.S_ISDIR(current_stat.st_mode)
+            or current.is_junction()
+            or not resolved.is_relative_to(vault)
+        ):
+            raise ValueError("report-target-invalid")
+
+
 @dataclasses.dataclass(frozen=True)
 class StaleFinding:
     note: str
@@ -618,6 +644,7 @@ def write_report(
     private_root = vault / ".codex/private-memory"
     with locked(state_dir / "compile", timeout=0):
         target = output if output is not None else _default_report_target(vault)
+        _validate_report_target(vault, target)
         hashes = load_suppressed_hashes(private_root)
         with suppression_guard(private_root, hashes):
             with memory_read(vault) as memory:
