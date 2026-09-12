@@ -119,6 +119,25 @@ class KnowledgeSchemaPathTests(TestCase):
         self.assertEqual((report.concepts, report.connections, report.index_rows), (2, 1, 2))
         self.assertEqual(after, before)
 
+    def test_unclosed_index_row_fails_validation_and_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_control_tree(root)
+            index = root / "knowledge" / "index.md"
+            index.write_text(
+                index.read_text(encoding="utf-8").replace(
+                    "| [[concepts/ikinci\\|İkinci]] | Özet. | 2026-08-27.md | 2026-08-27 |",
+                    "| [[concepts/ikinci\\|",
+                ),
+                encoding="utf-8",
+            )
+
+            report = knowledge_schema.validate_knowledge_tree(root)
+
+        self.assertIn("knowledge/index.md:row", report.issues)
+        self.assertIn("knowledge/index.md:coverage", report.issues)
+        self.assertEqual(report.index_rows, 2)
+
     def test_escaped_connection_links_are_not_canonical_targets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
