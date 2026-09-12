@@ -669,6 +669,16 @@ class StaleReviewTests(unittest.TestCase):
                     finally:
                         alias.unlink(missing_ok=True)
 
+    def test_report_target_rejects_case_alias_to_protected_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _note(vault, "eski-not", updated="2026-01-02", sources=[])
+            target = vault / "DAILY" / "report.md"
+
+            with self.assertRaisesRegex(ValueError, "report-target-invalid"):
+                stale_review.write_report(vault, output=target)
+            self.assertFalse(target.exists())
+
     def test_report_parent_is_revalidated_before_publication(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

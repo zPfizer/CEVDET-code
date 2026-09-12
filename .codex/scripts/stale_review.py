@@ -44,6 +44,11 @@ _SAFE_SOURCE_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
 _NOTE_LINK_UNSAFE = frozenset("[]|#^\\`\r\n")
 
 
+def _path_component_key(value: str) -> str:
+    normalized = os.path.normcase(value).casefold()
+    return normalized.rstrip(" .") if os.name == "nt" else normalized
+
+
 def _default_report_target(vault: Path) -> Path:
     target = vault / REPORT_RELATIVE
     parent = target.parent
@@ -71,7 +76,17 @@ def _default_report_target(vault: Path) -> Path:
 def _validate_report_target(vault: Path, target: Path) -> None:
     lexical = target if target.is_absolute() else Path.cwd() / target
     lexical = lexical.absolute()
-    protected_roots = {DAILY_ROOT, KNOWLEDGE_ROOT, ".codex"}
+    protected_roots = {
+        _path_component_key(root)
+        for root in (DAILY_ROOT, KNOWLEDGE_ROOT, ".codex")
+    }
+
+    def protected(relative: Path) -> bool:
+        return (
+            bool(relative.parts)
+            and _path_component_key(relative.parts[0]) in protected_roots
+        )
+
     try:
         resolved_target = lexical.resolve(strict=False)
     except (OSError, RuntimeError) as exc:
@@ -83,20 +98,16 @@ def _validate_report_target(vault: Path, target: Path) -> None:
             resolved_relative = resolved_target.relative_to(vault)
         except ValueError:
             return
-        if resolved_relative.parts and resolved_relative.parts[0] in protected_roots:
+        if protected(resolved_relative):
             raise ValueError("report-target-invalid")
         return
-    if relative_target.parts and relative_target.parts[0] in protected_roots:
+    if protected(relative_target):
         raise ValueError("report-target-invalid")
     try:
         resolved_relative = resolved_target.relative_to(vault)
     except ValueError:
         resolved_relative = None
-    if (
-        resolved_relative is not None
-        and resolved_relative.parts
-        and resolved_relative.parts[0] in protected_roots
-    ):
+    if resolved_relative is not None and protected(resolved_relative):
         raise ValueError("report-target-invalid")
     relative_parent = lexical.parent.relative_to(vault)
     current = vault
