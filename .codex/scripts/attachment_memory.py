@@ -574,7 +574,11 @@ def _capture_one_core(
                     if not summary_only_rebuild:
                         return destination.relative_to(vault_root).with_suffix('').as_posix(), legacy_summary
 
-        generated_summary = _summary_from_model(summarize, visible)
+        try:
+            generated_summary = _summary_from_model(summarize, visible)
+        except Exception:
+            verify_source_snapshot()
+            raise
         verify_source_snapshot()
         if generated_summary is None:
             retain_empty_result()
