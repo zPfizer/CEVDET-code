@@ -1285,13 +1285,13 @@ def build_vault_map(
             }
     publication.check_knowledge_snapshot()
     if companion_names:
-        memory = MemoryRead(vault_root, frozenset())
-        for name, text in companion_memory.render_views(vault_root, memory=memory).items():
-            path = vault_root / COMPANION_ROOT / name
-            entry = _entry_from_text(path, path.relative_to(vault_root), text, memory=memory)
-            if entry is not None:
-                entries.append(entry)
-        document_frequency = _document_frequency(entries)
+        with memory_read(vault_root) as memory:
+            for name, text in companion_memory.render_views(vault_root, memory=memory).items():
+                path = vault_root / COMPANION_ROOT / name
+                entry = _entry_from_text(path, path.relative_to(vault_root), text, memory=memory)
+                if entry is not None:
+                    entries.append(entry)
+            document_frequency = _document_frequency(entries)
     publication.check_knowledge_snapshot()
     return VaultMap(
         entries,
