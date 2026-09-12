@@ -220,6 +220,7 @@ def replace_with_retry(
     before_replace: Callable[[], object] | None = None,
     expected_digest: str | None | object = _EXPECTED_DIGEST_UNSET,
     backup: Path | None = None,
+    on_marker_created: Callable[[], object] | None = None,
 ) -> None:
     """Replace without deleting the destination; bound Windows share retries."""
     try:
@@ -245,6 +246,8 @@ def replace_with_retry(
                     before_replace()
                 if not marker_created:
                     marker_created = _create_replacement_marker(source, backup)
+                    if marker_created and on_marker_created is not None:
+                        on_marker_created()
                 try:
                     os.rename(source, destination)
                     return
@@ -285,6 +288,8 @@ def replace_with_retry(
                 before_replace()
             if not marker_created:
                 marker_created = _create_replacement_marker(source, backup)
+                if marker_created and on_marker_created is not None:
+                    on_marker_created()
             try:
                 os.link(source, destination)
                 source.unlink(missing_ok=True)

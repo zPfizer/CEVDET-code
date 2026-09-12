@@ -13,6 +13,7 @@ import _fixtures  # noqa: F401
 import compile as compiler
 import compile_state
 import memory_ledger
+import state_store
 
 
 class PublicationFixture:
@@ -246,6 +247,37 @@ class PublicationRecoveryTests(unittest.TestCase):
                 "yeni günlük\n",
             )
 
+    def test_posix_recovery_keeps_legacy_after_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = PublicationFixture(Path(temporary))
+            real_copy = compiler._atomic_copy
+
+            def posix_replace(source: Path, destination: Path, **_: object) -> None:
+                os.replace(source, destination)
+
+            def crash_after_copy(*args: object, **kwargs: object) -> None:
+                real_copy(*args, **kwargs)
+                raise RuntimeError("injected-posix-publication-crash")
+
+            with mock.patch.object(compiler, "replace_with_retry", side_effect=posix_replace):
+                with mock.patch.object(compiler, "_atomic_copy", side_effect=crash_after_copy):
+                    with self.assertRaisesRegex(RuntimeError, "posix-publication-crash"):
+                        fixture.promote()
+
+            journal = compile_state.load_publication(fixture.state)
+            self.assertFalse(journal["targets"][0]["completed"])
+            self.assertFalse((fixture.root / journal["targets"][0]["backup_relative"]).exists())
+            class PosixOsView:
+                name = "posix"
+
+                def __getattr__(self, name: str) -> object:
+                    return getattr(os, name)
+
+            with mock.patch.object(compiler, "os", PosixOsView()):
+                recovered = compiler._recover_pending_publication(fixture.root, fixture.state)
+            self.assertEqual(recovered["status"], "complete")
+            self.assertTrue(recovered["targets"][0]["completed"])
+
     def test_recovery_accepts_crash_after_new_file_no_clobber(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = PublicationFixture(Path(temporary))
@@ -330,6 +362,141 @@ class PublicationRecoveryTests(unittest.TestCase):
             self.assertTrue(journal["targets"][0]["conflict"])
             self.assertTrue(backup.exists())
             self.assertEqual(destination.read_text(encoding="utf-8"), "yeni dosya\n")
+
+    def test_recovery_rejects_delete_after_new_file_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = PublicationFixture(Path(temporary))
+            relative = "knowledge/concepts/new.md"
+            staged = fixture.stage / relative
+            staged.parent.mkdir()
+            staged.write_text("yeni dosya\n", encoding="utf-8")
+            destination = fixture.root / relative
+            real_copy = compiler._atomic_copy
+
+            def crash_after_copy(*args: object, **kwargs: object) -> None:
+                real_copy(*args, **kwargs)
+                raise RuntimeError("injected-new-file-publication-crash")
+
+            with mock.patch.object(compiler, "_atomic_copy", side_effect=crash_after_copy):
+                with self.assertRaises(RuntimeError):
+                    compiler._promote_changes(
+                        fixture.stage,
+                        fixture.root,
+                        [relative],
+                        {relative: None},
+                        state_dir=fixture.state,
+                        source_relative=f"daily/{fixture.source.name}",
+                        source_digest=hashlib.sha256(fixture.source.read_bytes()).hexdigest(),
+                        source_size=fixture.source.stat().st_size,
+                        timestamp="2026-09-08T12:00:00+03:00",
+                        suppression_digest=compiler._suppression_digest(frozenset()),
+                    )
+
+            journal = compile_state.load_publication(fixture.state)
+            target = journal["targets"][0]
+            backup = fixture.root / target["backup_relative"]
+            destination.unlink()
+            self.assertTrue(backup.exists())
+
+            with self.assertRaisesRegex(
+                compile_state.PolicyError,
+                "publication-conflict-backup-exists",
+            ):
+                compiler._recover_pending_publication(fixture.root, fixture.state)
+            self.assertFalse(destination.exists())
+            self.assertTrue(backup.exists())
+
+    def test_recovery_keeps_same_hash_replaced_temporary_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = PublicationFixture(Path(temporary))
+            relative = "knowledge/concepts/new.md"
+            staged = fixture.stage / relative
+            staged.parent.mkdir()
+            staged.write_text("yeni dosya\n", encoding="utf-8")
+            destination = fixture.root / relative
+            real_rename = state_store.os.rename
+            calls = 0
+
+            def fail_before_rename(source: Path, target: Path) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise OSError("injected-pre-rename-failure")
+                real_rename(source, target)
+
+            with mock.patch.object(state_store.os, "rename", side_effect=fail_before_rename):
+                with self.assertRaisesRegex(OSError, "pre-rename-failure"):
+                    compiler._promote_changes(
+                        fixture.stage,
+                        fixture.root,
+                        [relative],
+                        {relative: None},
+                        state_dir=fixture.state,
+                        source_relative=f"daily/{fixture.source.name}",
+                        source_digest=hashlib.sha256(fixture.source.read_bytes()).hexdigest(),
+                        source_size=fixture.source.stat().st_size,
+                        timestamp="2026-09-08T12:00:00+03:00",
+                        suppression_digest=compiler._suppression_digest(frozenset()),
+                    )
+
+            journal = compile_state.load_publication(fixture.state)
+            target = journal["targets"][0]
+            marker = fixture.root / target["backup_relative"]
+            temporary_path = fixture.root / target["temporary_relative"]
+            marker.unlink()
+            replacement = temporary_path.with_name(temporary_path.name + ".external")
+            replacement.write_bytes(temporary_path.read_bytes())
+            os.replace(replacement, temporary_path)
+
+            with self.assertRaisesRegex(
+                compile_state.PolicyError,
+                "publication-target-ambiguous",
+            ):
+                compiler._recover_pending_publication(fixture.root, fixture.state)
+            self.assertTrue(temporary_path.exists())
+            self.assertFalse(destination.exists())
+
+    def test_legacy_missing_target_journal_with_backup_is_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = PublicationFixture(Path(temporary))
+            relative = "knowledge/concepts/new.md"
+            staged = fixture.stage / relative
+            staged.parent.mkdir()
+            staged.write_text("yeni dosya\n", encoding="utf-8")
+
+            def fail_publication(*args: object, **kwargs: object) -> None:
+                raise OSError("injected-publication-failure")
+
+            with mock.patch.object(compiler, "_atomic_copy", side_effect=fail_publication):
+                with self.assertRaises(OSError):
+                    compiler._promote_changes(
+                        fixture.stage,
+                        fixture.root,
+                        [relative],
+                        {relative: None},
+                        state_dir=fixture.state,
+                        source_relative=f"daily/{fixture.source.name}",
+                        source_digest=hashlib.sha256(fixture.source.read_bytes()).hexdigest(),
+                        source_size=fixture.source.stat().st_size,
+                        timestamp="2026-09-08T12:00:00+03:00",
+                        suppression_digest=compiler._suppression_digest(frozenset()),
+                    )
+
+            journal = compile_state.load_publication(fixture.state)
+            target = journal["targets"][0]
+            target.pop("temporary_relative", None)
+            target.pop("temporary_file_id", None)
+            target.pop("marker_created", None)
+            compile_state.save_publication(fixture.state, journal)
+            backup = fixture.root / target["backup_relative"]
+            backup.write_bytes(b"unattributed backup\n")
+
+            with self.assertRaisesRegex(
+                compile_state.PolicyError,
+                "publication-target-ambiguous",
+            ):
+                compiler._recover_pending_publication(fixture.root, fixture.state)
+            self.assertTrue(backup.exists())
 
     def test_unknown_target_drift_blocks_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -38,7 +38,125 @@ except BaseException as exc:
 """
 
 
+def _wait_for_text(path: Path, expected: str, timeout: float = 5) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if path.read_text(encoding="ascii") == expected:
+                return
+        except OSError:
+            pass
+        time.sleep(0.005)
+    raise AssertionError(f"{path.name} did not contain {expected!r}")
+
+
 class ExternalWriterProbeTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "requires a real Windows marker boundary")
+    def test_marker_failure_before_rename_is_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = PublicationFixture(root)
+            relative = "knowledge/concepts/new.md"
+            staged = fixture.stage / relative
+            staged.parent.mkdir()
+            staged.write_text("yeni dosya\n", encoding="utf-8")
+            destination = root / relative
+            real_marker = state_store._create_replacement_marker
+            calls = 0
+
+            def marker_then_fail(source: Path, marker: Path | None) -> bool:
+                nonlocal calls
+                calls += 1
+                created = real_marker(source, marker)
+                if calls == 1:
+                    raise PermissionError("synthetic pre-rename failure")
+                return created
+
+            with mock.patch.object(
+                state_store,
+                "_create_replacement_marker",
+                side_effect=marker_then_fail,
+            ):
+                with self.assertRaisesRegex(PermissionError, "pre-rename failure"):
+                    compiler._promote_changes(
+                        fixture.stage,
+                        root,
+                        [relative],
+                        {relative: None},
+                        state_dir=fixture.state,
+                        source_relative=f"daily/{fixture.source.name}",
+                        source_digest=state_store.sha256_file(fixture.source),
+                        source_size=fixture.source.stat().st_size,
+                        timestamp="2026-09-08T12:00:00+03:00",
+                        suppression_digest=compiler._suppression_digest(frozenset()),
+                    )
+                journal = compile_state.load_publication(fixture.state)
+                target = journal["targets"][0]
+                marker = root / target["backup_relative"]
+                temporary_path = root / target["temporary_relative"]
+                self.assertFalse(destination.exists())
+                self.assertEqual(
+                    target["temporary_file_id"],
+                    [temporary_path.stat().st_dev, temporary_path.stat().st_ino],
+                )
+                self.assertTrue(os.path.samefile(marker, temporary_path))
+
+                recovered = compiler._recover_pending_publication(root, fixture.state)
+                self.assertEqual(recovered["status"], "complete")
+                self.assertEqual(calls, 2)
+                self.assertEqual(destination.read_text(encoding="utf-8"), "yeni dosya\n")
+                self.assertFalse(marker.exists())
+                self.assertFalse(temporary_path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "requires a real Windows rename boundary")
+    def test_rename_failure_after_marker_is_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = PublicationFixture(root)
+            relative = "knowledge/concepts/new.md"
+            staged = fixture.stage / relative
+            staged.parent.mkdir()
+            staged.write_text("yeni dosya\n", encoding="utf-8")
+            destination = root / relative
+            real_rename = state_store.os.rename
+            calls = 0
+
+            def rename_then_fail(source: Path, target: Path) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise OSError("synthetic pre-rename failure")
+                real_rename(source, target)
+
+            with mock.patch.object(state_store.os, "rename", side_effect=rename_then_fail):
+                with self.assertRaisesRegex(OSError, "pre-rename failure"):
+                    compiler._promote_changes(
+                        fixture.stage,
+                        root,
+                        [relative],
+                        {relative: None},
+                        state_dir=fixture.state,
+                        source_relative=f"daily/{fixture.source.name}",
+                        source_digest=state_store.sha256_file(fixture.source),
+                        source_size=fixture.source.stat().st_size,
+                        timestamp="2026-09-08T12:00:00+03:00",
+                        suppression_digest=compiler._suppression_digest(frozenset()),
+                    )
+
+            journal = compile_state.load_publication(fixture.state)
+            target = journal["targets"][0]
+            marker = root / target["backup_relative"]
+            temporary_path = root / target["temporary_relative"]
+            self.assertFalse(destination.exists())
+            self.assertTrue(os.path.samefile(marker, temporary_path))
+
+            recovered = compiler._recover_pending_publication(root, fixture.state)
+            self.assertEqual(recovered["status"], "complete")
+            self.assertEqual(calls, 1)
+            self.assertEqual(destination.read_text(encoding="utf-8"), "yeni dosya\n")
+            self.assertFalse(marker.exists())
+            self.assertFalse(temporary_path.exists())
+
     @unittest.skipUnless(os.name == "nt", "requires a real Windows replacement boundary")
     def test_native_failure_after_replace_is_not_retried(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -133,10 +251,7 @@ class ExternalWriterProbeTests(unittest.TestCase):
                 if not triggered:
                     triggered = True
                     start.write_text("start", encoding="ascii")
-                    deadline = time.monotonic() + 5
-                    while not done.exists() and time.monotonic() < deadline:
-                        time.sleep(0.005)
-                    self.assertEqual(done.read_text(encoding="utf-8"), "done")
+                    _wait_for_text(done, "done")
 
             try:
                 with mock.patch.object(state_store, "_windows_replace", side_effect=replace):
@@ -178,12 +293,7 @@ class ExternalWriterProbeTests(unittest.TestCase):
                 if replaced.resolve() == destination.resolve() and not triggered:
                     triggered = True
                     start.write_text("start", encoding="ascii")
-                    deadline = time.monotonic() + 5
-                    while not done.exists() and time.monotonic() < deadline:
-                        time.sleep(0.005)
-                    if not done.exists():
-                        raise AssertionError("external writer did not finish")
-                    self.assertEqual(done.read_text(encoding="utf-8"), "done")
+                    _wait_for_text(done, "done")
                     self.assertEqual(destination.read_bytes(), expected)
                 real_replace(replaced, replacement, backup)
 
