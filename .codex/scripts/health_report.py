@@ -13,6 +13,7 @@ import json
 import math
 from pathlib import Path
 import re
+import stat
 from typing import Any, Sequence
 
 import compile_state
@@ -31,10 +32,42 @@ WORKER_STAGES = (
 DEAD_LETTER_LIMIT = 10
 MAX_RECORD_BYTES = 131072
 _HEALTH_STATUSES = frozenset({"error", "warning"})
+_DEAD_LETTER_REASONS = frozenset(
+    {
+        "legacy-failed",
+        "recovered-by-successor",
+        "retry-exhausted",
+        "unrecoverable-input",
+    }
+)
 _MAX_TIMESTAMP = datetime.datetime.max.replace(
     tzinfo=datetime.timezone.utc,
 ).timestamp()
 _CREATED = re.compile(r"(?m)^created: (?P<value>.+)$")
+
+
+def _default_report_target(vault: Path) -> Path:
+    target = vault / PANEL_RELATIVE
+    parent = target.parent
+    try:
+        parent_stat = parent.lstat()
+        if (
+            stat.S_ISLNK(parent_stat.st_mode)
+            or parent.is_junction()
+            or not stat.S_ISDIR(parent_stat.st_mode)
+        ):
+            raise ValueError("report-target-invalid")
+    except FileNotFoundError:
+        pass
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("report-target-invalid") from exc
+    try:
+        resolved_parent = parent.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("report-target-invalid") from exc
+    if not resolved_parent.is_relative_to(vault):
+        raise ValueError("report-target-invalid")
+    return target
 
 
 def _bounded_json(path: Path) -> dict[str, Any] | None:
@@ -47,6 +80,44 @@ def _bounded_json(path: Path) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
+def _unreadable_dead_letter_row() -> dict[str, Any]:
+    return {
+        "job_id": "?",
+        "kind": "?",
+        "terminal_reason": "?",
+        "finished_ts": None,
+    }
+
+
+def _dead_letter_row(path: Path) -> dict[str, Any]:
+    record = _bounded_json(path)
+    if record is None:
+        return _unreadable_dead_letter_row()
+    try:
+        from worker_supervisor import _validate_job
+
+        validation_record = record
+        try:
+            _validate_job(path, validation_record)
+        except ValueError:
+            # Timestamp formatting deliberately renders malformed values as
+            # unknown, while every other worker-schema violation is unreadable.
+            validation_record = dict(record)
+            validation_record["finished_ts"] = 0
+            _validate_job(path, validation_record)
+        terminal_reason = record.get("terminal_reason")
+        if not isinstance(terminal_reason, str) or terminal_reason not in _DEAD_LETTER_REASONS:
+            return _unreadable_dead_letter_row()
+    except (TypeError, ValueError):
+        return _unreadable_dead_letter_row()
+    return {
+        "job_id": record["job_id"][:8],
+        "kind": record["kind"],
+        "terminal_reason": terminal_reason,
+        "finished_ts": record.get("finished_ts"),
+    }
+
+
 def worker_counts(state_dir: Path) -> dict[str, int]:
     jobs = state_dir / "worker-jobs"
     return {stage: len(list((jobs / stage).glob("*.json"))) for stage in WORKER_STAGES}
@@ -55,15 +126,7 @@ def worker_counts(state_dir: Path) -> dict[str, int]:
 def dead_letter_rows(state_dir: Path) -> list[dict[str, Any]]:
     rows = []
     for path in (state_dir / "worker-jobs" / "dead-letter").glob("*.json"):
-        record = _bounded_json(path) or {}
-        rows.append(
-            {
-                "job_id": str(record.get("job_id", path.stem))[:8],
-                "kind": str(record.get("kind", "?")),
-                "terminal_reason": str(record.get("terminal_reason", "?")),
-                "finished_ts": record.get("finished_ts", 0),
-            }
-        )
+        rows.append(_dead_letter_row(path))
     rows.sort(key=lambda row: _timestamp_sort_key(row["finished_ts"]), reverse=True)
     return rows[:DEAD_LETTER_LIMIT]
 
@@ -92,8 +155,14 @@ def compile_summary(state_dir: Path) -> tuple[str, str]:
 
 def health_summary(state_dir: Path) -> str:
     path = state_dir / "health.json"
-    if not path.exists():
+    try:
+        path_stat = path.lstat()
+    except FileNotFoundError:
         return "kayıt yok (temiz)"
+    except OSError:
+        return "okunamadı"
+    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+        return "okunamadı"
     loaded = _bounded_json(path)
     if loaded is None:
         return "okunamadı"
@@ -239,7 +308,7 @@ def write_report(
     overwrite: bool = False,
 ) -> Path:
     vault = Path(vault).resolve()
-    target = output if output is not None else vault / PANEL_RELATIVE
+    target = output if output is not None else _default_report_target(vault)
     atomic_write_text(target, render(vault, now=now, output=target), overwrite=overwrite)
     return target
 
