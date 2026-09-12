@@ -24,7 +24,7 @@ from process_control import pid_is_alive
 from worker_supervisor import (
     STALE_HOOK_INPUT_SECONDS,
     SUPERVISOR_SCHEMA_VERSION,
-    _process_owner_is_active,
+    _process_owner_classification,
     inspect_worker_queue,
     has_unverified_process_tree,
 )
@@ -1127,6 +1127,13 @@ def _worker_delayed_job_check(ctx: Context) -> Check:
             or isinstance(receipt.get("owner_pid"), bool)
             or not isinstance(receipt.get("owner_pid"), int)
             or receipt["owner_pid"] < 0
+            or (
+                receipt.get("owner_identity") is not None
+                and (
+                    not isinstance(receipt["owner_identity"], str)
+                    or not receipt["owner_identity"]
+                )
+            )
             or _finite_timestamp(receipt.get("lease_until")) is None
             or _finite_timestamp(receipt.get("updated_ts")) is None
         ):
@@ -1134,11 +1141,19 @@ def _worker_delayed_job_check(ctx: Context) -> Check:
         supervisor = status
         if ready_pending and supervisor == "running":
             lease_until = _finite_timestamp(receipt["lease_until"])
-            if lease_until is None or not _process_owner_is_active(receipt):
+            ownership = _process_owner_classification(receipt)
+            if lease_until is None or ownership in {"inactive", "invalid", "mismatched"}:
                 return Check(
                     "Worker gecikmiş iş",
                     "FAIL",
                     "running supervisor ownership geçersiz",
+                )
+            if ownership == "unreadable":
+                return Check(
+                    "Worker gecikmiş iş",
+                    "WARN",
+                    f"ready-pending={ready_pending}; supervisor=running; "
+                    "ownership kanıtlanamadı",
                 )
     evidence = f"ready-pending={ready_pending}; supervisor={supervisor}"
     if ready_pending and supervisor == "idle":
