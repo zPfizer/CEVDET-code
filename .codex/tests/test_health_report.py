@@ -1,6 +1,7 @@
 import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import stat
 import tempfile
@@ -58,6 +59,77 @@ def _pending_record(job_id: str) -> dict[str, object]:
 
 
 class HealthReportTests(unittest.TestCase):
+    def test_custom_report_cannot_create_or_replace_source_and_runtime_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _seed_state(vault)
+            for name in ("daily", "knowledge", ".codex"):
+                target = vault / name / "report.md"
+                target.parent.mkdir(exist_ok=True)
+                with self.subTest(name=name, exists=False):
+                    with self.assertRaisesRegex(ValueError, "report-target-protected"):
+                        health_report.write_report(vault, target)
+                    self.assertFalse(target.exists())
+                target.write_bytes(b"preserve this source")
+                with self.subTest(name=name, exists=True):
+                    with self.assertRaisesRegex(ValueError, "report-target-protected"):
+                        health_report.write_report(vault, target, overwrite=True)
+                    self.assertEqual(target.read_bytes(), b"preserve this source")
+
+    def test_shared_worker_record_is_not_accepted_as_recovery_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            state = _seed_state(vault)
+            job_id = "a" * 32
+            source = root / "unrelated.json"
+            raw = json.dumps(_pending_record(job_id)).encode("utf-8")
+            source.write_bytes(raw)
+            os.link(source, state / "worker-jobs" / "pending" / f"job-{job_id}.json")
+            target = vault / "report.md"
+            with self.assertRaisesRegex(OSError, "worker-record-invalid"):
+                health_report.write_report(vault, target)
+            self.assertFalse(target.exists())
+            self.assertEqual(source.read_bytes(), raw)
+
+    def test_pending_or_invalid_publication_never_reports_compiler_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            for value, expected in (
+                ({"schema_version": 1, "status": "pending"}, "yayın kurtarma bekliyor"),
+                ({"schema_version": 1, "status": "complete"}, "yayın kurtarma bekliyor"),
+                ({"schema_version": 99, "status": "pending"}, "yayın kaydı doğrulanamadı"),
+            ):
+                with self.subTest(value=value):
+                    (state / "compile-publication.json").write_text(
+                        json.dumps(value), encoding="utf-8",
+                    )
+                    text = health_report.render(vault)
+                    self.assertIn(expected, text)
+                    self.assertNotIn("(durum: ok)", text)
+
+    def test_invalid_flush_receipt_prevents_report_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            session = "a" * 64
+            receipt = state / f"flush-{session}.json"
+            target = vault / "report.md"
+            valid = {
+                "schema_version": 2, "session_key": session, "status": "ok",
+                "ts": 1757500000, "generation": 1, "receipts": {},
+                "detail": "below-minimum-turns",
+            }
+            for raw in ("{broken", json.dumps({**valid, "schema_version": 3}),
+                        json.dumps({**valid, "session_key": "b" * 64}),
+                        json.dumps({**valid, "receipts": {"bad": {}}})):
+                with self.subTest(raw=raw):
+                    receipt.write_text(raw, encoding="utf-8")
+                    with self.assertRaisesRegex(OSError, "flush-state-invalid"):
+                        health_report.write_report(vault, target)
+                    self.assertFalse(target.exists())
+
     def test_report_reflects_queue_markers_and_dead_letter(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -108,8 +180,8 @@ class HealthReportTests(unittest.TestCase):
             _seed_state(vault)
             text = health_report.write_report(vault).read_text(encoding="utf-8")
 
-        self.assertIn("Boş — takılı iş yok.", text)
-        self.assertIn("kayıt yok (temiz)", text)
+        self.assertIn("Taranan kuyruklarda takılı iş saptanmadı.", text)
+        self.assertIn("Sağlık kaydı (health.json): kayıt yok", text)
         self.assertIn("Derleyici son çalışma: hiç", text)
 
     def test_unreadable_worker_directory_aborts_report(self) -> None:
@@ -255,7 +327,7 @@ class HealthReportTests(unittest.TestCase):
         self.assertIn("| pending | 1 |", text)
         self.assertIn("Worker temizleme fence'i etkin", text)
         self.assertIn("maintenance", text)
-        self.assertNotIn("Boş — takılı iş yok.", text)
+        self.assertNotIn("Taranan kuyruklarda takılı iş saptanmadı.", text)
 
     def test_invalid_queue_record_aborts_report(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -288,7 +360,7 @@ class HealthReportTests(unittest.TestCase):
 
         self.assertIn("| failed | 1 |", text)
         self.assertIn("Başarısız iş göçü bekliyor", text)
-        self.assertNotIn("Boş — takılı iş yok.", text)
+        self.assertNotIn("Taranan kuyruklarda takılı iş saptanmadı.", text)
 
     def test_quarantined_queue_record_is_not_reported_as_clean(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -319,7 +391,7 @@ class HealthReportTests(unittest.TestCase):
             )
 
         self.assertIn("Quarantine'da çözülemeyen iş var", text)
-        self.assertNotIn("Boş — takılı iş yok.", text)
+        self.assertNotIn("Taranan kuyruklarda takılı iş saptanmadı.", text)
 
     def test_quarantined_record_with_missing_payload_aborts_report(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -482,7 +554,7 @@ class HealthReportTests(unittest.TestCase):
 
         self.assertIn("Kurtarılmayı bekleyen hook girdisi: 1", text)
         self.assertIn("Worker kurtarma bekliyor", text)
-        self.assertNotIn("Boş — takılı iş yok.", text)
+        self.assertNotIn("Taranan kuyruklarda takılı iş saptanmadı.", text)
 
     def test_malformed_hook_input_aborts_report(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -522,7 +594,7 @@ class HealthReportTests(unittest.TestCase):
 
         self.assertIn("Süresi geçmiş çalışan iş: 1", text)
         self.assertIn("Süresi geçmiş çalışan iş var", text)
-        self.assertNotIn("Boş — takılı iş yok.", text)
+        self.assertNotIn("Taranan kuyruklarda takılı iş saptanmadı.", text)
 
     def test_reused_running_process_identity_prevents_clean_queue_claim(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -556,7 +628,7 @@ class HealthReportTests(unittest.TestCase):
                 )
 
         self.assertIn("Süresi geçmiş çalışan iş: 1", text)
-        self.assertNotIn("Boş — takılı iş yok.", text)
+        self.assertNotIn("Taranan kuyruklarda takılı iş saptanmadı.", text)
 
     def test_unreadable_running_process_identity_prevents_clean_queue_claim(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -590,7 +662,7 @@ class HealthReportTests(unittest.TestCase):
                 )
 
         self.assertIn("Süresi geçmiş çalışan iş: 1", text)
-        self.assertNotIn("Boş — takılı iş yok.", text)
+        self.assertNotIn("Taranan kuyruklarda takılı iş saptanmadı.", text)
 
     def test_expired_claimed_job_prevents_clean_queue_claim(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -623,7 +695,7 @@ class HealthReportTests(unittest.TestCase):
                 )
 
         self.assertIn("Süresi geçmiş çalışan iş: 1", text)
-        self.assertNotIn("Boş — takılı iş yok.", text)
+        self.assertNotIn("Taranan kuyruklarda takılı iş saptanmadı.", text)
 
     def test_custom_report_target_rejects_linked_parent_inside_vault(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -655,7 +727,12 @@ class HealthReportTests(unittest.TestCase):
                 (state / f"{prefix}{'c' * 64}.json").write_text(
                     "{}", encoding="utf-8"
                 )
-            (state / "flush-session.json").write_text("{}", encoding="utf-8")
+            session = "a" * 64
+            (state / f"flush-{session}.json").write_text(json.dumps({
+                "schema_version": 2, "session_key": session,
+                "status": "ok", "ts": 1757500000, "generation": 1,
+                "receipts": {}, "detail": "below-minimum-turns",
+            }), encoding="utf-8")
 
             self.assertEqual(health_report.flush_state_count(state), 1)
 
@@ -810,7 +887,7 @@ class HealthReportTests(unittest.TestCase):
             )
 
         self.assertIn("| dead-letter | 0 |", text)
-        self.assertIn("Boş — takılı iş yok.", text)
+        self.assertIn("Taranan kuyruklarda takılı iş saptanmadı.", text)
         self.assertNotIn("Takılı iş var", text)
 
     def test_malformed_recovered_dead_letter_stays_visible(self) -> None:

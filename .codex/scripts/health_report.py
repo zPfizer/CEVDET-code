@@ -16,6 +16,7 @@ import math
 from pathlib import Path
 import re
 import stat
+import time
 from typing import Any, Sequence
 
 import compile_state
@@ -86,6 +87,9 @@ def _default_report_target(vault: Path) -> Path:
 def _validate_report_target(vault: Path, target: Path) -> None:
     lexical = target if target.is_absolute() else Path.cwd() / target
     lexical = lexical.absolute()
+    for candidate in (lexical, lexical.resolve(strict=False)):
+        if any(candidate.is_relative_to(vault / name) for name in ("daily", "knowledge", ".codex")):
+            raise ValueError("report-target-protected")
     try:
         relative_parent = lexical.parent.relative_to(vault)
     except ValueError:
@@ -319,7 +323,7 @@ def _json_files(
             path_stat = path.lstat()
         except (OSError, RuntimeError) as exc:
             raise OSError(f"{error_prefix}-record-unreadable") from exc
-        if not stat.S_ISREG(path_stat.st_mode):
+        if not stat.S_ISREG(path_stat.st_mode) or getattr(path_stat, "st_nlink", 1) != 1:
             raise OSError(f"{error_prefix}-record-invalid")
         files.append(path)
     return tuple(sorted(files))
@@ -464,6 +468,12 @@ def marker_counts(state_dir: Path) -> dict[str, int]:
 
 
 def compile_summary(state_dir: Path) -> tuple[str, str]:
+    try:
+        if compile_state.load_publication(state_dir) is not None:
+            return "?", "yayın kurtarma bekliyor"
+        compile_state.load_publication_token(state_dir)
+    except compile_state.PolicyError:
+        return "?", "yayın kaydı doğrulanamadı"
     path = compile_state.state_file(state_dir)
     try:
         path_stat = path.lstat()
@@ -471,6 +481,8 @@ def compile_summary(state_dir: Path) -> tuple[str, str]:
         path_stat = None
     except (OSError, RuntimeError):
         return "?", "okunamadı"
+    if path_stat is None:
+        return "hiç", "kayıt yok"
     if path_stat is not None and (
         stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode)
     ):
@@ -500,7 +512,7 @@ def health_summary(state_dir: Path) -> str:
     try:
         path_stat = path.lstat()
     except FileNotFoundError:
-        return "kayıt yok (temiz)"
+        return "kayıt yok"
     except OSError:
         return "okunamadı"
     if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
@@ -524,19 +536,27 @@ def health_summary(state_dir: Path) -> str:
     errors = sum(1 for entry in components.values() if isinstance(entry, dict) and entry.get("status") == "error")
     warnings = sum(1 for entry in components.values() if isinstance(entry, dict) and entry.get("status") == "warning")
     if not errors and not warnings:
-        return "temiz"
+        return "kayıtlı hata veya uyarı yok"
     return f"hata={errors} uyarı={warnings}"
 
 
-def flush_state_count(state_dir: Path) -> int:
-    return sum(
-        1
+def flush_state_count(state_dir: Path, *, now: float | None = None) -> int:
+    from doctor import check_flush_state
+
+    paths = [
+        path
         for path in _json_files(state_dir, error_prefix="state")
         if path.name.startswith("flush-")
         and not path.name.startswith(
             ("flush-coverage-", "flush-batch-", "flush-index-")
         )
-    )
+    ]
+    if any(_bounded_json(path) is None for path in paths):
+        raise OSError("flush-state-invalid")
+    report = check_flush_state(state_dir, time.time() if now is None else now)
+    if report.status != "OK":
+        raise OSError("flush-state-invalid-or-stale")
+    return len(paths)
 
 
 def _timestamp_value(value: Any) -> float | None:
@@ -687,14 +707,14 @@ def render(
             f"{orphan_hook_inputs} hook girdisi kuyruğa alınmayı bekliyor."
         )
     else:
-        lines.append("Boş — takılı iş yok.")
+        lines.append("Taranan kuyruklarda takılı iş saptanmadı.")
     lines += [
         "",
         "## İşaretler ve durum",
         "",
         f"- Aktif read-only işareti: {markers['read_only']}",
         f"- Aktif session-only işareti: {markers['session_only']}",
-        f"- Flush durum dosyası: {flush_state_count(state_dir)}",
+        f"- Flush durum dosyası: {flush_state_count(state_dir, now=moment.timestamp())}",
         f"- Kurtarılmayı bekleyen hook girdisi: {orphan_hook_inputs}",
         f"- Süresi geçmiş çalışan iş: {stale_running}",
         f"- Derleyici son çalışma: {last_run} (durum: {last_status})",
