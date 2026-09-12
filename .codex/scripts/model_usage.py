@@ -30,6 +30,28 @@ MAX_METRIC_VALUE = 1_000_000_000_000
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
 
 
+def _valid_metric(value: Any) -> bool:
+    return type(value) is int and 0 <= value <= MAX_METRIC_VALUE
+
+
+def _valid_record(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and type(value.get("schema")) is int
+        and value["schema"] == SCHEMA_VERSION
+        and isinstance(value.get("purpose"), str)
+        and bool(value["purpose"].strip())
+        and isinstance(value.get("outcome"), str)
+        and bool(value["outcome"].strip())
+        and _valid_metric(value.get("prompt_chars"))
+        and _valid_metric(value.get("duration_ms"))
+        and (
+            "result_chars" not in value
+            or _valid_metric(value["result_chars"])
+        )
+    )
+
+
 def _usage_path(state_dir: Path, day: datetime.date) -> Path:
     return state_dir / f"model-usage-{day.strftime('%Y%m%d')}.jsonl"
 
@@ -253,11 +275,7 @@ def _iter_records(
                     except (UnicodeError, ValueError):
                         yield None
                         continue
-                    if (
-                        isinstance(value, dict)
-                        and type(value.get("schema")) is int
-                        and value["schema"] == SCHEMA_VERSION
-                    ):
+                    if _valid_record(value):
                         yield value
                     else:
                         yield None
@@ -289,19 +307,9 @@ def usage_summary(
         if entry is None:
             incomplete = True
             continue
-        try:
-            prompt_chars = int(entry.get("prompt_chars", 0) or 0)
-            duration_ms = int(entry.get("duration_ms", 0) or 0)
-        except (TypeError, ValueError, OverflowError):
-            incomplete = True
-            continue
-        if not (
-            0 <= prompt_chars <= MAX_METRIC_VALUE
-            and 0 <= duration_ms <= MAX_METRIC_VALUE
-        ):
-            incomplete = True
-            continue
-        purpose = str(entry.get("purpose", "unknown"))
+        prompt_chars = entry["prompt_chars"]
+        duration_ms = entry["duration_ms"]
+        purpose = entry["purpose"]
         bucket = summary.setdefault(
             purpose,
             {"calls": 0, "ok": 0, "failed": 0, "prompt_chars": 0, "duration_ms": 0},

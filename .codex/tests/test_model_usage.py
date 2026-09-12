@@ -466,6 +466,55 @@ class ModelUsageTests(unittest.TestCase):
         self.assertEqual(summary["compile"]["duration_ms"], 5)
         self.assertTrue(incomplete)
 
+    def test_summary_skips_records_with_missing_or_invalid_summary_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            ledger = state / "model-usage-20260911.jsonl"
+            valid = {
+                "schema": 1,
+                "purpose": "compile",
+                "prompt_chars": 10,
+                "duration_ms": 5,
+                "outcome": "ok",
+            }
+            missing_purpose = {key: value for key, value in valid.items() if key != "purpose"}
+            missing_outcome = {key: value for key, value in valid.items() if key != "outcome"}
+            missing_prompt = {key: value for key, value in valid.items() if key != "prompt_chars"}
+            missing_duration = {key: value for key, value in valid.items() if key != "duration_ms"}
+            invalid_purpose = {**valid, "purpose": 7}
+            invalid_outcome = {**valid, "outcome": False}
+            invalid_prompt = {**valid, "prompt_chars": True}
+            invalid_duration = {**valid, "duration_ms": float("inf")}
+            ledger.write_text(
+                "\n".join(json.dumps(item) for item in (
+                    valid,
+                    missing_purpose,
+                    missing_outcome,
+                    missing_prompt,
+                    missing_duration,
+                    invalid_purpose,
+                    invalid_outcome,
+                    invalid_prompt,
+                    invalid_duration,
+                )) + "\n",
+                encoding="utf-8",
+            )
+
+            summary, incomplete = model_usage.usage_summary(
+                state, days=7, now=datetime.datetime(2026, 9, 11, 12, 0)
+            )
+
+        self.assertEqual(summary, {
+            "compile": {
+                "calls": 1,
+                "ok": 1,
+                "failed": 0,
+                "prompt_chars": 10,
+                "duration_ms": 5,
+            },
+        })
+        self.assertTrue(incomplete)
+
     def test_run_exec_keeps_result_when_usage_lock_is_contended(self) -> None:
         cases = (
             ("success", ("answer", None), None),
