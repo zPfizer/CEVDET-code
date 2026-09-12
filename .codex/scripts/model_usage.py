@@ -50,12 +50,16 @@ def _prune(state_dir: Path, today: datetime.date) -> None:
 
 
 def _unsafe_usage_target(path: Path) -> bool:
-    """Refuse links, reparse points, and non-files before append can follow them."""
+    """Refuse linked or shared files before append/read can follow them."""
     try:
         path_stat = path.lstat()
     except FileNotFoundError:
         return False
-    return _link_or_reparse(path_stat) or not stat.S_ISREG(path_stat.st_mode)
+    return (
+        _link_or_reparse(path_stat)
+        or not stat.S_ISREG(path_stat.st_mode)
+        or getattr(path_stat, "st_nlink", 1) != 1
+    )
 
 
 def _link_or_reparse(path_stat: os.stat_result) -> bool:

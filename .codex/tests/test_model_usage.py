@@ -236,6 +236,33 @@ class ModelUsageTests(unittest.TestCase):
             )
             self.assertTrue(ledger.is_symlink())
 
+    def test_record_and_summary_drop_hardlinked_daily_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir()
+            outside = root / "outside.jsonl"
+            outside.write_text("sentinel\n", encoding="utf-8")
+            ledger = state / "model-usage-20260911.jsonl"
+            try:
+                os.link(outside, ledger)
+            except OSError as exc:
+                self.skipTest(f"hard link unavailable: {exc}")
+
+            model_usage.record(
+                state,
+                purpose="compile",
+                prompt_chars=10,
+                duration_ms=5,
+                outcome="ok",
+                now=datetime.datetime(2026, 9, 11, 12, 0),
+            )
+            summary = model_usage.usage_summary(
+                state, days=7, now=datetime.datetime(2026, 9, 11, 12, 0)
+            )
+            self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel\n")
+            self.assertEqual(summary, {})
+
     def test_record_drops_symlinked_lock_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
