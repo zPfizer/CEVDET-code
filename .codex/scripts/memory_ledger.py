@@ -1576,10 +1576,14 @@ def _checked_suppression_lock_handle(private_root: Path, handle: object) -> None
 
 
 def _read_suppression_lines(private_root: Path, path: Path) -> list[str]:
-    if not path.exists():
-        return []
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        handle = path.open("r", encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeError) as exc:
+        raise MemoryPreferenceError("memory-suppression-unreadable") from exc
+    try:
+        with handle:
             _checked_suppression_path(private_root)
             opened = os.fstat(handle.fileno())
             current = path.lstat()
@@ -1590,8 +1594,6 @@ def _read_suppression_lines(private_root: Path, path: Path) -> list[str]:
             ):
                 raise MemoryPreferenceError("memory-suppression-path-invalid")
             return handle.read().splitlines()
-    except FileNotFoundError:
-        return []
     except MemoryPreferenceError:
         raise
     except (OSError, UnicodeError) as exc:

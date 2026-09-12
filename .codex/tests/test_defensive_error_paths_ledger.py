@@ -216,6 +216,20 @@ class SuppressionEdges(unittest.TestCase):
             with self.assertRaises(memory_ledger.MemoryPreferenceError):
                 memory_ledger.load_suppressed_hashes(private)
 
+    def test_suppression_ledger_open_errors_do_not_mean_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary)
+            controls = private / "controls"
+            controls.mkdir()
+            ledger = controls / "suppressions.jsonl"
+            ledger.write_text("", encoding="utf-8")
+            with mock.patch.object(Path, "open", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(
+                    memory_ledger.MemoryPreferenceError,
+                    "memory-suppression-unreadable",
+                ):
+                    memory_ledger.load_suppressed_hashes(private)
+
     def test_repeated_suppression_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             private = Path(temporary)
