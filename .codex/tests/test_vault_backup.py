@@ -193,6 +193,20 @@ class VaultBackupTests(unittest.TestCase):
             with self.assertRaises(vault_backup.BackupError):
                 vault_backup.create_bundle(vault, root / "yedek")
 
+    def test_linked_worktree_heads_are_included_in_bundle_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            linked = root / "linked"
+            dest = root / "yedek"
+            _init_repo(vault)
+            _git(vault, "worktree", "add", "-q", str(linked))
+
+            bundle = vault_backup.create_bundle(vault, dest)
+
+            heads = _git(vault, "bundle", "list-heads", str(bundle)).stdout.splitlines()
+            self.assertTrue(any(" worktrees/" in line and line.endswith("/HEAD") for line in heads))
+
     def test_shallow_repository_is_rejected_before_bundle_publish(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -363,6 +377,35 @@ class VaultBackupTests(unittest.TestCase):
 
             self.assertTrue(valid.exists())
             self.assertTrue(corrupt.exists())
+
+    def test_prune_fails_closed_on_foreign_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            foreign_vault = root / "foreign"
+            dest = root / "yedek"
+            foreign_dest = root / "foreign-yedek"
+            _init_repo(vault)
+            _init_repo(foreign_vault)
+            (foreign_vault / "not.md").write_text("başka depo", encoding="utf-8")
+            _git(foreign_vault, "add", "not.md")
+            _git(
+                foreign_vault,
+                "-c", "user.name=test",
+                "-c", "user.email=test@example.invalid",
+                "commit", "-q", "-m", "başka",
+            )
+
+            valid = vault_backup.create_bundle(vault, dest, now=1_758_000_000)
+            foreign = vault_backup.create_bundle(foreign_vault, foreign_dest)
+            copied = valid.parent / "vault-20990101-000000.bundle"
+            copied.write_bytes(foreign.read_bytes())
+
+            with self.assertRaises(vault_backup.BackupError):
+                vault_backup.prune_bundles(dest, keep=1, vault=vault)
+
+            self.assertTrue(valid.exists())
+            self.assertTrue(copied.exists())
 
     def test_clock_rollback_keeps_current_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -120,6 +120,33 @@ def _ref_snapshot(repo: Path) -> dict[str, str]:
         ref, object_name = line.split(maxsplit=1)
         snapshot[ref] = object_name
     snapshot["HEAD"] = _git(repo, "rev-parse", "--verify", "HEAD").stdout.strip()
+    worktrees_text = _git(repo, "rev-parse", "--git-path", "worktrees").stdout.strip()
+    worktrees = Path(worktrees_text)
+    if not worktrees.is_absolute():
+        worktrees = repo / worktrees
+    if worktrees.is_dir():
+        try:
+            entries = list(worktrees.iterdir())
+        except OSError as error:
+            raise BackupError(f"linked worktree HEAD'leri okunamadı: {worktrees}") from error
+        for entry in entries:
+            head_file = entry / "HEAD"
+            if not head_file.is_file():
+                continue
+            try:
+                head = head_file.read_text(encoding="utf-8").strip()
+            except OSError as error:
+                raise BackupError(f"linked worktree HEAD'i okunamadı: {head_file}") from error
+            if head.startswith("ref: "):
+                ref = head[5:].strip()
+                if not ref.startswith("refs/"):
+                    raise BackupError(f"linked worktree HEAD ref'i geçersiz: {head_file}")
+                object_name = _git(repo, "rev-parse", "--verify", ref).stdout.strip()
+            elif re.fullmatch(r"[0-9a-fA-F]{40}", head):
+                object_name = head.lower()
+            else:
+                raise BackupError(f"linked worktree HEAD'i geçersiz: {head_file}")
+            snapshot[f"worktrees/{entry.name}/HEAD"] = object_name
     return snapshot
 
 
@@ -129,6 +156,8 @@ def _bundle_ref_snapshot(repo: Path, bundle: Path) -> dict[str, str]:
     try:
         for line in lines:
             object_name, ref = line.split(maxsplit=1)
+            if ref == "main-worktree/HEAD":
+                ref = "HEAD"
             snapshot[ref] = object_name
     except ValueError as error:
         raise BackupError(f"bundle ref'leri okunamadı: {bundle}") from error
@@ -302,6 +331,8 @@ def _validate_keep(keep: int) -> None:
 def _verify_bundle(vault: Path, bundle: Path) -> None:
     try:
         _validate_bundle_artifact(vault, bundle)
+        for object_name in set(_bundle_ref_snapshot(vault, bundle).values()):
+            _git(vault, "cat-file", "-e", f"{object_name}^{{commit}}")
     except BackupError as error:
         raise BackupError(f"yedek bundle doğrulanamadı: {bundle}") from error
 
