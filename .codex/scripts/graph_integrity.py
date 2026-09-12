@@ -6,6 +6,7 @@ import re
 from typing import Sequence
 
 from knowledge_schema import (
+    _FENCE_LINE,
     _connects,
     _is_escaped,
     _source_status,
@@ -31,7 +32,6 @@ _DAILY_HEADING = re.compile(r"(?m)^[ \t]{0,3}#[ \t]+Günlük Log:[^\r\n]*\r?$")
 _CONNECTION_HEADING = re.compile(
     r"(?m)^[ \t]{0,3}##[ \t]+Bağlantı[ \t]*(?:#+[ \t]*)?\r?$"
 )
-_FENCE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 
 
 def _blank(chars: list[str], start: int, end: int) -> None:
@@ -100,16 +100,20 @@ def _markdown_body(
     for index, (start, end, _line_end, content) in enumerate(lines):
         if index <= frontmatter_end:
             continue
+        fence = _FENCE_LINE.fullmatch(content)
         if fence_char is not None:
             _blank(chars, start, end)
-            if re.fullmatch(
-                rf"[ ]{{0,3}}{re.escape(fence_char)}{{{fence_length},}}[ \t]*",
-                content,
+            if (
+                fence is not None
+                and fence.group(1)[0] == fence_char
+                and len(fence.group(1)) >= fence_length
+                and not fence.group(2).strip()
             ):
                 fence_char = None
             continue
-        fence = _FENCE.match(content)
         if fence is not None:
+            if fence.group(1)[0] == '`' and '`' in fence.group(2):
+                continue
             fence_char = fence.group(1)[0]
             fence_length = len(fence.group(1))
             _blank(chars, start, end)

@@ -159,6 +159,23 @@ class ProfileGuardTests(unittest.TestCase):
 
                     self.assertIn("profile-preference-missing", profile_guard.check_profile(root, text))
 
+    def test_section_masking_and_heading_discovery_agree_on_tab_fences(self) -> None:
+        preference = next(line for line in PROFILE_TEXT.splitlines() if line.startswith('- Türkçe'))
+        for opening, closing in ((' ```markdown', '\t```'), ('\t```markdown', ' ```')):
+            with self.subTest(opening=opening, closing=closing), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                seed_profile(root)
+                text = (
+                    '---\nupdated: 2026-09-05\n---\n'
+                    '## Oturum Portresi\n\nKısa portre.\n'
+                    f'{opening}\nÖrnek.\n{closing}\n\n'
+                    "## Vault'ta çalışma ve yanıt tarzı\n\n"
+                    f'## Diğer\n\n{preference}\n'
+                )
+                self.assertIn('profile-preference-missing', profile_guard.check_profile(root, text))
+                self.assertNotIn('## Diğer', profile_guard.portrait(text))
+                self.assertNotIn("## Vault'ta", profile_guard.portrait(text))
+
     def test_real_duplicate_portrait_headings_remain_invalid(self) -> None:
         duplicate = PROFILE_TEXT.replace(
             "Kısa ve doğal bir oturum özeti.",
