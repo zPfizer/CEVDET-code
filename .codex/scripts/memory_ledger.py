@@ -14,9 +14,9 @@ import tokenize
 from typing import Callable, Iterator, Sequence
 import unicodedata
 
-from file_lock import locked, timeout_for_deadline
+from file_lock import LockUnavailable, locked, timeout_for_deadline
 from compile_state import PolicyError, PublicationSnapshot, require_publication_snapshot
-from state_store import _pinned_windows_directory, atomic_write_text
+from state_store import _is_windows_share_error, _pinned_windows_directory, atomic_write_text
 from profile_guard import PROFILE_RELATIVE, _reparse, check_profile
 from quote_grammar import QUOTED_CASE_SUFFIX, QUOTED_CONTENT
 from user_evidence import filter_evidence, USER_LINK, proof_for_link
@@ -1484,11 +1484,19 @@ def _checked_suppression_path(private_root: Path) -> Path:
     return path
 
 
+class _SuppressionDirectoryBusy(OSError):
+    """Another writer still holds the checked directory entry."""
+
+
 @contextmanager
-def _suppression_controls_scope(private_root: Path) -> Iterator[Path]:
+def _suppression_controls_scope(
+    private_root: Path,
+    *,
+    pin_directory: bool = True,
+) -> Iterator[Path]:
     path = _checked_suppression_path(private_root)
     controls = path.parent
-    if os.name != "nt" or not controls.exists():
+    if not pin_directory or os.name != "nt" or not controls.exists():
         yield path
         return
     with ExitStack() as stack:
@@ -1505,9 +1513,49 @@ def _suppression_controls_scope(private_root: Path) -> Iterator[Path]:
                     raise ValueError("suppression directory identity changed")
         except MemoryPreferenceError:
             raise
-        except (OSError, RuntimeError, ValueError) as exc:
+        except OSError as exc:
+            if _is_windows_share_error(exc):
+                raise _SuppressionDirectoryBusy("suppression directory busy") from exc
+            raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
+        except (RuntimeError, ValueError) as exc:
             raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
         yield path
+
+
+@contextmanager
+def _suppression_write_scope(
+    private_root: Path,
+    *,
+    timeout: float | None,
+) -> Iterator[tuple[Path, object]]:
+    path = _checked_suppression_path(private_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        stack = ExitStack()
+        try:
+            path = stack.enter_context(_suppression_controls_scope(private_root))
+        except _SuppressionDirectoryBusy:
+            stack.close()
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LockUnavailable("lock-busy")
+                time.sleep(min(0.05, remaining))
+            else:
+                time.sleep(0.05)
+            continue
+        with stack:
+            lock_timeout = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            with locked(path, timeout=lock_timeout) as lock_handle:
+                _checked_suppression_path(private_root)
+                _checked_suppression_lock_handle(private_root, lock_handle)
+                yield path, lock_handle
+                return
 
 
 def _checked_suppression_lock_handle(private_root: Path, handle: object) -> None:
@@ -1569,7 +1617,7 @@ def _suppression_hashes_from_lines(lines: Sequence[str]) -> frozenset[str]:
 
 
 def load_suppressed_hashes(private_root: Path) -> frozenset[str]:
-    with _suppression_controls_scope(private_root) as path:
+    with _suppression_controls_scope(private_root, pin_directory=False) as path:
         # Writers atomically replace the file; read-only callers need no lock file.
         return _suppression_hashes_from_lines(
             _read_suppression_lines(private_root, path)
@@ -1948,16 +1996,11 @@ def suppression_guard(
     timeout: float | None = None,
 ) -> Iterator[None]:
     """Fence a short publication against a concurrent forget request."""
-    path = _checked_suppression_path(private_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _suppression_controls_scope(private_root) as path:
-        with locked(path, timeout=timeout) as lock_handle:
-            _checked_suppression_path(private_root)
-            _checked_suppression_lock_handle(private_root, lock_handle)
-            lines = _read_suppression_lines(private_root, path)
-            if _suppression_hashes_from_lines(lines) != expected:
-                raise ValueError('memory-preferences-changed')
-            yield
+    with _suppression_write_scope(private_root, timeout=timeout) as (path, _lock_handle):
+        lines = _read_suppression_lines(private_root, path)
+        if _suppression_hashes_from_lines(lines) != expected:
+            raise ValueError('memory-preferences-changed')
+        yield
 
 
 def suppress_derived_memory(
@@ -1968,41 +2011,39 @@ def suppress_derived_memory(
     deadline: float | None = None,
 ) -> Path:
     target_hash = memory_text_hash(target)
-    path = _checked_suppression_path(private_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _suppression_controls_scope(private_root) as path:
-        with locked(path, timeout=timeout_for_deadline(deadline)) as lock_handle:
-            _checked_suppression_path(private_root)
-            _checked_suppression_lock_handle(private_root, lock_handle)
+    with _suppression_write_scope(
+        private_root,
+        timeout=timeout_for_deadline(deadline),
+    ) as (path, _lock_handle):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("memory-suppression-deadline")
+        lines = _read_suppression_lines(private_root, path)
+        if target_hash in _suppression_hashes_from_lines(lines):
+            return path
+        record = {
+            "schema": SUPPRESSION_SCHEMA,
+            "ts": int(dt.datetime.now().timestamp() if now is None else now),
+            "target_sha256": target_hash,
+        }
+        # Cached read targets must stop exposing the unit before accepting the rule.
+        views = _checked_views_dir(private_root)
+        for view in views.glob('*.md'):
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("memory-suppression-deadline")
-            lines = _read_suppression_lines(private_root, path)
-            if target_hash in _suppression_hashes_from_lines(lines):
-                return path
-            record = {
-                "schema": SUPPRESSION_SCHEMA,
-                "ts": int(dt.datetime.now().timestamp() if now is None else now),
-                "target_sha256": target_hash,
-            }
-            # Cached read targets must stop exposing the unit before accepting the rule.
-            views = _checked_views_dir(private_root)
-            for view in views.glob('*.md'):
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise TimeoutError("memory-suppression-deadline")
-                if view.is_symlink() or view.resolve() != views.resolve() / view.name:
-                    raise MemoryPreferenceError('memory-view-path-invalid')
-                if not re.fullmatch(r'[0-9a-f]{64}\.md', view.name):
-                    raise MemoryPreferenceError('memory-view-owner-unknown')
-                # Links were rewritten in views, so source hashes cannot safely edit them.
-                # Invalidate; the next search rebuilds from the unchanged raw sources.
-                atomic_write_text(
-                    view,
-                    '[Hafıza görünümü güncel değil; yeni arama gerekli.]\n',
-                    deadline=deadline,
-                )
-            lines.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-            if deadline is not None and time.monotonic() >= deadline:
-                raise TimeoutError("memory-suppression-deadline")
-            _checked_suppression_path(private_root)
-            atomic_write_text(path, '\n'.join(lines) + '\n', deadline=deadline)
+            if view.is_symlink() or view.resolve() != views.resolve() / view.name:
+                raise MemoryPreferenceError('memory-view-path-invalid')
+            if not re.fullmatch(r'[0-9a-f]{64}\.md', view.name):
+                raise MemoryPreferenceError('memory-view-owner-unknown')
+            # Links were rewritten in views, so source hashes cannot safely edit them.
+            # Invalidate; the next search rebuilds from the unchanged raw sources.
+            atomic_write_text(
+                view,
+                '[Hafıza görünümü güncel değil; yeni arama gerekli.]\n',
+                deadline=deadline,
+            )
+        lines.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("memory-suppression-deadline")
+        _checked_suppression_path(private_root)
+        atomic_write_text(path, '\n'.join(lines) + '\n', deadline=deadline)
     return path
