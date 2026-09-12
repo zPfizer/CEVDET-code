@@ -24,8 +24,7 @@ from process_control import pid_is_alive
 from worker_supervisor import (
     STALE_HOOK_INPUT_SECONDS,
     SUPERVISOR_SCHEMA_VERSION,
-    _process_owner_is_active,
-    owner_identity_unreadable,
+    _process_owner_classification,
     inspect_worker_queue,
     has_unverified_process_tree,
 )
@@ -1142,13 +1141,14 @@ def _worker_delayed_job_check(ctx: Context) -> Check:
         supervisor = status
         if ready_pending and supervisor == "running":
             lease_until = _finite_timestamp(receipt["lease_until"])
-            if lease_until is None or not _process_owner_is_active(receipt):
+            ownership = _process_owner_classification(receipt)
+            if lease_until is None or ownership in {"inactive", "invalid", "mismatched"}:
                 return Check(
                     "Worker gecikmiş iş",
                     "FAIL",
                     "running supervisor ownership geçersiz",
                 )
-            if owner_identity_unreadable(receipt):
+            if ownership == "unreadable":
                 return Check(
                     "Worker gecikmiş iş",
                     "WARN",

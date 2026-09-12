@@ -364,6 +364,44 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("ownership", check.evidence)
         self.assertIn("ready-pending=1", check.evidence)
 
+    def test_doctor_uses_one_supervisor_birth_identity_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            pending = state / "worker-jobs" / "pending"
+            pending.mkdir(parents=True)
+            (pending / "job-ready.json").write_text(
+                json.dumps({"status": "pending", "next_attempt_ts": 90}),
+                encoding="utf-8",
+            )
+            (state / "worker-supervisor.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": workers.SUPERVISOR_SCHEMA_VERSION,
+                        "status": "running",
+                        "generation": 1,
+                        "launch_token": "",
+                        "owner_pid": os.getpid(),
+                        "owner_identity": "win32:recorded-at-launch",
+                        "lease_until": 99,
+                        "updated_ts": 100,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                process_control,
+                "process_identity",
+                side_effect=[None, "win32:reused-pid"],
+            ) as identity:
+                check = doctor._worker_delayed_job_check(
+                    doctor.Context(state_dir=state, now=100)
+                )
+
+        self.assertEqual(identity.call_count, 1)
+        self.assertEqual(check.status, "WARN")
+        self.assertIn("ownership", check.evidence)
+
     def test_doctor_accepts_running_supervisor_with_readable_matching_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
