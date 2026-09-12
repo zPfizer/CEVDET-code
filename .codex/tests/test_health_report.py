@@ -221,10 +221,9 @@ class HealthReportTests(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(ValueError, "report-target-invalid"):
                     health_report.write_report(vault)
+                self.assertFalse(target.exists())
             finally:
                 parent.unlink(missing_ok=True)
-
-        self.assertFalse(target.exists())
 
     def test_dangling_health_record_is_reported_as_unreadable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
