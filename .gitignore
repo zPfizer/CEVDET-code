@@ -66,6 +66,7 @@
 !/.codex/scripts/tag_taxonomy.py
 !/.codex/scripts/transcript_index.py
 !/.codex/scripts/user_evidence.py
+!/.codex/scripts/vault_backup.py
 !/.codex/scripts/vault_corpus.py
 !/.codex/scripts/vault_retrieval.py
 !/.codex/scripts/worker_supervisor.py
@@ -150,6 +151,7 @@
 !/.codex/tests/test_state_store.py
 !/.codex/tests/test_transcript_index.py
 !/.codex/tests/test_user_evidence.py
+!/.codex/tests/test_vault_backup.py
 !/.codex/tests/test_vault_contract.py
 !/.codex/tests/test_vault_corpus.py
 !/.codex/tests/test_vault_ingestion_slice_a.py
