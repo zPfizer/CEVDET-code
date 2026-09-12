@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from _fixtures import CODEX_DIR  # noqa: F401
 import health_report
@@ -105,6 +106,38 @@ class HealthReportTests(unittest.TestCase):
         self.assertIn("| inf-job | ? | ? |", text)
         self.assertIn("| huge-job | ? | ? |", text)
 
+    def test_default_report_write_does_not_clobber_existing_user_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _seed_state(vault)
+            target = vault / health_report.PANEL_RELATIVE
+            original = b"# Kullanici paneli\r\nEk not\r\n"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(original)
+
+            with self.assertRaises(FileExistsError):
+                health_report.write_report(vault)
+            preserved = target.read_bytes()
+
+        self.assertEqual(preserved, original)
+
+    def test_cli_overwrite_replaces_existing_report_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _seed_state(vault)
+            target = vault / "report.md"
+            target.write_text("kullanici notu\n", encoding="utf-8")
+
+            with mock.patch("builtins.print"):
+                result = health_report.main(
+                    ["--vault", str(vault), "--output", str(target), "--overwrite"]
+                )
+            text = target.read_text(encoding="utf-8")
+
+        self.assertEqual(result, 0)
+        self.assertIn("Cevo Sağlık", text)
+        self.assertNotIn("kullanici notu", text)
+
     def test_rewrite_preserves_created_date(self) -> None:
         # `created` alanı notun kimliğidir; panel her üretimde bugüne
         # kaymamalı, ilk üretim tarihinde sabit kalmalı.
@@ -113,13 +146,16 @@ class HealthReportTests(unittest.TestCase):
             _seed_state(vault)
             first = datetime.datetime(2026, 1, 1, 9, 0)
             health_report.write_report(vault, now=first)
+            target = vault / health_report.PANEL_RELATIVE
+            target.write_bytes(target.read_bytes() + b"\nKullanici eki\n")
             second = datetime.datetime(2026, 9, 11, 9, 0)
-            text = health_report.write_report(vault, now=second).read_text(
+            text = health_report.write_report(vault, now=second, overwrite=True).read_text(
                 encoding="utf-8"
             )
 
         self.assertIn("created: 2026-01-01", text)
         self.assertIn("updated: 2026-09-11", text)
+        self.assertNotIn("Kullanici eki", text)
 
 
 if __name__ == "__main__":

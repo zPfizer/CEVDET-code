@@ -218,10 +218,11 @@ def write_report(
     output: Path | None = None,
     *,
     now: datetime.datetime | None = None,
+    overwrite: bool = False,
 ) -> Path:
     vault = Path(vault).resolve()
     target = output if output is not None else vault / PANEL_RELATIVE
-    atomic_write_text(target, render(vault, now=now))
+    atomic_write_text(target, render(vault, now=now), overwrite=overwrite)
     return target
 
 
@@ -229,8 +230,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vault", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace an existing report target",
+    )
     args = parser.parse_args(argv)
-    target = write_report(args.vault, args.output)
+    target = write_report(args.vault, args.output, overwrite=args.overwrite)
     print(f"Panel yazıldı: {target}")
     return 0
 
