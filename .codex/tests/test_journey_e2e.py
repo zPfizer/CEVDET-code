@@ -363,12 +363,13 @@ class JourneyE2ETests(unittest.TestCase):
             # Prompt yalnız oturumu açar; kayıt session-end'den gelmeli.
             self.assertEqual(list((state / "worker-jobs").glob("*/*.json")), [])
 
+            event_date = datetime.date.today().isoformat()
             ended = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(ended.returncode, 0, ended.stderr)
             self._assert_session_end_succeeded(state, session_id)
             _drain_worker(vault, environment)
 
-            daily = vault / "daily" / f"{datetime.date.today().isoformat()}.md"
+            daily = vault / "daily" / f"{event_date}.md"
 
             def daily_has_summary() -> bool:
                 try:
@@ -416,7 +417,7 @@ class JourneyE2ETests(unittest.TestCase):
                 evidence_record,
             )
             evidence_link = (
-                f"[[daily/{datetime.date.today().isoformat()}#user-"
+                f"[[daily/{event_date}#user-"
                 f"{evidence_record['id']}|Kullanıcı dayanağı; kapsam: project]]"
             )
             self.assertIn(evidence_link, daily_text)
@@ -461,6 +462,8 @@ class JourneyE2ETests(unittest.TestCase):
                 emitted["hookSpecificOutput"]["hookEventName"], "SessionStart"
             )
             self.assertIn(CANNED_TODO, context)
+            self.assertIn(CANNED_CLAIM, context)
+            self.assertIn(evidence_link, context)
 
     def test_read_only_turn_blocks_the_whole_write_chain(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cevo-journey-ro-", ignore_cleanup_errors=True) as temporary:
