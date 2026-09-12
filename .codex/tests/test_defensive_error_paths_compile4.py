@@ -932,6 +932,10 @@ class RunAndFailureArms(unittest.TestCase):
             state = Path(temporary)
             bozuk = CompileState(ingested={"daily/api_key=abc12345.md": "x"})
             memory_compile._record_failure(state, bozuk, "x.md", "policy")
+            self.assertFalse((state / compile_state.STATE_NAME).exists())
+            for path in state.rglob("*"):
+                if path.is_file():
+                    self.assertNotIn(b"api_key=abc12345", path.read_bytes())
 
             temiz = CompileState()
             with mock.patch.object(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import datetime as dt
 import io
 import json
@@ -395,12 +394,17 @@ class CompanionArms(unittest.TestCase):
             (root / "🔮 850-Companion").mkdir()
             state = root / ".codex/scripts/.state"
             state.mkdir(parents=True)
-            with contextlib.suppress(ValueError):
-                companion_memory.publish(
-                    root, state, summary,
-                    dt.datetime(2026, 9, 11, 10, 0),
-                    "a" * 64, "s", frozenset(),
-                )
+            companion_memory.publish(
+                root, state, summary,
+                dt.datetime(2026, 9, 11, 10, 0),
+                "a" * 64, "s", frozenset(),
+            )
+            catalog = json.loads(
+                (root / companion_memory.CANONICAL_RELATIVE).read_text(encoding="utf-8")
+            )
+            record = catalog["records"][companion_memory.session_scope("s")]
+            self.assertEqual(record["event"], NOW.isoformat())
+            self.assertEqual(record["key"], "a" * 64)
 
 
 class LedgerArms(unittest.TestCase):
