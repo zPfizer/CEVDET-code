@@ -252,9 +252,11 @@ def _validate_worker_records(
                         or getattr(payload_stat, "st_nlink", 1) != 1
                         or payload_path.is_junction()
                         or not payload_resolved.is_relative_to(path.parent)
-                        or hashlib.sha256(payload_path.read_bytes()).hexdigest()
-                        != validated["payload_sha256"]
                     ):
+                        raise ValueError("worker-quarantine-payload-invalid")
+                    with payload_path.open("rb") as payload_file:
+                        digest = hashlib.file_digest(payload_file, "sha256").hexdigest()
+                    if digest != validated["payload_sha256"]:
                         raise ValueError("worker-quarantine-payload-invalid")
         except (OSError, TypeError, UnicodeError, ValueError):
             raise OSError("worker-record-invalid") from None
