@@ -96,6 +96,48 @@ class HealthReportTests(unittest.TestCase):
         self.assertIn("kayıt yok (temiz)", text)
         self.assertIn("Derleyici son çalışma: hiç", text)
 
+    def test_unreadable_worker_directory_aborts_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _seed_state(vault)
+            target = vault / "report.md"
+            with mock.patch.object(Path, "iterdir", side_effect=PermissionError):
+                with self.assertRaisesRegex(OSError, "worker-directory-unreadable"):
+                    health_report.write_report(vault, target)
+            self.assertFalse(target.exists())
+
+    def test_invalid_compile_metadata_is_not_published(self) -> None:
+        cases = (
+            {"last_run": "bozuk\nprivate-run", "last_status": "ok"},
+            {"last_run": "2026-09-10T12:00:00", "last_status": "bad\nprivate-status"},
+            {"last_run": "2026-09-10T12:00:00", "last_status": ["ok"]},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            for metadata in cases:
+                with self.subTest(metadata=metadata):
+                    (state / "compile-state.json").write_text(
+                        json.dumps(
+                            {
+                                "ingested": {},
+                                "cursor": "",
+                                "last_run": metadata["last_run"],
+                                "last_status": metadata["last_status"],
+                                "runs": [],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    text = health_report.render(
+                        vault, now=datetime.datetime(2026, 9, 11)
+                    )
+
+                    self.assertIn(
+                        "Derleyici son çalışma: ? (durum: bozuk kayıt)", text
+                    )
+                    self.assertNotIn("private-", text)
+
     def test_invalid_health_component_is_reported_as_unreadable(self) -> None:
         cases = (
             {"compile:global": ["malformed"]},

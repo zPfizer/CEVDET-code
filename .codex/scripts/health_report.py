@@ -44,6 +44,7 @@ _MAX_TIMESTAMP = datetime.datetime.max.replace(
     tzinfo=datetime.timezone.utc,
 ).timestamp()
 _CREATED = re.compile(r"(?m)^created: (?P<value>.+)$")
+_COMPILE_STATUS = re.compile(r"(?:ok|fail:[A-Za-z0-9][A-Za-z0-9._:-]{0,127})\Z")
 
 
 def _default_report_target(vault: Path) -> Path:
@@ -120,12 +121,42 @@ def _dead_letter_row(path: Path) -> dict[str, Any]:
 
 def worker_counts(state_dir: Path) -> dict[str, int]:
     jobs = state_dir / "worker-jobs"
-    return {stage: len(list((jobs / stage).glob("*.json"))) for stage in WORKER_STAGES}
+    return {stage: len(_json_files(jobs / stage)) for stage in WORKER_STAGES}
+
+
+def _json_files(directory: Path) -> tuple[Path, ...]:
+    try:
+        directory_stat = directory.lstat()
+    except FileNotFoundError:
+        return ()
+    except (OSError, RuntimeError) as exc:
+        raise OSError("worker-directory-unreadable") from exc
+    if (
+        stat.S_ISLNK(directory_stat.st_mode)
+        or not stat.S_ISDIR(directory_stat.st_mode)
+        or directory.is_junction()
+    ):
+        raise OSError("worker-directory-invalid")
+    try:
+        entries = tuple(directory.iterdir())
+    except (OSError, RuntimeError) as exc:
+        raise OSError("worker-directory-unreadable") from exc
+    files = []
+    for path in entries:
+        if path.suffix != ".json":
+            continue
+        try:
+            path_stat = path.lstat()
+        except (OSError, RuntimeError) as exc:
+            raise OSError("worker-record-unreadable") from exc
+        if stat.S_ISREG(path_stat.st_mode):
+            files.append(path)
+    return tuple(sorted(files))
 
 
 def dead_letter_rows(state_dir: Path) -> list[dict[str, Any]]:
     rows = []
-    for path in (state_dir / "worker-jobs" / "dead-letter").glob("*.json"):
+    for path in _json_files(state_dir / "worker-jobs" / "dead-letter"):
         rows.append(_dead_letter_row(path))
     rows.sort(key=lambda row: _timestamp_sort_key(row["finished_ts"]), reverse=True)
     return rows[:DEAD_LETTER_LIMIT]
@@ -150,7 +181,18 @@ def compile_summary(state_dir: Path) -> tuple[str, str]:
         state = compile_state.load(state_dir)
     except compile_state.PolicyError:
         return "?", "bozuk kayıt"
-    return state.last_run or "hiç", state.last_status
+    last_run = state.last_run
+    last_status = state.last_status
+    if not isinstance(last_run, str) or not isinstance(last_status, str):
+        return "?", "bozuk kayıt"
+    if last_run:
+        try:
+            datetime.datetime.fromisoformat(last_run)
+        except ValueError:
+            return "?", "bozuk kayıt"
+    if _COMPILE_STATUS.fullmatch(last_status) is None:
+        return "?", "bozuk kayıt"
+    return last_run or "hiç", last_status
 
 
 def health_summary(state_dir: Path) -> str:
