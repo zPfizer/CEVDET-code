@@ -57,7 +57,10 @@ CREDENTIAL = re.compile(
     r'''(?P<value>[{\[]|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|(?:\\[\s\S]|[^\s\\])+)'''
 )
 BATCH_CREDENTIAL_NAME = rf'(?i:api[_-]?key|password|secret|token|{_ENV_CREDENTIAL_NAME_BODY})'
-_BATCH_COMMAND_PREFIX = r'(?:^[ \t]*@?[ \t]*|(?<=[&|<>()])[ \t]*@?[ \t]*)set[ \t]+'
+_BATCH_COMMAND_PREFIX = (
+    r'(?:^[ \t]*@?[ \t]*|(?<=[&|<>()])[ \t]*@?[ \t]*|'
+    r'^[ \t]*@?(?:if\b[^\r\n]*?[ \t]|for\b[^\r\n]*?\bdo[ \t]+)@?[ \t]*)set[ \t]+'
+)
 BATCH_CREDENTIAL = re.compile(
     r'''(?im)(?P<prefix>''' + _BATCH_COMMAND_PREFIX + r'''(?P<quote>["']))(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')\s*=\s*'''
     r'''(?P<value>(?:(?!(?P=quote))[^\r\n])*)(?P=quote)'''
@@ -69,13 +72,13 @@ BATCH_CREDENTIAL_UNQUOTED = re.compile(
     r'''(?im)(?P<prefix>''' + _BATCH_COMMAND_PREFIX + r''')(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
 )
 BATCH_ASSIGNMENT_PREFIX = re.compile(
-    r'''(?im)(?:^[ \t]*@?[ \t]*|(?<=[&|<>()])[ \t]*@?[ \t]*)set[ \t]+["']?\Z'''
+    r'''(?im)''' + _BATCH_COMMAND_PREFIX + r'''["']?\Z'''
 )
 POWERSHELL_CREDENTIAL = re.compile(
-    r'''(?im)(?P<prefix>\$(?i:env):[ \t]*)(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')'''
-    r'''(?P<assignment>[ \t]*=[ \t]*)'''
+    r'''(?im)(?P<prefix>\$(?:(?i:env):[ \t]*|\{(?i:env):[ \t]*))'''
+    r'''(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')(?P<closing>\}?)(?P<assignment>[ \t]*=[ \t]*)'''
 )
-POWERSHELL_ASSIGNMENT_PREFIX = re.compile(r'''(?im)\$(?i:env):[ \t]*\Z''')
+POWERSHELL_ASSIGNMENT_PREFIX = re.compile(r'''(?im)(?:\$(?i:env):|\$\{(?i:env):)[ \t]*\Z''')
 TOKEN_PREFIX = re.compile(r"\b(?:sk(?=[-_])|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
 PERSONAL_CREDENTIAL = re.compile(
     r"(?i)\b(?:api\s+anahtarım|parolam|şifrem|tokenım)\b"
@@ -708,9 +711,10 @@ def _quoted_credential_value_end(
     *,
     shell_segments: bool = False,
 ) -> int | None:
-    if text[start:start + 1] not in {'"', "'"}:
+    ansi_c = text[start:start + 2] == "$'"
+    if not ansi_c and text[start:start + 1] not in {'"', "'"}:
         return None
-    cursor = start
+    cursor = start + 1 if ansi_c else start
     while cursor < len(text):
         quote = text[cursor]
         escaped = False
@@ -839,6 +843,15 @@ def _powershell_credential_value_end(text: str, start: int) -> int | None:
             return statement_end(index)
         index += 1
     return index
+
+
+def _replace_powershell_credential(match: re.Match[str]) -> str:
+    if match.group('prefix').startswith('${') and not match.group('closing'):
+        raise MemoryPreferenceError('memory-credential-container-unverifiable')
+    return (
+        f'{match.group("prefix")}{match.group("key")}'
+        f'{match.group("closing")}{match.group("assignment")}<REDACTED>'
+    )
 
 
 def _json_regions(text: str) -> Iterator[tuple[int, int]]:
@@ -1108,10 +1121,7 @@ def sanitize_text(
     )
     replace_outside_json_values(
         POWERSHELL_CREDENTIAL,
-        lambda match: (
-            f'{match.group("prefix")}{match.group("key")}'
-            f'{match.group("assignment")}<REDACTED>'
-        ),
+        _replace_powershell_credential,
         "credential",
         lambda match: _powershell_credential_value_end(text, match.end()),
     )
@@ -1141,10 +1151,13 @@ def sanitize_text(
             search_cursor = json_string[1]
             continue
         end = match.end()
-        if text[match.start('value')] in {'"', "'"}:
+        value_start = match.start('value')
+        if (text[value_start] in {'"', "'"}
+                or (match.group('prefix').rstrip().endswith('=')
+                    and text[value_start:value_start + 2] == "$'")):
             quoted_end = _quoted_credential_value_end(
                 text,
-                match.start('value'),
+                value_start,
                 shell_segments=match.group('prefix').rstrip().endswith('='),
             )
             if quoted_end is None:

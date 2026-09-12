@@ -532,6 +532,19 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertNotIn('FIRST_SECRET', sanitized)
                 self.assertNotIn('SECOND_SECRET', sanitized)
 
+    def test_powershell_braced_environment_credential_names_are_redacted(self) -> None:
+        text = '${env:Database_Password} = "FIRST_SECRET SECOND_SECRET"'
+
+        sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+
+        self.assertEqual(
+            sanitized,
+            '${env:Database_Password} = <REDACTED>',
+        )
+        self.assertEqual(redactions, ('credential',))
+        self.assertNotIn('FIRST_SECRET', sanitized)
+        self.assertNotIn('SECOND_SECRET', sanitized)
+
     def test_powershell_here_string_credential_body_is_redacted(self) -> None:
         text = "$env:DATABASE_PASSWORD=@'\nFIRST_SECRET SECOND_SECRET\n'@\nkeep=ordinary"
 
@@ -584,6 +597,22 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         self.assertNotIn('FIRST_SECRET', sanitized)
         self.assertIn('keep-decision', sanitized)
 
+    def test_posix_ansi_c_quoted_credential_value_is_redacted(self) -> None:
+        text = "DATABASE_PASSWORD=$'FIRST_SECRET SECOND_SECRET'"
+
+        sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+
+        self.assertEqual(sanitized, 'DATABASE_PASSWORD=<REDACTED>')
+        self.assertEqual(redactions, ('credential',))
+        self.assertNotIn('FIRST_SECRET', sanitized)
+        self.assertNotIn('SECOND_SECRET', sanitized)
+
+        with self.assertRaisesRegex(
+            ledger.MemoryPreferenceError,
+            '^memory-credential-container-unverifiable$',
+        ):
+            ledger.sanitize_text("DATABASE_PASSWORD=$'FIRST_SECRET", max_chars=None)
+
     def test_batch_assignment_only_matches_command_positions(self) -> None:
         text = 'Please set DATABASE_PASSWORD=FIRST_SECRET then keep this decision'
 
@@ -595,6 +624,29 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         )
         self.assertEqual(redactions, ('credential',))
         self.assertNotIn('FIRST_SECRET', sanitized)
+
+    def test_batch_assignment_after_if_and_for_is_bounded(self) -> None:
+        cases = (
+            (
+                'if 1==1 set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET',
+                'if 1==1 set DATABASE_PASSWORD=<REDACTED>',
+            ),
+            (
+                'for %x in (1) do set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET',
+                'for %x in (1) do set DATABASE_PASSWORD=<REDACTED>',
+            ),
+            (
+                'if 1==1 set DATABASE_PASSWORD=FIRST_SECRET&&echo keep-decision',
+                'if 1==1 set DATABASE_PASSWORD=<REDACTED>&&echo keep-decision',
+            ),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+                self.assertEqual(sanitized, expected)
+                self.assertEqual(redactions, ('credential',))
+                self.assertNotIn('FIRST_SECRET', sanitized)
+                self.assertNotIn('SECOND_SECRET', sanitized)
 
     def test_unterminated_windows_batch_quote_does_not_use_later_line_quote(self) -> None:
         text = 'set "DATABASE_PASSWORD=FIRST_SECRET\nkeep this decision "quoted" tail'
