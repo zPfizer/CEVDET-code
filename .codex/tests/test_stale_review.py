@@ -714,6 +714,38 @@ class StaleReviewTests(unittest.TestCase):
             with file_locked(state_dir / "compile", timeout=0):
                 pass
 
+    def test_report_text_is_rendered_before_final_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _note(vault, "eski-not", updated="2026-01-02", sources=[])
+            order: list[str] = []
+            real_render = stale_review.render
+            real_validate = stale_review._validate_note_observations
+
+            def observe_render(*args: object, **kwargs: object) -> str:
+                order.append("render")
+                return real_render(*args, **kwargs)
+
+            def observe_validate(*args: object, **kwargs: object) -> None:
+                order.append("validate")
+                real_validate(*args, **kwargs)
+
+            with (
+                mock.patch.object(stale_review, "render", side_effect=observe_render),
+                mock.patch.object(
+                    stale_review,
+                    "_validate_note_observations",
+                    side_effect=observe_validate,
+                ),
+            ):
+                stale_review.write_report(
+                    vault, output=vault / "report.md", now=datetime.date(2026, 9, 11)
+                )
+
+        self.assertEqual(order[0], "render")
+        self.assertIn("validate", order)
+        self.assertLess(order.index("render"), order.index("validate"))
+
     def test_cli_overwrite_replaces_existing_report_explicitly(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

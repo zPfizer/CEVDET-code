@@ -722,12 +722,13 @@ def write_report(
                     memory=memory,
                     observations=observations,
                 )
+                rendered = render(findings, days=days, today=today)
                 memory.check_knowledge_snapshot()
                 _validate_note_observations(vault, note_observations)
                 _validate_source_observations(vault, observations)
                 atomic_write_text(
                     target,
-                    render(findings, days=days, today=today),
+                    rendered,
                     overwrite=overwrite,
                 )
                 return target, len(findings)
