@@ -16,7 +16,7 @@ from typing import Any, Callable
 import uuid
 
 import process_control
-from file_lock import LockUnavailable, locked
+from file_lock import LockUnavailable, locked, timeout_for_deadline
 from process_control import (
     ProcessTreeCleanupError,
     ProcessTreeTimeout,
@@ -268,22 +268,39 @@ class _UnrecoverableWorkerInput(RuntimeError):
 def enqueue_maintenance(
     state_dir: Path, *, vault_root: Path, start_supervisor: bool = True,
     launcher: Callable[..., Any] = subprocess.Popen,
+    deadline: float | None = None,
 ) -> Path:
     """A separate lane keeps slow compilation from delaying conversation saves."""
     lane = state_dir / "maintenance"
-    with locked(lane / "maintenance-admission"):
-        pending = None
-        with locked(lane / "worker-queue"):
-            for candidate in (_job_root(lane) / "pending").glob("*.json"):
-                job = _load_job_quarantined(lane, candidate)
-                if job is not None and job['kind'] == 'maintenance':
-                    pending = candidate
-                    break
-        if pending is None:
-            pending = enqueue_job(lane, "maintenance", {}, start_supervisor=False)
-    if start_supervisor:
-        ensure_supervisor(lane, vault_root=vault_root, launcher=launcher)
-    return pending
+    try:
+        with locked(lane / "maintenance-admission", timeout=_lock_timeout(deadline)):
+            pending = None
+            with locked(lane / "worker-queue", timeout=_lock_timeout(deadline)):
+                for candidate in (_job_root(lane) / "pending").glob("*.json"):
+                    job = _load_job_quarantined(lane, candidate)
+                    if job is not None and job['kind'] == 'maintenance':
+                        pending = candidate
+                        break
+            if pending is None:
+                pending = enqueue_job(
+                    lane,
+                    "maintenance",
+                    {},
+                    start_supervisor=False,
+                    deadline=deadline,
+                )
+        if start_supervisor:
+            ensure_supervisor(
+                lane,
+                vault_root=vault_root,
+                launcher=launcher,
+                deadline=deadline,
+            )
+        return pending
+    except LockUnavailable as exc:
+        if deadline is None:
+            raise
+        raise WorkerDeliveryTimeout("worker-maintenance-deadline") from exc
 
 
 def _job_timeout(kind: str) -> int:
@@ -832,9 +849,7 @@ class WorkerDeliveryTerminal(RuntimeError):
 
 
 def _lock_timeout(deadline: float | None) -> float | None:
-    if deadline is None:
-        return None
-    return max(0.0, deadline - time.monotonic())
+    return timeout_for_deadline(deadline)
 
 
 def _enqueue_job_locked(
@@ -1278,7 +1293,21 @@ def _has_verified_successor(root: Path, job: dict[str, Any]) -> bool:
     )
 
 
-def inspect_worker_queue(state_dir: Path) -> dict[str, Any]:
+def inspect_worker_queue(
+    state_dir: Path,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    try:
+        with locked(state_dir / "worker-queue", timeout=_lock_timeout(deadline)):
+            return _inspect_worker_queue_locked(state_dir)
+    except LockUnavailable as exc:
+        if deadline is None:
+            raise
+        raise WorkerDeliveryTimeout("worker-queue-deadline") from exc
+
+
+def _inspect_worker_queue_locked(state_dir: Path) -> dict[str, Any]:
     root = _job_root(state_dir)
     counts = {state: 0 for state in JOB_STATES}
     invalid = 0
@@ -1412,41 +1441,46 @@ def ensure_supervisor(
     state_dir.mkdir(parents=True, exist_ok=True)
     admission_lock = state_dir / "worker-admission"
     token = ""
-    with locked(admission_lock, timeout=_lock_timeout(deadline)):
-        if has_unverified_process_tree(state_dir):
-            raise ValueError('worker-tree-cleanup-unverified')
-        receipt_path = _supervisor_receipt_path(state_dir)
-        try:
-            current = json.loads(receipt_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            current = {}
-        if isinstance(current, dict):
-            lease_until = current.get("lease_until", 0)
-            if ((current.get("status") == "launching"
-                 and isinstance(lease_until, (int, float)) and lease_until > observed_now)
-                    or (current.get("status") == "running"
-                        and _process_owner_is_active(current))):
-                return False
-        previous_generation = (
-            current.get("generation", 0) if isinstance(current, dict) else 0
-        )
-        token = uuid.uuid4().hex
-        atomic_write_json(
-            receipt_path,
-            {
-                "schema_version": SUPERVISOR_SCHEMA_VERSION,
-                "status": "launching",
-                "generation": (
-                    previous_generation + 1
-                    if isinstance(previous_generation, int)
-                    else 1
-                ),
-                "launch_token": token,
-                "owner_pid": 0,
-                "lease_until": observed_now + LAUNCH_LEASE_SECONDS,
-                "updated_ts": int(observed_now),
-            },
-        )
+    try:
+        with locked(admission_lock, timeout=_lock_timeout(deadline)):
+            if has_unverified_process_tree(state_dir):
+                raise ValueError('worker-tree-cleanup-unverified')
+            receipt_path = _supervisor_receipt_path(state_dir)
+            try:
+                current = json.loads(receipt_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                current = {}
+            if isinstance(current, dict):
+                lease_until = current.get("lease_until", 0)
+                if ((current.get("status") == "launching"
+                     and isinstance(lease_until, (int, float)) and lease_until > observed_now)
+                        or (current.get("status") == "running"
+                            and _process_owner_is_active(current))):
+                    return False
+            previous_generation = (
+                current.get("generation", 0) if isinstance(current, dict) else 0
+            )
+            token = uuid.uuid4().hex
+            atomic_write_json(
+                receipt_path,
+                {
+                    "schema_version": SUPERVISOR_SCHEMA_VERSION,
+                    "status": "launching",
+                    "generation": (
+                        previous_generation + 1
+                        if isinstance(previous_generation, int)
+                        else 1
+                    ),
+                    "launch_token": token,
+                    "owner_pid": 0,
+                    "lease_until": observed_now + LAUNCH_LEASE_SECONDS,
+                    "updated_ts": int(observed_now),
+                },
+            )
+    except LockUnavailable as exc:
+        if deadline is None:
+            raise
+        raise WorkerDeliveryTimeout("worker-admission-deadline") from exc
     command = [
         sys.executable,
         str(Path(__file__).resolve()),

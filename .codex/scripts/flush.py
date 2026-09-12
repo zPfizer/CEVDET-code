@@ -741,6 +741,7 @@ def maybe_trigger_compile(
     vault_root: Path = VAULT_ROOT,
     now: dt.datetime | None = None,
     popen_factory: Callable[..., Any] | None = None,
+    deadline: float | None = None,
 ) -> bool:
     """Queue changed knowledge independently of clock time and the save process."""
     if (compile_state.load_publication(state_dir_of(vault_root)) is None
@@ -751,6 +752,7 @@ def maybe_trigger_compile(
     enqueue_maintenance(
         state_dir_of(vault_root), vault_root=vault_root,
         launcher=popen_factory or subprocess.Popen,
+        deadline=deadline,
     )
     return True
 

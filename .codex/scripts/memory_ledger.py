@@ -12,7 +12,7 @@ import tokenize
 from typing import Callable, Iterator, Sequence
 import unicodedata
 
-from file_lock import locked
+from file_lock import locked, timeout_for_deadline
 from compile_state import PolicyError, PublicationSnapshot, require_publication_snapshot
 from state_store import atomic_write_text
 from profile_guard import PROFILE_RELATIVE, check_profile
@@ -1345,7 +1345,12 @@ def _read_only_path(state_dir: Path, session_id: str) -> Path:
     return state_dir / f"memory-read-only-{_sha256_text(session_id)}"
 
 
-def mark_read_only_turn(state_dir: Path, session_id: str) -> None:
+def mark_read_only_turn(
+    state_dir: Path,
+    session_id: str,
+    *,
+    timeout: float | None = None,
+) -> None:
     """Salt okunur görev: bu turda otomatik kayıt, profil onarımı ve bakım yapılmaz.
 
     Oturum kapsamlıdır; sonraki kullanıcı mesajı veya tur sonu işareti kaldırmaz.
@@ -1354,7 +1359,7 @@ def mark_read_only_turn(state_dir: Path, session_id: str) -> None:
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     path = _read_only_path(state_dir, session_id)
-    with locked(path):
+    with locked(path, timeout=timeout):
         path.touch(exist_ok=True)
 
 
@@ -1364,6 +1369,21 @@ def is_read_only_turn(state_dir: Path, session_id: str) -> bool:
 
 class MemoryReadOnlyError(ValueError):
     pass
+
+
+@contextmanager
+def memory_scope_guard(
+    state_dir: Path,
+    session_id: str | None,
+    *,
+    timeout: float | None = None,
+) -> Iterator[None]:
+    """Serialize a session snapshot with read-only scope changes."""
+    if not session_id:
+        yield
+        return
+    with locked(_read_only_path(state_dir, session_id), timeout=timeout):
+        yield
 
 
 @contextmanager
@@ -1377,17 +1397,22 @@ def memory_write_guard(
     if not session_id:
         yield
         return
-    with locked(_read_only_path(state_dir, session_id), timeout=timeout):
+    with memory_scope_guard(state_dir, session_id, timeout=timeout):
         if is_read_only_turn(state_dir, session_id):
             raise MemoryReadOnlyError('memory-read-only')
         yield
 
 
-def clear_read_only_turn(state_dir: Path, session_id: str) -> None:
+def clear_read_only_turn(
+    state_dir: Path,
+    session_id: str,
+    *,
+    timeout: float | None = None,
+) -> None:
     path = _read_only_path(state_dir, session_id)
     if not path.exists():
         return
-    with locked(path):
+    with locked(path, timeout=timeout):
         path.unlink(missing_ok=True)
 
 
@@ -1600,6 +1625,7 @@ class MemoryRead:
         *,
         write: bool = True,
         alias_sources: Sequence[tuple[str, str]] | None = None,
+        deadline: float | None = None,
     ) -> dict[str, str]:
         if not self.active or not write:
             return {}
@@ -1611,6 +1637,7 @@ class MemoryRead:
                 sources,
                 self._hashes,
                 alias_sources=alias_sources,
+                deadline=deadline,
             )
             if self._publication is not None:
                 self.check_knowledge_snapshot()
@@ -1772,13 +1799,18 @@ def materialize_memory_views(
     hashes: frozenset[str],
     *,
     alias_sources: Sequence[tuple[str, str]] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, str]:
     """Disposable filtered read targets; never point the agent back at raw notes."""
     private = vault_root / '.codex/private-memory'
     if private.is_symlink() or private.resolve() != vault_root.resolve() / '.codex/private-memory':
         raise MemoryPreferenceError('memory-view-path-invalid')
     views = _checked_views_dir(private)
-    with suppression_guard(private, hashes):
+    with suppression_guard(
+        private,
+        hashes,
+        timeout=timeout_for_deadline(deadline),
+    ):
         rendered, paths = _render_memory_views(
             vault_root,
             sources,
@@ -1790,15 +1822,20 @@ def materialize_memory_views(
             if target.is_symlink() or target.resolve() != views.resolve() / target.name:
                 raise MemoryPreferenceError('memory-view-path-invalid')
             if not target.is_file() or target.read_text(encoding='utf-8') != projected:
-                atomic_write_text(target, projected)
+                atomic_write_text(target, projected, deadline=deadline)
     return paths
 
 
 @contextmanager
-def suppression_guard(private_root: Path, expected: frozenset[str]) -> Iterator[None]:
+def suppression_guard(
+    private_root: Path,
+    expected: frozenset[str],
+    *,
+    timeout: float | None = None,
+) -> Iterator[None]:
     """Fence a short publication against a concurrent forget request."""
     path = _suppression_path(private_root)
-    with locked(path):
+    with locked(path, timeout=timeout):
         lines = path.read_text(encoding='utf-8').splitlines() if path.exists() else []
         if _suppression_hashes_from_lines(lines) != expected:
             raise ValueError('memory-preferences-changed')

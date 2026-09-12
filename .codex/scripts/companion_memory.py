@@ -12,7 +12,7 @@ import time
 import uuid
 from typing import Any
 
-from file_lock import locked
+from file_lock import locked, timeout_for_deadline
 from memory_ledger import (
     MemoryRead, contains_suppressed_unit, filter_suppressed_text, is_session_only, session_only_path,
     memory_read, memory_write_guard, sanitize_text, suppression_guard,
@@ -318,7 +318,16 @@ def _manual_meta(name: str, source: bytes, prefix: bytes, suffix: bytes) -> dict
             'source_sha256': _sha(source), 'outside_sha256': _sha(prefix + suffix)}
 
 
-def _manual_for_view(root: Path, name: str, meta, expected, *, write_source: bool, canonical: bool):
+def _manual_for_view(
+    root: Path,
+    name: str,
+    meta,
+    expected,
+    *,
+    write_source: bool,
+    canonical: bool,
+    deadline: float | None = None,
+):
     source_path, view_path = _source_path(root, name), _view_path(root, name)
     if canonical and not source_path.is_file():
         raise ValueError('companion-manual-source-missing')
@@ -332,7 +341,7 @@ def _manual_for_view(root: Path, name: str, meta, expected, *, write_source: boo
         source = _join_manual(name, prefix, suffix)
         if write_source:
             source_path.parent.mkdir(parents=True, exist_ok=True)
-            _write_manual(source_path, source)
+            _write_manual(source_path, source, deadline=deadline)
     current = view_path.read_bytes() if view_path.is_file() else None
     if current is not None:
         valid = _block_matches(current, expected or None)
@@ -352,7 +361,7 @@ def _manual_for_view(root: Path, name: str, meta, expected, *, write_source: boo
                 source = _join_manual(name, prefix, suffix)
                 if write_source:
                     source_path.parent.mkdir(parents=True, exist_ok=True)
-                    _write_manual(source_path, source)
+                    _write_manual(source_path, source, deadline=deadline)
             elif current_hash != wanted_hash:
                 raise ValueError('companion-manual-view-conflict')
     source = _join_manual(name, prefix, suffix)
@@ -450,12 +459,26 @@ def render_views(root: Path, *, hashes: frozenset[str] = frozenset(), memory: Me
     return _project_views(_raw_views(root, memory._hashes), memory)
 
 
-def ensure_views(root: Path, state: Path | None = None, *, write: bool = True,
-                 hashes: frozenset[str] = frozenset(), memory: MemoryRead | None = None) -> dict[str, str]:
+def ensure_views(
+    root: Path,
+    state: Path | None = None,
+    *,
+    write: bool = True,
+    hashes: frozenset[str] = frozenset(),
+    memory: MemoryRead | None = None,
+    deadline: float | None = None,
+) -> dict[str, str]:
     state = state or root / '.codex/scripts/.state'
     if memory is None:
         with memory_read(root) as current:
-            return ensure_views(root, state, write=write, hashes=current._hashes, memory=current)
+            return ensure_views(
+                root,
+                state,
+                write=write,
+                hashes=current._hashes,
+                memory=current,
+                deadline=deadline,
+            )
     if hashes and hashes != memory._hashes:
         raise ValueError('memory-preferences-changed')
     hashes = memory._hashes
@@ -464,7 +487,11 @@ def ensure_views(root: Path, state: Path | None = None, *, write: bool = True,
     state.mkdir(parents=True, exist_ok=True)
     if not (root / '🔮 850-Companion').is_dir():
         return {}
-    with suppression_guard(root / '.codex/private-memory', hashes), locked(state / 'companion-publish'):
+    with suppression_guard(
+        root / '.codex/private-memory',
+        hashes,
+        timeout=timeout_for_deadline(deadline),
+    ), locked(state / 'companion-publish', timeout=timeout_for_deadline(deadline)):
         records, metadata, canonical = _load_catalog(root)
         if not canonical:
             return _project_views(_raw_views(root, hashes), memory)
@@ -474,29 +501,62 @@ def ensure_views(root: Path, state: Path | None = None, *, write: bool = True,
         for name in VIEW_NAMES:
             if contains_suppressed_unit(f'🔮 850-Companion/{name}', hashes):
                 continue
-            prefix, suffix, meta = _manual_for_view(root, name, metadata.get(name), records, write_source=True, canonical=True)
+            prefix, suffix, meta = _manual_for_view(
+                root,
+                name,
+                metadata.get(name),
+                records,
+                write_source=True,
+                canonical=True,
+                deadline=deadline,
+            )
             manuals[name] = prefix, suffix
             metadata[name] = meta
-        atomic_write_json(_canonical_path(root), _catalog_payload(records, previous_metadata), sort_keys=True)
+        atomic_write_json(
+            _canonical_path(root),
+            _catalog_payload(records, previous_metadata),
+            sort_keys=True,
+            deadline=deadline,
+        )
         result = {}
         for name, payload in _render(records, manuals, hashes).items():
             path = _view_path(root, name)
             if not path.is_file() or path.read_bytes() != payload:
-                _write_projection(path, payload)
+                _write_projection(path, payload, deadline=deadline)
             result[name] = payload.decode('utf-8')
-        atomic_write_json(_canonical_path(root), _catalog_payload(records, metadata), sort_keys=True)
+        atomic_write_json(
+            _canonical_path(root),
+            _catalog_payload(records, metadata),
+            sort_keys=True,
+            deadline=deadline,
+        )
         return _project_views(result, memory)
 
 
-def _write_projection(path: Path, payload: bytes) -> None:
+def _write_projection(
+    path: Path,
+    payload: bytes,
+    *,
+    deadline: float | None = None,
+) -> None:
     try:
-        atomic_write_text(path, payload.decode('utf-8'), newline='')
+        atomic_write_text(
+            path,
+            payload.decode('utf-8'),
+            newline='',
+            deadline=deadline,
+        )
     except UnicodeDecodeError:
-        atomic_write_bytes(path, payload)
+        atomic_write_bytes(path, payload, deadline=deadline)
 
 
-def _write_manual(path: Path, payload: bytes) -> None:
-    atomic_write_bytes(path, payload)
+def _write_manual(
+    path: Path,
+    payload: bytes,
+    *,
+    deadline: float | None = None,
+) -> None:
+    atomic_write_bytes(path, payload, deadline=deadline)
 
 
 def _discover_current(root: Path, hashes: frozenset[str] = frozenset(), *, strict: bool = True):
