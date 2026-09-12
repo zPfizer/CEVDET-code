@@ -1221,6 +1221,20 @@ def migrate_legacy_failed_jobs(
                 or not isinstance(original.get("payload"), dict)
             ):
                 raise ValueError("worker-legacy-state-invalid")
+            seen_records, _ = _scan_redrive_records_locked(
+                state_dir, include_legacy_failed=False
+            )
+            if job_id in seen_records:
+                active = seen_records[job_id]
+                if not isinstance(active, dict) or not _same_redrive_identity(
+                    active, original
+                ):
+                    raise ValueError("worker-legacy-state-conflict")
+                # A newer queue record is already the canonical identity.  Do
+                # not recreate a dead-letter copy from the legacy source.
+                source.unlink()
+                migrated += 1
+                continue
             after = dict(original)
             after.update(
                 {
@@ -1234,6 +1248,31 @@ def migrate_legacy_failed_jobs(
             )
             after.pop("claim_token", None)
             destination = _job_root(state_dir) / "dead-letter" / source.name
+            if destination.exists():
+                try:
+                    existing = _load_job(destination)
+                except ValueError as exc:
+                    raise ValueError("worker-legacy-state-conflict") from exc
+                if not _same_redrive_identity(existing, original):
+                    raise ValueError("worker-legacy-state-conflict")
+                receipt = state_dir / f"worker-migration-{job_id}.json"
+                atomic_write_json(
+                    receipt,
+                    {
+                        "schema_version": 1,
+                        "status": "durable",
+                        "job_id": job_id,
+                        "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                        "destination_sha256": hashlib.sha256(
+                            destination.read_bytes()
+                        ).hexdigest(),
+                        "migrated_ts": int(observed_now),
+                    },
+                    sort_keys=True,
+                )
+                source.unlink()
+                migrated += 1
+                continue
             atomic_write_json(destination, after, sort_keys=True)
             if _fail_after == "destination":
                 raise RuntimeError("worker-migration-injected:destination")
@@ -1324,20 +1363,42 @@ def _mark_redrive_conflict(
 
 def _scan_redrive_records_locked(
     state_dir: Path,
+    *,
+    include_legacy_failed: bool = True,
 ) -> tuple[dict[str, dict[str, Any] | None], dict[str, dict[str, Any]]]:
     """Return queue identities and marked redrive receipts under queue ownership."""
     seen_records: dict[str, dict[str, Any] | None] = {}
     seen_redriven: dict[str, dict[str, Any]] = {}
-    for state in (
+    states = [
         "pending",
         "claimed",
         "running",
         "succeeded",
         "quarantined",
-    ):
+    ]
+    if include_legacy_failed:
+        states.append("failed")
+    for state in states:
         for path in sorted((_job_root(state_dir) / state).glob("*.json")):
             try:
-                if state == "quarantined":
+                if state == "failed":
+                    record_id = _job_id_from_path(path)
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                    if (
+                        not isinstance(value, dict)
+                        or record_id is None
+                        or value.get("job_id") != record_id
+                        or not isinstance(value.get("kind"), str)
+                        or value["kind"] not in JOB_KINDS
+                        or not isinstance(value.get("payload"), dict)
+                    ):
+                        raise ValueError("worker-legacy-state-invalid")
+                    job = {
+                        "job_id": record_id,
+                        "kind": value["kind"],
+                        "payload": value["payload"],
+                    }
+                elif state == "quarantined":
                     tombstone = _load_job(path)
                     job = {
                         "job_id": tombstone["job_id"],
@@ -1375,7 +1436,7 @@ def _scan_redrive_records_locked(
                 or seen_records[job["job_id"]] is None
             ):
                 seen_records[job["job_id"]] = job
-            if state != "quarantined" and _has_redrive_marker(job):
+            if state not in {"quarantined", "failed"} and _has_redrive_marker(job):
                 seen_redriven.setdefault(job["job_id"], job)
     return seen_records, seen_redriven
 
@@ -1672,6 +1733,14 @@ def recover_stale_jobs(state_dir: Path, *, now: float | None = None) -> int:
                     continue
                 if _process_owner_is_active(job):
                     continue
+                if int(job.get("attempt", 0)) >= MAX_ATTEMPTS:
+                    destination = _job_root(state_dir) / "dead-letter" / path.name
+                else:
+                    destination = _job_root(state_dir) / "pending" / path.name
+                if destination.exists():
+                    # Preserve both records when a same-ID collision is already
+                    # durable; never overwrite the existing terminal evidence.
+                    continue
                 job["generation"] = int(job.get("generation", 0)) + 1
                 job.pop("claim_token", None)
                 job.pop("owner_pid", None)
@@ -1684,14 +1753,12 @@ def recover_stale_jobs(state_dir: Path, *, now: float | None = None) -> int:
                     job['last_error'] = 'worker-lease-expired'
                     job['terminal_reason'] = 'retry-exhausted'
                     job['retryable'] = False
-                    destination = _job_root(state_dir) / "dead-letter" / path.name
                 else:
                     job["status"] = "pending"
                     job["next_attempt_ts"] = observed_now + _retry_delay(
                         int(job.get("attempt", 0)),
                         RETRY_BASE_SECONDS,
                     )
-                    destination = _job_root(state_dir) / "pending" / path.name
                 atomic_write_json(path, job)
                 os.replace(path, destination)
                 _report_terminal_maintenance(state_dir, job)

@@ -52,6 +52,25 @@ def _succeeded_job(state: Path, job_id: str, **overrides) -> Path:
     return path
 
 
+def _legacy_failed_job(state: Path, job_id: str, **overrides) -> Path:
+    record = {
+        "schema_version": 1,
+        "job_id": job_id,
+        "kind": "maintenance",
+        "status": "failed",
+        "generation": 2,
+        "attempt": 2,
+        "enqueue_sequence": 1,
+        "enqueued_ts": 1757400000,
+        "payload": {"reason": "legacy"},
+    }
+    record.update(overrides)
+    path = state / "worker-jobs" / "failed" / f"job-{job_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return path
+
+
 def _active_job(state: Path, job_id: str, status: str, **overrides) -> Path:
     record = {
         "schema_version": 1,
@@ -191,6 +210,96 @@ class RedriveDeadLetterTests(unittest.TestCase):
             self.assertEqual(
                 still_conflict["terminal_reason"], conflict["terminal_reason"]
             )
+
+    def test_redrive_fences_interrupted_legacy_migration_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            job_id = "c" * 32
+            source = _legacy_failed_job(
+                state, job_id, payload={"reason": "legacy"}
+            )
+            dead_letter = _dead_letter_job(
+                state, job_id, payload={"reason": "legacy"}
+            )
+
+            redriven, skipped = workers.redrive_dead_letter(
+                state, job_id=job_id
+            )
+            conflict = workers._load_job(dead_letter)
+            migrated = workers.migrate_legacy_failed_jobs(state, now=1757500001)
+            source_exists = source.exists()
+            dead_letter_exists = dead_letter.exists()
+            conflict_reason = workers._load_job(dead_letter)["terminal_reason"]
+
+        self.assertEqual(redriven, [])
+        self.assertEqual(skipped, [(job_id, "redrive çakışması")])
+        self.assertEqual(conflict["terminal_reason"], "redrive-conflict")
+        self.assertEqual(migrated, 1)
+        self.assertFalse(source_exists)
+        self.assertTrue(dead_letter_exists)
+        self.assertEqual(conflict_reason, "redrive-conflict")
+
+    def test_recovery_collision_does_not_overwrite_redrive_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            job_id = "c" * 32
+            running = _active_job(
+                state,
+                job_id,
+                "running",
+                attempt=workers.MAX_ATTEMPTS,
+                payload={"reason": "active"},
+            )
+            dead_letter = _dead_letter_job(
+                state,
+                job_id,
+                status="pending",
+                payload={"reason": "stale"},
+                redriven_ts=1757500000,
+            )
+            running_before = running.read_bytes()
+
+            with mock.patch.object(
+                workers, "_process_owner_is_active", return_value=False
+            ):
+                workers.recover_stale_jobs(state, now=1757500001)
+                first_conflict = workers._load_job(dead_letter)
+                workers.recover_stale_jobs(state, now=1757500002)
+                second_conflict = workers._load_job(dead_letter)
+
+            running_after = running.read_bytes()
+            running_exists = running.exists()
+
+        self.assertEqual(first_conflict["terminal_reason"], "redrive-identity-conflict")
+        self.assertEqual(second_conflict["terminal_reason"], "redrive-identity-conflict")
+        self.assertEqual(running_after, running_before)
+        self.assertTrue(running_exists)
+
+    def test_legacy_migration_keeps_active_redrive_canonical(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            job_id = "c" * 32
+            source = _legacy_failed_job(
+                state, job_id, payload={"reason": "legacy"}
+            )
+            pending = _pending_job(
+                state,
+                job_id,
+                payload={"reason": "legacy"},
+                redriven_ts=1757500000,
+            )
+
+            migrated = workers.migrate_legacy_failed_jobs(state, now=1757500001)
+            source_exists = source.exists()
+            pending_exists = pending.exists()
+            dead_letter_exists = (
+                state / "worker-jobs" / "dead-letter" / pending.name
+            ).exists()
+
+        self.assertEqual(migrated, 1)
+        self.assertFalse(source_exists)
+        self.assertTrue(pending_exists)
+        self.assertFalse(dead_letter_exists)
 
     def test_redrive_revives_job_as_valid_pending(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
