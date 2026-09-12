@@ -989,6 +989,32 @@ class StaleReviewTests(unittest.TestCase):
         self.assertNotIn("2026-01-02.md", text)
         self.assertIn("kaynak güveni doğrulanamadı", text)
 
+    def test_fully_suppressed_daily_source_is_unverifiable_when_filtered_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _daily(vault, "2026-01-02.md", mtime=datetime.date(2026, 1, 2))
+            _note(
+                vault,
+                "bos-suppressed-source",
+                updated="2026-01-03",
+                sources=["2026-01-02.md"],
+            )
+            ledger.suppress_derived_memory(
+                vault / ".codex/private-memory", "günlük"
+            )
+
+            findings = stale_review.review(
+                vault, now=datetime.date(2026, 9, 11)
+            )
+            target, _count = stale_review.write_report(
+                vault, output=vault / "report.md", now=datetime.date(2026, 9, 11)
+            )
+            text = target.read_text(encoding="utf-8")
+
+        self.assertIn("kaynak güveni doğrulanamadı", findings[0].reasons)
+        self.assertIn("kaynak güveni doğrulanamadı", text)
+        self.assertNotIn("günlük", text)
+
     def test_malformed_suppression_controls_fail_closed_before_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

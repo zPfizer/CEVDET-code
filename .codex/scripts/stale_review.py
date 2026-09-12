@@ -264,7 +264,8 @@ def _source_reasons(
         expected_relative = PurePosixPath(f"{DAILY_ROOT}/{source}")
         if memory is not None and (
             PurePosixPath(relative.as_posix()) != expected_relative
-            or text is None
+            or not isinstance(text, str)
+            or not text.strip()
         ):
             reasons.append("kaynak güveni doğrulanamadı")
             continue
