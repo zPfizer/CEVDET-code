@@ -60,6 +60,7 @@
 !/.codex/scripts/memory_ledger.py
 !/.codex/scripts/process_control.py
 !/.codex/scripts/profile_guard.py
+!/.codex/scripts/quote_grammar.py
 !/.codex/scripts/state_store.py
 !/.codex/scripts/tag_taxonomy.py
 !/.codex/scripts/transcript_index.py
