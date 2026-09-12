@@ -702,12 +702,21 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
         and payload["delivery_schema_version"] == HOOK_INPUT_SCHEMA_VERSION
         and isinstance(payload.get("session_id"), str)
         and bool(payload["session_id"])
-        and isinstance(payload.get("transcript_path"), str)
-        and bool(payload["transcript_path"])
         and isinstance(payload.get("reason"), str)
         and payload["reason"] in FLUSH_REASON_PRIORITY
         and isinstance(payload.get("event_iso"), str)
         and bool(payload["event_iso"])
+        and "transcript_path" in payload
+        and (
+            (
+                isinstance(payload.get("transcript_path"), str)
+                and bool(payload["transcript_path"])
+            )
+            or (
+                payload["reason"] == "sessionend"
+                and payload["transcript_path"] is None
+            )
+        )
     )
 
 

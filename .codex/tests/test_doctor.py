@@ -889,6 +889,25 @@ class DoctorTests(unittest.TestCase):
 
         self.assertEqual(check.status, "OK")
 
+    def test_state_privacy_accepts_transcriptless_session_end_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            with mock.patch.object(workers, "enqueue_job", return_value=None):
+                workers.enqueue_flush(
+                    state,
+                    {"session_id": "session-end"},
+                    "sessionend",
+                    vault_root=state,
+                )
+            path = next(state.glob("hookin-*.json"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            check = doctor._state_privacy_check(
+                doctor.Context(state_dir=state, now=path.stat().st_mtime + 1)
+            )
+
+        self.assertIsNone(payload["transcript_path"])
+        self.assertEqual(check.status, "OK")
+
     def test_state_privacy_rejects_current_worker_delivery_extra_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
