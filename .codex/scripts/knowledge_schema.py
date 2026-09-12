@@ -328,7 +328,8 @@ def normalize_claim_order(text: str) -> str:
         ending = line[len(line.splitlines()[0]):]
         lines[index] = claim.raw_line + ending
     heading = _heading_matches(text, CLAIM_HEADING)
-    if not heading:
+    # Başlık yoksa _claims bölümü boş bulur ve malformed erken döndürür; savunma hattı.
+    if not heading:  # pragma: no cover
         return text
     start = heading[0][3]
     return text[:start] + ''.join(lines) + text[start + len(section):]
@@ -670,7 +671,7 @@ def _validate_concept(path: Path, issues: list[str]) -> None:
     lines = text.splitlines()
     try:
         frontmatter_end = lines.index("---", 1)
-    except ValueError:
+    except ValueError:  # pragma: no cover — kapanmamış frontmatter alan eksikliğinde erken döner.
         frontmatter_end = len(lines)
     first_body_line = next(
         (line for line in lines[frontmatter_end + 1 :] if line.strip()),
