@@ -618,6 +618,25 @@ class StaleReviewTests(unittest.TestCase):
             finally:
                 parent.unlink(missing_ok=True)
 
+    def test_report_target_rejects_protected_roots_without_overwrite(self) -> None:
+        for root_name in ("daily", "knowledge", ".codex"):
+            with self.subTest(root_name=root_name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    vault = Path(temporary)
+                    _note(vault, "eski-not", updated="2026-01-02", sources=[])
+                    parent = vault / root_name
+                    parent.mkdir(parents=True, exist_ok=True)
+                    target = parent / "report.md"
+                    target.write_text("kullanici metni\n", encoding="utf-8")
+
+                    with self.assertRaisesRegex(ValueError, "report-target-invalid"):
+                        stale_review.write_report(
+                            vault, output=target, overwrite=True
+                        )
+                    self.assertEqual(
+                        target.read_text(encoding="utf-8"), "kullanici metni\n"
+                    )
+
     def test_report_stays_unwritten_when_compile_lock_is_busy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

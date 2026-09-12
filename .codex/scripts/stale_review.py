@@ -71,10 +71,26 @@ def _default_report_target(vault: Path) -> Path:
 def _validate_report_target(vault: Path, target: Path) -> None:
     lexical = target if target.is_absolute() else Path.cwd() / target
     lexical = lexical.absolute()
+    protected_roots = {DAILY_ROOT, KNOWLEDGE_ROOT, ".codex"}
     try:
-        relative_parent = lexical.parent.relative_to(vault)
+        relative_target = lexical.relative_to(vault)
     except ValueError:
         return
+    if relative_target.parts and relative_target.parts[0] in protected_roots:
+        raise ValueError("report-target-invalid")
+    try:
+        resolved_target = lexical.resolve(strict=False)
+        resolved_relative = resolved_target.relative_to(vault)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("report-target-invalid") from exc
+    except ValueError:
+        resolved_relative = None
+    if resolved_relative is not None and (
+        resolved_relative.parts
+        and resolved_relative.parts[0] in protected_roots
+    ):
+        raise ValueError("report-target-invalid")
+    relative_parent = lexical.parent.relative_to(vault)
     current = vault
     for part in relative_parent.parts:
         current /= part
