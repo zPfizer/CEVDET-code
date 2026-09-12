@@ -300,6 +300,70 @@ class CompanionSplitTests(unittest.TestCase):
                 companion_memory.publish(root, root / ".state", _summary(),
                                          EVENT + dt.timedelta(minutes=1), "b" * 64, "one", frozenset())
 
+    def test_source_edit_before_guarded_manual_write_is_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            companion = _seed(root)
+            companion_memory.migrate(root)
+            companion_memory.publish(root, root / ".state", _summary(), EVENT, "a" * 64, "one", frozenset())
+            view = companion / "Last-Session.md"
+            raw = view.read_bytes()
+            start = raw.find(companion_memory.BEGIN.encode())
+            view.write_bytes(b"# User edited prefix\r\n" + raw[start:])
+            source = companion / "Sources/Last-Session.md"
+            user_bytes = b"# Concurrent source edit\r\n" + source.read_bytes()
+            real_write = companion_memory._write_manual
+            injected = False
+
+            def inject(path, payload, **kwargs):
+                nonlocal injected
+                if path == source and not injected:
+                    injected = True
+                    path.write_bytes(user_bytes)
+                return real_write(path, payload, **kwargs)
+
+            with mock.patch.object(companion_memory, "_write_manual", side_effect=inject):
+                with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
+                    companion_memory.publish(
+                        root, root / ".state", _summary("İkinci bağlam"),
+                        EVENT + dt.timedelta(minutes=1), "b" * 64, "one", frozenset(),
+                    )
+            self.assertTrue(injected)
+            self.assertEqual(source.read_bytes(), user_bytes)
+
+    def test_view_edit_before_guarded_projection_is_preserved(self):
+        for operation in ("ensure", "publish"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                companion = _seed(root)
+                companion_memory.migrate(root)
+                companion_memory.publish(root, root / ".state", _summary(), EVENT, "a" * 64, "one", frozenset())
+                source = companion / "Sources/Last-Session.md"
+                source.write_bytes(source.read_bytes().replace(b"# Last", b"# Source edit", 1))
+                target = companion / "Last-Session.md"
+                user_bytes = b"# Concurrent view edit\r\n" + target.read_bytes()
+                real_write = companion_memory._write_projection
+                injected = False
+
+                def inject(path, payload, **kwargs):
+                    nonlocal injected
+                    if path == target and not injected:
+                        injected = True
+                        path.write_bytes(user_bytes)
+                    return real_write(path, payload, **kwargs)
+
+                with mock.patch.object(companion_memory, "_write_projection", side_effect=inject):
+                    with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
+                        if operation == "ensure":
+                            companion_memory.ensure_views(root, root / ".state", write=True)
+                        else:
+                            companion_memory.publish(
+                                root, root / ".state", _summary("İkinci bağlam"),
+                                EVENT + dt.timedelta(minutes=1), "b" * 64, "one", frozenset(),
+                            )
+                self.assertTrue(injected)
+                self.assertEqual(target.read_bytes(), user_bytes)
+
     def test_anonymous_legacy_block_remains_tracked_manual_source(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

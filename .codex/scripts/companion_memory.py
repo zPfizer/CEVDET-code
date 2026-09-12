@@ -10,14 +10,20 @@ from pathlib import Path
 import re
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from file_lock import locked, timeout_for_deadline
 from memory_ledger import (
     MemoryRead, contains_suppressed_unit, filter_suppressed_text, is_session_only, session_only_path,
     memory_read, memory_write_guard, sanitize_text, suppression_guard,
 )
-from state_store import atomic_write_bytes, atomic_write_json, atomic_write_text, session_scope
+from state_store import (
+    ReplacementConflict,
+    atomic_write_bytes,
+    atomic_write_json,
+    atomic_write_text,
+    session_scope,
+)
 from user_evidence import EVIDENCE, SOURCE
 
 
@@ -35,6 +41,8 @@ CANONICAL_RELATIVE = Path('daily/companion-sessions.json')
 VIEW_NAMES = ('Last-Session.md', 'Journal.md', 'Threads.md')
 SOURCE_RELATIVE = Path('🔮 850-Companion') / 'Sources'
 _SOURCE_PREFIX = '<!-- cevo-generated-source-split:v1:'
+_EXPECTED_DIGEST_UNSET = object()
+_MANUAL_WRITE_CONFLICT = 'companion-manual-view-conflict'
 
 
 def source_marker(name: str) -> bytes:
@@ -269,6 +277,50 @@ def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _validate_guarded_snapshot(path: Path, expected_digest: str | None) -> None:
+    if path.is_symlink() or path.is_junction():
+        raise ValueError(_MANUAL_WRITE_CONFLICT)
+    if expected_digest is None:
+        if path.exists():
+            raise ValueError(_MANUAL_WRITE_CONFLICT)
+        return
+    try:
+        current = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(_MANUAL_WRITE_CONFLICT) from exc
+    if _sha(current) != expected_digest:
+        raise ValueError(_MANUAL_WRITE_CONFLICT)
+
+
+def _guarded_write(
+    path: Path,
+    expected_digest: str | None,
+    *,
+    state: Path | None,
+    deadline: float | None,
+    guard: Callable[[], object] | None,
+    write: Callable[[Path, Callable[[], object]], object],
+) -> None:
+    backup_dir = state or path.parent
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / f'.{path.name}.companion-{uuid.uuid4().hex}.bak'
+
+    def before_replace() -> None:
+        _validate_guarded_snapshot(path, expected_digest)
+        if guard is not None:
+            guard()
+
+    try:
+        write(backup, before_replace)
+    except ReplacementConflict as exc:
+        raise ValueError(_MANUAL_WRITE_CONFLICT) from exc
+    except Exception:
+        backup.unlink(missing_ok=True)
+        raise
+    else:
+        backup.unlink(missing_ok=True)
+
+
 def _catalog_payload(records, manual) -> dict[str, Any]:
     return {
         'schema': CANONICAL_SCHEMA,
@@ -327,22 +379,40 @@ def _manual_for_view(
     write_source: bool,
     canonical: bool,
     deadline: float | None = None,
+    state: Path | None = None,
+    view_snapshot: dict[str, str | None] | None = None,
 ):
     source_path, view_path = _source_path(root, name), _view_path(root, name)
+    source_digest = None
     if canonical and not source_path.is_file():
         raise ValueError('companion-manual-source-missing')
     if source_path.is_file():
         source = source_path.read_bytes()
+        source_digest = _sha(source)
         prefix, suffix = _manual_parts(name, source)
     else:
-        current = view_path.read_bytes() if view_path.is_file() else b''
+        view_exists = view_path.is_file()
+        current = view_path.read_bytes() if view_exists else b''
+        view_digest = _sha(current) if view_exists else None
         valid = _block_matches(current, expected or None) if current else []
         prefix, suffix = (current[:valid[0][0].start()], current[valid[0][0].end():]) if valid else (current, b'')
         source = _join_manual(name, prefix, suffix)
         if write_source:
             source_path.parent.mkdir(parents=True, exist_ok=True)
-            _write_manual(source_path, source, deadline=deadline)
-    current = view_path.read_bytes() if view_path.is_file() else None
+            _write_manual(
+                source_path,
+                source,
+                deadline=deadline,
+                expected_digest=None,
+                state=state,
+                guard=lambda: _validate_guarded_snapshot(view_path, view_digest),
+            )
+        source_digest = _sha(source)
+    view_exists = view_path.is_file()
+    current = view_path.read_bytes() if view_exists else None
+    view_digest = _sha(current) if view_exists else None
+    if view_snapshot is not None:
+        view_snapshot[name] = view_digest
     if current is not None:
         valid = _block_matches(current, expected or None)
         view_prefix, view_suffix = (
@@ -361,7 +431,14 @@ def _manual_for_view(
                 source = _join_manual(name, prefix, suffix)
                 if write_source:
                     source_path.parent.mkdir(parents=True, exist_ok=True)
-                    _write_manual(source_path, source, deadline=deadline)
+                    _write_manual(
+                        source_path,
+                        source,
+                        deadline=deadline,
+                        expected_digest=source_digest,
+                        state=state,
+                        guard=lambda: _validate_guarded_snapshot(view_path, view_digest),
+                    )
             elif current_hash != wanted_hash:
                 raise ValueError('companion-manual-view-conflict')
     source = _join_manual(name, prefix, suffix)
@@ -498,6 +575,7 @@ def ensure_views(
         _reconcile_current(root, records, hashes)
         previous_metadata = dict(metadata)
         manuals = {}
+        view_snapshots: dict[str, str | None] = {}
         for name in VIEW_NAMES:
             if contains_suppressed_unit(f'🔮 850-Companion/{name}', hashes):
                 continue
@@ -509,6 +587,8 @@ def ensure_views(
                 write_source=True,
                 canonical=True,
                 deadline=deadline,
+                state=state,
+                view_snapshot=view_snapshots,
             )
             manuals[name] = prefix, suffix
             metadata[name] = meta
@@ -521,8 +601,19 @@ def ensure_views(
         result = {}
         for name, payload in _render(records, manuals, hashes).items():
             path = _view_path(root, name)
-            if not path.is_file() or path.read_bytes() != payload:
-                _write_projection(path, payload, deadline=deadline)
+            current = path.read_bytes() if path.is_file() else None
+            current_digest = _sha(current) if current is not None else None
+            expected_digest = view_snapshots.get(name, current_digest)
+            if current_digest != expected_digest:
+                raise ValueError(_MANUAL_WRITE_CONFLICT)
+            if current != payload:
+                _write_projection(
+                    path,
+                    payload,
+                    deadline=deadline,
+                    expected_digest=expected_digest,
+                    state=state,
+                )
             result[name] = payload.decode('utf-8')
         atomic_write_json(
             _canonical_path(root),
@@ -538,16 +629,50 @@ def _write_projection(
     payload: bytes,
     *,
     deadline: float | None = None,
+    expected_digest: str | None | object = _EXPECTED_DIGEST_UNSET,
+    state: Path | None = None,
 ) -> None:
-    try:
-        atomic_write_text(
-            path,
-            payload.decode('utf-8'),
-            newline='',
-            deadline=deadline,
-        )
-    except UnicodeDecodeError:
-        atomic_write_bytes(path, payload, deadline=deadline)
+    if expected_digest is _EXPECTED_DIGEST_UNSET:
+        try:
+            atomic_write_text(
+                path,
+                payload.decode('utf-8'),
+                newline='',
+                deadline=deadline,
+            )
+        except UnicodeDecodeError:
+            atomic_write_bytes(path, payload, deadline=deadline)
+        return
+
+    def write(backup: Path, before_replace: Callable[[], object]) -> None:
+        try:
+            atomic_write_text(
+                path,
+                payload.decode('utf-8'),
+                newline='',
+                deadline=deadline,
+                before_replace=before_replace,
+                expected_digest=expected_digest,
+                backup=backup,
+            )
+        except UnicodeDecodeError:
+            atomic_write_bytes(
+                path,
+                payload,
+                deadline=deadline,
+                before_replace=before_replace,
+                expected_digest=expected_digest,
+                backup=backup,
+            )
+
+    _guarded_write(
+        path,
+        expected_digest,
+        state=state,
+        deadline=deadline,
+        guard=None,
+        write=write,
+    )
 
 
 def _write_manual(
@@ -555,8 +680,32 @@ def _write_manual(
     payload: bytes,
     *,
     deadline: float | None = None,
+    expected_digest: str | None | object = _EXPECTED_DIGEST_UNSET,
+    state: Path | None = None,
+    guard: Callable[[], object] | None = None,
 ) -> None:
-    atomic_write_bytes(path, payload, deadline=deadline)
+    if expected_digest is _EXPECTED_DIGEST_UNSET:
+        atomic_write_bytes(path, payload, deadline=deadline)
+        return
+
+    def write(backup: Path, before_replace: Callable[[], object]) -> None:
+        atomic_write_bytes(
+            path,
+            payload,
+            deadline=deadline,
+            before_replace=before_replace,
+            expected_digest=expected_digest,
+            backup=backup,
+        )
+
+    _guarded_write(
+        path,
+        expected_digest,
+        state=state,
+        deadline=deadline,
+        guard=guard,
+        write=write,
+    )
 
 
 def _discover_current(root: Path, hashes: frozenset[str] = frozenset(), *, strict: bool = True):
@@ -697,10 +846,20 @@ def publish(root: Path, state: Path, summary: str, event: dt.datetime,
                 _reconcile_current(root, records, hashes)
             previous_metadata = dict(metadata)
             manuals = {}
+            view_snapshots: dict[str, str | None] = {}
             for name in VIEW_NAMES:
                 if contains_suppressed_unit(f'🔮 850-Companion/{name}', hashes):
                     continue
-                prefix, suffix, meta = _manual_for_view(root, name, metadata.get(name), records, write_source=True, canonical=canonical)
+                prefix, suffix, meta = _manual_for_view(
+                    root,
+                    name,
+                    metadata.get(name),
+                    records,
+                    write_source=True,
+                    canonical=canonical,
+                    state=state,
+                    view_snapshot=view_snapshots,
+                )
                 manuals[name] = prefix, suffix
                 metadata[name] = meta
             current = records.get(session_key)
@@ -712,8 +871,18 @@ def publish(root: Path, state: Path, summary: str, event: dt.datetime,
             atomic_write_json(canonical_path, _catalog_payload(records, previous_metadata), sort_keys=True)
             for name, payload in _render(records, manuals, hashes).items():
                 path = _view_path(root, name)
-                if not path.is_file() or path.read_bytes() != payload:
-                    _write_projection(path, payload)
+                current = path.read_bytes() if path.is_file() else None
+                current_digest = _sha(current) if current is not None else None
+                expected_digest = view_snapshots.get(name, current_digest)
+                if current_digest != expected_digest:
+                    raise ValueError(_MANUAL_WRITE_CONFLICT)
+                if current != payload:
+                    _write_projection(
+                        path,
+                        payload,
+                        expected_digest=expected_digest,
+                        state=state,
+                    )
             atomic_write_json(canonical_path, _catalog_payload(records, metadata), sort_keys=True)
 
 
