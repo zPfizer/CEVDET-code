@@ -1694,6 +1694,9 @@ def redrive_dead_letter(
             if _has_verified_successor(_job_root(state_dir), job):
                 skipped.append((job["job_id"], "zaten kurtarılmış"))
                 continue
+            if _has_redrive_marker(job):
+                skipped.append((job["job_id"], "önceki redrive dead-letter'da kaldı"))
+                continue
             if job["kind"] == "flush":
                 hook_input = _hook_input_reference(job["payload"])
                 if (
