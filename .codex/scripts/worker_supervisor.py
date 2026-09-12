@@ -142,20 +142,42 @@ def _process_owner_identity(pid: int) -> str | None:
     return identity if isinstance(identity, str) and identity else None
 
 
-def _process_owner_is_active(job: dict[str, Any]) -> bool:
-    owner_pid = job.get("owner_pid")
+def _process_owner_classification(record: dict[str, Any]) -> str:
+    owner_pid = record.get("owner_pid")
     if not isinstance(owner_pid, int) or isinstance(owner_pid, bool) or owner_pid <= 0:
-        return False
+        return "inactive"
     if not pid_is_alive(owner_pid):
-        return False
-    expected_identity = job.get("owner_identity")
+        return "inactive"
+    if "owner_identity" not in record or record["owner_identity"] is None:
+        return "unsupported"
+    expected_identity = record["owner_identity"]
     if not isinstance(expected_identity, str) or not expected_identity:
-        return True
+        return "invalid"
     current_identity = _process_owner_identity(owner_pid)
     if current_identity is None:
-        # An alive process with an unprovable birth identity stays protected.
-        return True
-    return current_identity == expected_identity
+        return "unreadable"
+    return "matching" if current_identity == expected_identity else "mismatched"
+
+
+def _process_owner_is_active(job: dict[str, Any]) -> bool:
+    return _process_owner_classification(job) in {
+        "unsupported",
+        "invalid",
+        "unreadable",
+        "matching",
+    }
+
+
+def owner_identity_unreadable(record: dict[str, Any]) -> bool:
+    """Kaydedilmis dogum kimligi artik okunamiyorsa True.
+
+    Boyle bir kayitta sahiplik kaniti PID'e duser: `_process_owner_is_active`
+    kasitli olarak koruma tarafinda kalir. Kanit zayifladigi icin saglik
+    raporunun bu durumu ayrica gostermesi gerekir. Kimlik hic kaydedilmemisse
+    veya platform kimlik uretemedigi icin None yazilmissa gerileme sinyali
+    yoktur; baska bir gecersiz deger ise sahiplik kaniti degildir.
+    """
+    return _process_owner_classification(record) in {"invalid", "unreadable"}
 
 
 INVALID_UNICODE_ESCAPE = re.compile(r"\\u(?![0-9a-fA-F]{4})")
