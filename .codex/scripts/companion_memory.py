@@ -14,7 +14,7 @@ from typing import Any
 
 from file_lock import locked
 from memory_ledger import (
-    MemoryRead, contains_suppressed_unit, filter_suppressed_text, is_session_only,
+    MemoryRead, contains_suppressed_unit, filter_suppressed_text, is_session_only, session_only_path,
     memory_read, memory_write_guard, sanitize_text, suppression_guard,
 )
 from state_store import atomic_write_bytes, atomic_write_json, atomic_write_text, session_scope
@@ -602,7 +602,7 @@ def previous_summary(root: Path, session_id: str, *, state: Path | None = None) 
             if path.is_file():
                 _relative, text = memory.read_source(path)
                 records = _records(text or '')
-        value = records.get(hashlib.sha256(session_id.encode()).hexdigest())
+        value = records.get(session_scope(session_id))
         if value is None or memory.excludes(f'daily/{value[0].date().isoformat()}.md'):
             return ''
         text = memory.project_text('🔮 850-Companion/Last-Session.md', _decode_escaped_evidence(value[2]))
@@ -624,8 +624,8 @@ def publish(root: Path, state: Path, summary: str, event: dt.datetime,
     parts = SessionSummary.parse(safe).sections
     if event.tzinfo is None:
         event = event.replace(tzinfo=dt.timezone.utc)
-    session_key = hashlib.sha256(session_id.encode()).hexdigest()
-    with memory_write_guard(state, session_id), locked(state / f'memory-session-only-{session_key}'):
+    session_key = session_scope(session_id)
+    with memory_write_guard(state, session_id), locked(session_only_path(state, session_id)):
         if is_session_only(state, session_id):
             raise ValueError('memory-session-excluded')
         with suppression_guard(root / '.codex/private-memory', hashes), locked(state / 'companion-publish'):
