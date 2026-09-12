@@ -22,7 +22,10 @@ from graph_integrity import graph_notes, graph_summary
 from knowledge_schema import WIKILINK, validate_knowledge_tree, wikilink_target
 from process_control import pid_is_alive
 from worker_supervisor import (
+    FLUSH_CONTINUATION_FIELDS,
+    FLUSH_REASON_PRIORITY,
     STALE_HOOK_INPUT_SECONDS,
+    HOOK_INPUT_SCHEMA_VERSION,
     SUPERVISOR_SCHEMA_VERSION,
     _process_owner_classification,
     inspect_worker_queue,
@@ -681,6 +684,33 @@ def _brain_health_check(ctx: Context) -> Check:
     return Check("Beyin sağlığı", status, f"{component}: {error}")
 
 
+def _is_current_hook_input_delivery(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    allowed = {
+        "delivery_schema_version",
+        "session_id",
+        "transcript_path",
+        "reason",
+        "event_iso",
+        *FLUSH_CONTINUATION_FIELDS,
+    }
+    if not set(payload).issubset(allowed):
+        return False
+    return (
+        type(payload.get("delivery_schema_version")) is int
+        and payload["delivery_schema_version"] == HOOK_INPUT_SCHEMA_VERSION
+        and isinstance(payload.get("session_id"), str)
+        and bool(payload["session_id"])
+        and isinstance(payload.get("transcript_path"), str)
+        and bool(payload["transcript_path"])
+        and isinstance(payload.get("reason"), str)
+        and payload["reason"] in FLUSH_REASON_PRIORITY
+        and isinstance(payload.get("event_iso"), str)
+        and bool(payload["event_iso"])
+    )
+
+
 def _state_privacy_check(ctx: Context) -> Check:
     forbidden = {
         "content",
@@ -721,13 +751,27 @@ def _state_privacy_check(ctx: Context) -> Check:
                 "FAIL",
                 f"okunamadı: {path.name} ({exc.__class__.__name__})",
             )
-        if (re.fullmatch(r'hookin-[0-9a-f]{32}\.json', path.name)
-            and isinstance(payload, dict)
-            and set(payload) == {'session_id', 'transcript_path'}
-            and isinstance(payload.get('session_id'), str)
-            and isinstance(payload.get('transcript_path'), str)
-            and 0 <= ctx.now - modified <= STALE_HOOK_INPUT_SECONDS):
-            # Bounded worker transport, removed after processing; no user text.
+        if re.fullmatch(r'hookin-[0-9a-f]{32}\.json', path.name):
+            legacy = (
+                isinstance(payload, dict)
+                and set(payload) == {'session_id', 'transcript_path'}
+                and isinstance(payload.get('session_id'), str)
+                and isinstance(payload.get('transcript_path'), str)
+            )
+            current = _is_current_hook_input_delivery(payload)
+            if (legacy or current) and 0 <= ctx.now - modified <= STALE_HOOK_INPUT_SECONDS:
+                # Bounded worker transport, removed after processing; no user text.
+                if current:
+                    inspect(
+                        {
+                            key: item
+                            for key, item in payload.items()
+                            if key not in {'session_id', 'transcript_path'}
+                        },
+                        path.name,
+                    )
+                continue
+            violations.append(f"{path.name}: geçici taşıma girdisi geçersiz")
             continue
         inspect(payload, path.name)
     if violations:
