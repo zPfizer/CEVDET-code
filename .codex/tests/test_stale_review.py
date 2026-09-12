@@ -500,6 +500,34 @@ class StaleReviewTests(unittest.TestCase):
             finally:
                 link.unlink(missing_ok=True)
 
+    def test_linked_suppression_lock_fails_closed_before_acquisition(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            outside = root / "outside-suppressions.lock"
+            vault.mkdir()
+            outside.write_bytes(b"sentinel")
+            (vault / "knowledge" / "concepts").mkdir(parents=True)
+            controls = vault / ".codex" / "private-memory" / "controls"
+            controls.mkdir(parents=True)
+            link = controls / "suppressions.lock"
+            try:
+                link.symlink_to(outside)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            target = vault / "report.md"
+            try:
+                with self.assertRaisesRegex(
+                    ledger.MemoryPreferenceError,
+                    "stale-review-runtime-path-invalid",
+                ):
+                    stale_review.write_report(vault, output=target)
+                self.assertFalse(target.exists())
+                self.assertEqual(outside.read_bytes(), b"sentinel")
+            finally:
+                link.unlink(missing_ok=True)
+
     def test_linked_compile_lock_fails_closed_before_acquisition(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

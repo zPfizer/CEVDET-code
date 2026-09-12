@@ -329,6 +329,7 @@ def _validate_runtime_paths(vault: Path) -> None:
     for parts in (
         (".codex", "scripts", ".state", "compile.lock"),
         (".codex", "private-memory", "controls", "suppressions.jsonl"),
+        (".codex", "private-memory", "controls", "suppressions.lock"),
     ):
         current = vault.joinpath(*parts)
         try:
