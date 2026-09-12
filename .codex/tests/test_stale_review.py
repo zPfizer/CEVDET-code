@@ -618,7 +618,7 @@ class StaleReviewTests(unittest.TestCase):
             finally:
                 link.unlink(missing_ok=True)
 
-    def test_hard_linked_runtime_locks_fail_closed_before_acquisition(self) -> None:
+    def test_hard_linked_runtime_controls_fail_closed_before_use(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             vault = root / "vault"
@@ -635,6 +635,10 @@ class StaleReviewTests(unittest.TestCase):
                 (
                     Path(".codex/private-memory/controls/suppressions.lock"),
                     "outside-suppressions.lock",
+                ),
+                (
+                    Path(".codex/private-memory/controls/suppressions.jsonl"),
+                    "outside-suppressions.jsonl",
                 ),
             ):
                 with self.subTest(relative=relative):

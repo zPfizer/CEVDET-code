@@ -394,10 +394,7 @@ def _validate_runtime_paths(vault: Path) -> None:
             if (
                 stat.S_ISLNK(current_stat.st_mode)
                 or not stat.S_ISREG(current_stat.st_mode)
-                or (
-                    current.name in {"compile.lock", "suppressions.lock"}
-                    and current_stat.st_nlink != 1
-                )
+                or current_stat.st_nlink != 1
                 or not resolved.is_relative_to(vault)
             ):
                 raise ValueError("runtime-file-invalid")
