@@ -261,6 +261,24 @@ class JourneyE2ETests(unittest.TestCase):
         )
         self.assertIn(marker, context)
 
+    def _assert_session_end_succeeded(self, state: Path, session_id: str) -> None:
+        session_end_key = hashlib.sha256(
+            session_id.encode("utf-8")
+        ).hexdigest()
+        session_end_receipt = (
+            state / f"runtime-session-end-{session_end_key}.json"
+        )
+        self.assertTrue(
+            session_end_receipt.is_file(),
+            "session-end runtime makbuzu yok",
+        )
+        session_end_runtime = json.loads(
+            session_end_receipt.read_text(encoding="utf-8")
+        )
+        self.assertEqual(session_end_runtime["event"], "session-end")
+        self.assertEqual(session_end_runtime["session_key"], session_end_key)
+        self.assertEqual(session_end_runtime["event_generation"], 1)
+
     def test_model_stub_rejects_missing_or_misordered_transcript(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cevo-journey-stub-") as temporary:
             root = Path(temporary)
@@ -328,7 +346,7 @@ class JourneyE2ETests(unittest.TestCase):
             prompt = _run_hook(
                 vault, "user-prompt",
                 {"session_id": session_id, "cwd": str(vault),
-                 "prompt": "Atlas projesine başlayalım; hızlı ilerleyelim."},
+                 "prompt": TRANSCRIPT_MESSAGES[0]},
                 environment,
             )
             self._assert_prompt_succeeded(prompt, vault, state, "[Vault Arama Sonucu]")
@@ -337,21 +355,7 @@ class JourneyE2ETests(unittest.TestCase):
 
             ended = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(ended.returncode, 0, ended.stderr)
-            session_end_key = hashlib.sha256(
-                session_id.encode("utf-8")
-            ).hexdigest()
-            session_end_receipt = (
-                state / f"runtime-session-end-{session_end_key}.json"
-            )
-            self.assertTrue(
-                session_end_receipt.is_file(),
-                "session-end runtime makbuzu yok",
-            )
-            session_end_runtime = json.loads(
-                session_end_receipt.read_text(encoding="utf-8")
-            )
-            self.assertEqual(session_end_runtime["event"], "session-end")
-            self.assertEqual(session_end_runtime["session_key"], session_end_key)
+            self._assert_session_end_succeeded(state, session_id)
             _drain_worker(vault, environment)
 
             daily = vault / "daily" / f"{datetime.date.today().isoformat()}.md"
@@ -464,6 +468,7 @@ class JourneyE2ETests(unittest.TestCase):
 
             ended = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(ended.returncode, 0, ended.stderr)
+            self._assert_session_end_succeeded(state, session_id)
 
             # Salt okunur kapanış hiçbir iş kuyruklamaz: bekleme gerekmez,
             # dönüş anında ne hookin taşıyıcısı ne pending iş ne daily olmalı.
