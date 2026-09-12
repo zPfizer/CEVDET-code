@@ -3,7 +3,10 @@
 Yedek `git bundle --all` ile üretilir: bütün ref'ler ve commit geçmişi tek
 dosyada taşınır, `git clone <bundle>` ile eksiksiz geri yüklenir. Bundle yalnız
 commit edilmiş durumu kapsar; çalışma ağacındaki commit'lenmemiş değişiklikler
-özette ayrıca raporlanır ki kullanıcı yedeğin neyi kapsamadığını görsün.
+özette ayrıca raporlanır ki kullanıcı yedeğin neyi kapsamadığını görsün. Kaynak
+ref'leri yayın öncesi yakalanan point-in-time snapshot ile bağlanır; karşılaştırma
+sonrası yazılan commit bir sonraki yedeğin kapsamındadır. Canlı Git yazıcıları
+için nanosaniye düzeyinde atomik snapshot garantisi verilmez.
 """
 
 from __future__ import annotations
@@ -153,9 +156,6 @@ def _require_repo(vault: Path) -> None:
 
 
 def _repository_identity(vault: Path) -> str:
-    roots = sorted(set(_git(vault, "rev-list", "--all", "--max-parents=0").stdout.split()))
-    if not roots:
-        raise BackupError(f"vault Git kök commit'i yok: {vault}")
     git_dir_text = _git(vault, "rev-parse", "--git-dir").stdout.strip()
     git_dir = Path(git_dir_text)
     if not git_dir.is_absolute():
@@ -168,8 +168,8 @@ def _repository_identity(vault: Path) -> str:
         getattr(git_stat, "st_birthtime_ns", git_stat.st_ctime_ns)
         if os.name == "nt" else ""
     )
-    return "\n".join(roots) + (
-        f"\ngit-dir={git_dir.resolve()}"
+    return (
+        f"git-dir={git_dir.resolve()}"
         f"\nst_dev={git_stat.st_dev}\nst_ino={git_stat.st_ino}"
         f"\nst_birthtime_ns={birthtime}"
     )
@@ -222,6 +222,13 @@ def _validate_owned_destination(dest: Path, owned_dest: Path) -> None:
         raise BackupError(f"yedek namespace'i doğrulanamadı: {owned_dest}") from exc
 
 
+def _validate_locked_source(vault: Path, owned_dest: Path) -> None:
+    current_owned = _owned_destination(owned_dest.parent, vault)
+    if current_owned != owned_dest:
+        raise BackupError("vault kimliği lock edinildikten sonra değişti")
+    _validate_owned_destination(owned_dest.parent, owned_dest)
+
+
 def _prepare_dest(vault: Path, dest: Path) -> tuple[Path, Path]:
     vault = Path(vault).resolve()
     dest = Path(dest).resolve()
@@ -257,6 +264,8 @@ def _create_bundle_locked(vault: Path, dest: Path, *, now: float | None = None) 
         _validate_bundle_artifact(vault, partial)
         bundle_refs = _bundle_ref_snapshot(vault, partial)
         source_refs = _ref_snapshot(vault)
+        # This comparison binds the published artifact to one source snapshot;
+        # a later writer belongs to a subsequent point-in-time backup.
         if bundle_refs != source_refs:
             raise BackupError("Vault ref'leri bundle snapshot'ı sırasında değişti")
         os.replace(partial, final)
@@ -269,7 +278,7 @@ def create_bundle(vault: Path, dest: Path, *, now: float | None = None) -> Path:
     """Bundle'ı geçici ada yazar, doğrular, sonra son adına taşır."""
     vault, owned_dest = _prepare_dest(vault, dest)
     with locked(_lock_target(owned_dest)):
-        _validate_owned_destination(owned_dest.parent, owned_dest)
+        _validate_locked_source(vault, owned_dest)
         return _create_bundle_locked(vault, owned_dest, now=now)
 
 
@@ -285,11 +294,20 @@ def _validate_keep(keep: int) -> None:
         raise BackupError(f"keep en az 1 olmalı: {keep}")
 
 
+def _verify_bundle(vault: Path, bundle: Path) -> None:
+    try:
+        _git(vault, "bundle", "verify", str(bundle))
+    except BackupError as error:
+        raise BackupError(f"yedek bundle doğrulanamadı: {bundle}") from error
+
+
 def _prune_bundles_locked(
-    dest: Path, keep: int, *, preserve: Path | None = None,
+    vault: Path, dest: Path, keep: int, *, preserve: Path | None = None,
 ) -> list[Path]:
     _validate_keep(keep)
     bundles = sorted(_bundle_files(dest), key=_bundle_sort_key, reverse=True)
+    for bundle in bundles:
+        _verify_bundle(vault, bundle)
     if preserve is None:
         retained = set(bundles[:keep])
     else:
@@ -315,8 +333,8 @@ def prune_bundles(dest: Path, keep: int, *, vault: Path) -> list[Path]:
     """Yalnız `vault` kaynak namespace'inin en yeni bundle'larını tutar."""
     _vault, owned_dest = _prepare_dest(vault, dest)
     with locked(_lock_target(owned_dest)):
-        _validate_owned_destination(owned_dest.parent, owned_dest)
-        return _prune_bundles_locked(owned_dest, keep)
+        _validate_locked_source(_vault, owned_dest)
+        return _prune_bundles_locked(_vault, owned_dest, keep)
 
 
 def _create_and_prune(
@@ -325,15 +343,21 @@ def _create_and_prune(
     _validate_keep(keep)
     vault, owned_dest = _prepare_dest(vault, dest)
     with locked(_lock_target(owned_dest)):
-        _validate_owned_destination(owned_dest.parent, owned_dest)
+        _validate_locked_source(vault, owned_dest)
         bundle = _create_bundle_locked(vault, owned_dest, now=now)
         try:
-            removed = _prune_bundles_locked(owned_dest, keep, preserve=bundle)
+            removed = _prune_bundles_locked(
+                vault, owned_dest, keep, preserve=bundle,
+            )
         except _PruneError as error:
             raise _CompletedBackupWarning(
                 bundle, error.removed, bundle.stat().st_size, error,
             ) from error
         except OSError as error:
+            raise _CompletedBackupWarning(
+                bundle, [], bundle.stat().st_size, error,
+            ) from error
+        except BackupError as error:
             raise _CompletedBackupWarning(
                 bundle, [], bundle.stat().st_size, error,
             ) from error

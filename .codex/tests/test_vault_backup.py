@@ -1,4 +1,4 @@
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from io import StringIO
 import os
 from pathlib import Path
@@ -152,6 +152,27 @@ class VaultBackupTests(unittest.TestCase):
             self.assertTrue(old_bundle.exists())
             self.assertTrue(new_bundle.exists())
 
+    def test_namespace_stays_stable_when_root_set_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            first = vault_backup.create_bundle(vault, dest, now=1_758_000_000)
+
+            tree = _git(vault, "rev-parse", "HEAD^{tree}").stdout.strip()
+            orphan = _git(
+                vault,
+                "-c", "user.name=test",
+                "-c", "user.email=test@example.invalid",
+                "commit-tree", tree, "-m", "orphan",
+            ).stdout.strip()
+            _git(vault, "update-ref", "refs/heads/orphan", orphan)
+
+            second = vault_backup.create_bundle(vault, dest, now=1_758_000_001)
+
+            self.assertEqual(first.parent, second.parent)
+
     def test_repo_without_commits_fails_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -240,7 +261,8 @@ class VaultBackupTests(unittest.TestCase):
             foreign = owned / "vault-notlar.bundle"
             foreign.write_bytes(b"x")
 
-            removed = vault_backup.prune_bundles(dest, keep=2, vault=vault)
+            with mock.patch.object(vault_backup, "_verify_bundle"):
+                removed = vault_backup.prune_bundles(dest, keep=2, vault=vault)
 
             self.assertEqual(
                 sorted(path.name for path in removed),
@@ -266,7 +288,8 @@ class VaultBackupTests(unittest.TestCase):
             for name in names:
                 (owned / name).write_bytes(b"x")
 
-            removed = vault_backup.prune_bundles(dest, keep=1, vault=vault)
+            with mock.patch.object(vault_backup, "_verify_bundle"):
+                removed = vault_backup.prune_bundles(dest, keep=1, vault=vault)
 
             self.assertEqual(
                 sorted(path.name for path in removed),
@@ -318,6 +341,22 @@ class VaultBackupTests(unittest.TestCase):
             self.assertTrue(real_bundle.exists())
             self.assertTrue(link.is_symlink())
             self.assertTrue(outside.exists())
+
+    def test_prune_fails_closed_on_corrupt_newer_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            valid = vault_backup.create_bundle(vault, dest, now=1_758_000_000)
+            corrupt = valid.parent / "vault-20990101-000000.bundle"
+            corrupt.write_bytes(b"not a git bundle")
+
+            with self.assertRaises(vault_backup.BackupError):
+                vault_backup.prune_bundles(dest, keep=1, vault=vault)
+
+            self.assertTrue(valid.exists())
+            self.assertTrue(corrupt.exists())
 
     def test_clock_rollback_keeps_current_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -652,6 +691,25 @@ class VaultBackupTests(unittest.TestCase):
                 "_validate_bundle_artifact",
                 side_effect=validate_then_commit,
             ):
+                with self.assertRaises(vault_backup.BackupError):
+                    vault_backup.create_bundle(vault, dest)
+
+            self.assertFalse(list(dest.rglob("vault-*.bundle")))
+
+    def test_source_identity_is_rechecked_after_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+
+            @contextmanager
+            def replace_source(_lock_path: Path):
+                vault.rename(root / "old-vault")
+                _init_repo(vault)
+                yield
+
+            with mock.patch.object(vault_backup, "locked", replace_source):
                 with self.assertRaises(vault_backup.BackupError):
                     vault_backup.create_bundle(vault, dest)
 
