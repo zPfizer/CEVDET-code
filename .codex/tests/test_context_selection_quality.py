@@ -1060,6 +1060,10 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "daha önce ne karar vermiştim?": True,
             "önceden kararımız neydi?": True,
             "önceden kararımız neydi": True,
+            "daha önce veri saklama kararı vermiş miydik?": True,
+            "daha önce veri saklama kararı vermiş miydik": True,
+            "önceden uygun görmüş müydüm?": True,
+            "güncel veri saklama seçeneğini öner; daha önce bu konuda karar vermemiştik": False,
             "daha önce hangi seçeneği uygun görmüştük?": True,
             "önceden hangi seçeneği uygun görmüştüm?": True,
             "önceden haber ver": False,
@@ -1264,6 +1268,9 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                 "Daha önce veri saklama konusunda ne karar vermiştim?",
                 "Önceden veri saklama kararımız neydi?",
                 "Önceden veri saklama kararımız neydi",
+                "Daha önce veri saklama kararı vermiş miydik?",
+                "Daha önce veri saklama kararı vermiş miydik",
+                "Önceden veri saklama seçeneğini uygun görmüş müydüm?",
                 "Daha önce veri saklama için hangi seçeneği uygun görmüştük?",
                 "Önceden veri saklama için hangi seçeneği uygun görmüştüm?",
                 "Güncel veri saklama kararı ve daha önce veri saklama konusunda ne karar vermiştik?",
@@ -1308,16 +1315,16 @@ type: research-analysis
 Geçmiş veri saklama kararı: uzun günlükler.
 """,
             )
-            query = "Daha önce veri saklama kararı vermiştik, şimdi nasıl değiştirelim?"
-            terms = retrieval._retrieval_terms(query)
-            self.assertFalse(retrieval._is_history_query(terms, query))
-            hits = retrieval.search_vault(
-                retrieval.build_vault_map(root, write_cache=False),
-                query,
-                top_k=2,
-            )
-
-        self.assertEqual([hit.entry.path for hit in hits], [current])
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            for query in (
+                "Daha önce veri saklama kararı vermiştik, şimdi nasıl değiştirelim?",
+                "Güncel veri saklama seçeneğini öner; daha önce bu konuda karar vermemiştik",
+            ):
+                with self.subTest(query=query):
+                    terms = retrieval._retrieval_terms(query)
+                    self.assertFalse(retrieval._is_history_query(terms, query))
+                    hits = retrieval.search_vault(entries, query, top_k=2)
+                    self.assertEqual([hit.entry.path for hit in hits], [current])
 
     def test_mixed_topicless_retrospective_clause_inherits_current_subject(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

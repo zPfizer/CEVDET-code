@@ -203,9 +203,13 @@ HISTORY_TURKISH_NOMINAL_CHANGE_QUERY = re.compile(
 # `daha önce`/`önceden` retrospective; imperative forms such as
 # `daha önce bitir` stay current.
 HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS = frozenset({"hangi", "secenegi", "uygun"})
+HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY = r"m(?:iydi|uydu)[mk]"
+HISTORY_TURKISH_RETROSPECTIVE_PAST = (
+    rf"\w+m(?:(?:isti|ustu)[mk]|(?:is|us)\s+{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY})"
+)
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
     r"(?ix)(?:"
-    r"\b(?:daha\s+once|onceden)\b(?:\s+\w+){0,8}\s+\w+m(?:isti|ustu)[mk]\b(?=\s*(?:\?|$))"
+    rf"\b(?:daha\s+once|onceden)\b(?:\s+\w+){{0,8}}\s+{HISTORY_TURKISH_RETROSPECTIVE_PAST}\b(?=\s*(?:\?|$))"
     r"|\b(?:daha\s+once|onceden)\b(?:\s+\w+){0,3}\s+karar\w*"
     r"(?:\s+\w+){0,2}\s+neydi\b(?=\s*(?:\?|$))"
     r")"
@@ -1548,21 +1552,35 @@ def _has_history_context(query: str) -> bool:
     return False
 
 
+def _retrospective_question_terms(normalized: str) -> frozenset[str]:
+    return frozenset(
+        term for term in re.findall(r"\w+", normalized)
+        if term in {"neydi", "nasil", "niye", "nicin"}
+        or re.fullmatch(HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY, term)
+        or any(term == root or _matches_history_inflection(term, root) for root in ("hangi", "ne"))
+    )
+
+
+def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
+    return [
+        match for match in HISTORY_TURKISH_RETROSPECTIVE_QUERY.finditer(normalized)
+        if normalized[match.end():].lstrip().startswith("?")
+        or _retrospective_question_terms(match.group())
+    ]
+
+
 def _retrospective_topic_cue_terms(query: str) -> frozenset[str]:
     cue_terms: set[str] = set()
     normalized = _normalize(query)
-    for match in HISTORY_TURKISH_RETROSPECTIVE_QUERY.finditer(normalized):
+    for match in _retrospective_question_matches(normalized):
         retrospective = match.group()
         marker = re.match(r"\b(?:daha\s+once|onceden)\b", retrospective)
         if marker:
             cue_terms.update(_tokens(marker.group()))
-        past = re.search(r"\b\w+m(?:isti|ustu)[mk]\b", retrospective)
+        past = re.search(rf"\b{HISTORY_TURKISH_RETROSPECTIVE_PAST}\b", retrospective)
         if past:
-            cue_terms.add(past.group())
-        question_terms = {
-            term for term in re.findall(r"\w+", retrospective)
-            if any(term == root or _matches_history_inflection(term, root) for root in ("hangi", "ne"))
-        }
+            cue_terms.update(_tokens(past.group()))
+        question_terms = _retrospective_question_terms(retrospective)
         cue_terms.update(question_terms)
         if question_terms:
             cue_terms.update(
@@ -1571,7 +1589,7 @@ def _retrospective_topic_cue_terms(query: str) -> frozenset[str]:
                 if term in HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS
             )
         decision = re.search(
-            r"\b(?P<decision>karar\w*)\b(?=\s+(?:\w+m(?:isti|ustu)[mk]|neydi)\b)",
+            rf"\b(?P<decision>karar\w*)\b(?=\s+(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b)",
             retrospective,
         )
         if decision:
@@ -1600,7 +1618,7 @@ def _has_history_query_cues(query_terms: frozenset[str], query: str = "") -> boo
         query and HISTORY_TURKISH_NOMINAL_CHANGE_QUERY.search(_normalize(query))
     )
     has_turkish_retrospective = bool(
-        query and HISTORY_TURKISH_RETROSPECTIVE_QUERY.search(_normalize(query))
+        query and _retrospective_question_matches(_normalize(query))
     )
     unambiguous_history_terms = history_terms - {"before", "past", "previous", "onceki", "tarih"}
     if (
@@ -1906,9 +1924,9 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
         HISTORY_CHANGE_QUERY,
         HISTORY_NOMINAL_CHANGE_QUERY,
         HISTORY_TURKISH_NOMINAL_CHANGE_QUERY,
-        HISTORY_TURKISH_RETROSPECTIVE_QUERY,
     ):
         history_spans.update((match.start(), match.end()) for match in pattern.finditer(normalized))
+    history_spans.update((match.start(), match.end()) for match in _retrospective_question_matches(normalized))
     date_history_spans = {
         (reference.start, reference.end)
         for reference in _date_references(normalized)
