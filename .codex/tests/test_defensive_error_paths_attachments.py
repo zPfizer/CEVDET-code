@@ -134,6 +134,20 @@ class AttachmentMappingGuards(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         attachment_memory._load_mapping(path, UUID1)
 
+    def test_empty_mapping_rejects_note_fields(self) -> None:
+        base = self._valid_mapping()
+        empty = {
+            key: value for key, value in base.items()
+            if key not in {'note_relative', 'note_sha256'}
+        }
+        empty['status'] = 'empty'
+        empty['note_relative'] = 'unexpected.md'
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'eslesme.json'
+            path.write_text(json.dumps(empty), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'attachment-mapping-invalid'):
+                attachment_memory._load_mapping(path, UUID1)
+
     def test_symlinked_mapping_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

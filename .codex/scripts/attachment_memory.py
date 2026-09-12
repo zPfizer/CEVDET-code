@@ -97,16 +97,33 @@ def _load_mapping(path: Path, attachment_id: str) -> dict[str, Any] | None:
         raise ValueError('attachment-mapping-invalid') from exc
     if not isinstance(payload, dict) or payload.get('schema_version') != MAPPING_SCHEMA_VERSION:
         raise ValueError('attachment-mapping-invalid')
-    if payload.get('attachment_id') != attachment_id or payload.get('status') not in {'prepared', 'committed'}:
+    status = payload.get('status')
+    if payload.get('attachment_id') != attachment_id or status not in {'prepared', 'committed', 'empty'}:
         raise ValueError('attachment-mapping-invalid')
     if payload.get('source_attachment') != f'{attachment_id}/pasted-text.txt':
         raise ValueError('attachment-mapping-invalid')
-    for field in ('envelope_sha256', 'source_sanitized_sha256', 'source_sha256', 'note_sha256', 'suppression_revision'):
+    if 'source_changed' in payload and payload['source_changed'] is not True:
+        raise ValueError('attachment-mapping-invalid')
+    for field in ('envelope_sha256', 'source_sanitized_sha256', 'source_sha256', 'suppression_revision'):
         if not isinstance(payload.get(field), str) or not HEX64.fullmatch(payload[field]):
             raise ValueError('attachment-mapping-invalid')
-    if not isinstance(payload.get('note_relative'), str):
+    if status in {'prepared', 'committed'}:
+        if not isinstance(payload.get('note_sha256'), str) or not HEX64.fullmatch(payload['note_sha256']):
+            raise ValueError('attachment-mapping-invalid')
+        if not isinstance(payload.get('note_relative'), str):
+            raise ValueError('attachment-mapping-invalid')
+        _note_path(Path('.'), payload['note_relative'], attachment_id, payload['source_sha256'])
+    elif 'note_relative' in payload or 'note_sha256' in payload:
         raise ValueError('attachment-mapping-invalid')
-    _note_path(Path('.'), payload['note_relative'], attachment_id, payload['source_sha256'])
+    if 'empty_result' in payload:
+        empty_result = payload['empty_result']
+        if (
+            status == 'empty'
+            or not isinstance(empty_result, dict)
+            or set(empty_result) != {'source_sha256', 'suppression_revision'}
+            or any(not isinstance(value, str) or not HEX64.fullmatch(value) for value in empty_result.values())
+        ):
+            raise ValueError('attachment-mapping-invalid')
     if not isinstance(payload.get('event_date'), str) or not _valid_date(payload['event_date']):
         raise ValueError('attachment-mapping-invalid')
     redactions = payload.get('redactions')
@@ -273,6 +290,31 @@ def _mapping(
     }
 
 
+def _empty_mapping(
+    *,
+    attachment_id: str,
+    source_attachment: str,
+    envelope_digest: str,
+    source_sanitized_digest: str,
+    source_digest: str,
+    suppression_revision: str,
+    event_date: str,
+    redactions: Sequence[str],
+) -> dict[str, Any]:
+    return {
+        'schema_version': MAPPING_SCHEMA_VERSION,
+        'status': 'empty',
+        'attachment_id': attachment_id,
+        'source_attachment': source_attachment,
+        'envelope_sha256': envelope_digest,
+        'source_sanitized_sha256': source_sanitized_digest,
+        'source_sha256': source_digest,
+        'suppression_revision': suppression_revision,
+        'event_date': event_date,
+        'redactions': list(redactions),
+    }
+
+
 @contextmanager
 def _publication_scope(state_dir: Path, session_id: str | None) -> Iterator[None]:
     with memory_write_guard(state_dir, session_id):
@@ -320,11 +362,32 @@ def _capture_one_core(
             raw_digest = source_record['source_sanitized_sha256']
             visible = source_record['visible']
             redactions = source_record['redactions']
-            if mapping is not None and mapping['source_sanitized_sha256'] != raw_digest:
-                raise ValueError('attachment-content-changed')
+            if mapping is not None:
+                changed = mapping['source_sanitized_sha256'] != raw_digest
+                if changed or mapping.get('source_changed'):
+                    updated = dict(mapping)
+                    if changed:
+                        updated['source_changed'] = True
+                    else:
+                        updated.pop('source_changed')
+                    if updated != mapping:
+                        with _publication_scope(state_dir, session_id):
+                            with suppression_guard(vault_root / '.codex/private-memory', hashes):
+                                _write_mapping(mapping_path, updated)
+                        mapping = updated
+                if changed:
+                    raise ValueError('attachment-content-changed')
         else:
             if mapping is None:
                 raise ValueError('attachment-recovery-unavailable')
+            if mapping.get('source_changed'):
+                raise ValueError('attachment-content-changed')
+            if mapping['status'] == 'empty':
+                if mapping['suppression_revision'] != _suppression_revision(hashes):
+                    raise ValueError('attachment-recovery-unavailable')
+                with _publication_scope(state_dir, session_id):
+                    with suppression_guard(vault_root / '.codex/private-memory', hashes):
+                        return None
             mapped_path = _note_path(
                 vault_root, mapping['note_relative'], attachment_id, mapping['source_sha256']
             )
@@ -343,19 +406,12 @@ def _capture_one_core(
             visible = filter_suppressed_text(recovered_source, hashes)
             raw_digest = _attachment_digest(recovered_source)
 
-        if not visible.strip():
-            return None
         source_digest = _attachment_digest(visible)
         revision = _suppression_revision(hashes)
         destination = vault_root / _note_relative(attachment_id, source_digest)
-        empty = state_dir / f'attachment-empty-{source_digest}'
-        if empty.is_file():
-            with _publication_scope(state_dir, session_id):
-                with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                    return None
         mapped_note = None
         summary_only_rebuild = False
-        if mapping is not None:
+        if mapping is not None and mapping['status'] != 'empty':
             mapped_path = _note_path(
                 vault_root, mapping['note_relative'], attachment_id, mapping['source_sha256']
             )
@@ -367,6 +423,53 @@ def _capture_one_core(
                     source_digest=mapping['source_sha256'],
                     source_attachment=source_attachment,
                 )
+
+        def retain_empty_result() -> None:
+            with _publication_scope(state_dir, session_id):
+                with suppression_guard(vault_root / '.codex/private-memory', hashes):
+                    if (
+                        mapping is None
+                        or mapping['status'] == 'empty'
+                        or (mapping['status'] == 'prepared' and mapped_note is None)
+                    ):
+                        updated = _empty_mapping(
+                            attachment_id=attachment_id,
+                            source_attachment=source_attachment,
+                            envelope_digest=envelope_digest,
+                            source_sanitized_digest=raw_digest,
+                            source_digest=source_digest,
+                            suppression_revision=revision,
+                            event_date=mapping['event_date'] if mapping is not None else event_time.date().isoformat(),
+                            redactions=redactions,
+                        )
+                    else:
+                        updated = dict(mapping)
+                        updated['empty_result'] = {
+                            'source_sha256': source_digest, 'suppression_revision': revision,
+                        }
+                    if updated != mapping:
+                        _write_mapping(mapping_path, updated)
+
+        if not visible.strip():
+            retain_empty_result()
+            return None
+        if (
+            mapping is not None
+            and mapping['status'] == 'empty'
+            and mapping['source_sanitized_sha256'] == raw_digest
+            and mapping['source_sha256'] == source_digest
+            and mapping['suppression_revision'] == revision
+        ):
+            with _publication_scope(state_dir, session_id):
+                with suppression_guard(vault_root / '.codex/private-memory', hashes):
+                    return None
+
+        if mapped_note is not None and mapping.get('empty_result') == {
+            'source_sha256': source_digest, 'suppression_revision': revision,
+        }:
+            with _publication_scope(state_dir, session_id):
+                with suppression_guard(vault_root / '.codex/private-memory', hashes):
+                    return None
 
         if mapping is not None and mapping['source_sha256'] == source_digest:
             if mapped_note is not None:
@@ -386,7 +489,7 @@ def _capture_one_core(
             elif mapping['status'] == 'committed':
                 raise ValueError('attachment-recovery-unavailable')
 
-        if mapping is None and destination.exists():
+        if (mapping is None or mapping['status'] == 'empty') and destination.exists():
             if destination.is_symlink() or not destination.is_file():
                 raise ValueError('attachment-note-invalid')
             legacy = _read_note(
@@ -405,7 +508,7 @@ def _capture_one_core(
                 note_relative=destination.relative_to(vault_root),
                 note_digest=_attachment_digest(legacy['text']),
                 suppression_revision=revision,
-                event_date=event_time.date().isoformat(),
+                event_date=mapping['event_date'] if mapping is not None else event_time.date().isoformat(),
                 redactions=redactions,
                 status='committed',
             )
@@ -422,19 +525,18 @@ def _capture_one_core(
 
         generated_summary = _summary_from_model(summarize, visible)
         if generated_summary is None:
-            with _publication_scope(state_dir, session_id):
-                with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                    atomic_write_text(state_dir / f'attachment-empty-{source_digest}', 'no-durable-content\n')
+            retain_empty_result()
             return None
         summary = filter_suppressed_text(generated_summary, hashes)
         if not summary.strip():
+            retain_empty_result()
             return None
         if summary_only_rebuild and mapping is not None and destination.is_file():
             with _publication_scope(state_dir, session_id):
                 with suppression_guard(vault_root / '.codex/private-memory', hashes):
                     return destination.relative_to(vault_root).with_suffix('').as_posix(), summary
 
-        note_date = mapping['event_date'] if mapping is not None and mapping['status'] == 'prepared' else None
+        note_date = mapping['event_date'] if mapping is not None and mapping['status'] in {'prepared', 'empty'} else None
         rendered = _render_note(
             event_time, attachment_id, source_attachment, visible, summary,
             source_digest, redactions, note_date,
