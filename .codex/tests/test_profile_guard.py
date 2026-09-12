@@ -122,6 +122,43 @@ class ProfileGuardTests(unittest.TestCase):
             "Portre içinde devam.",
         )
 
+    def test_fenced_structured_rows_cannot_supply_profile_provenance(self) -> None:
+        fenced_concept = CONCEPT_TEXT.replace(
+            "- `gecerli` `kullanici-dusuncesi` `guncel` 2026-09-04 "
+            "[[daily/2026-09-04|Kaynak]] — Türkçe ve kısa yanıt ver.",
+            '```markdown\n'
+            "## Örnek kayıt\n"
+            "- `gecerli` `kullanici-dusuncesi` `guncel` 2026-09-04 "
+            "[[daily/2026-09-04|Kaynak]] — Türkçe ve kısa yanıt ver.\n"
+            '```',
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seed_profile(root)
+            (root / "knowledge/concepts/tercih-kisa.md").write_text(
+                fenced_concept,
+                encoding="utf-8",
+            )
+
+            self.assertIn("profile-claim-provenance", profile_guard.check_profile(root))
+
+    def test_empty_level_two_and_three_headings_end_style_section(self) -> None:
+        for empty_heading in ("##", "###   "):
+            for newline in ("\n", "\r\n"):
+                with self.subTest(empty_heading=empty_heading, newline=repr(newline)), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    seed_profile(root)
+                    text = PROFILE_TEXT.replace(
+                        "## Vault'ta çalışma ve yanıt tarzı\n\n"
+                        "- Türkçe ve kısa yanıt ver Kaynak: [[knowledge/concepts/tercih-kisa#Kayıtlar|Kısa yanıt]] · kullanıcı tercihi · 2026-09-04.\n",
+                        "## Vault'ta çalışma ve yanıt tarzı\n\n"
+                        f"{empty_heading}\n\n"
+                        "- Türkçe ve kısa yanıt ver Kaynak: [[knowledge/concepts/tercih-kisa#Kayıtlar|Kısa yanıt]] · kullanıcı tercihi · 2026-09-04.\n",
+                    ).replace("\n", newline)
+
+                    self.assertIn("profile-preference-missing", profile_guard.check_profile(root, text))
+
     def test_real_duplicate_portrait_headings_remain_invalid(self) -> None:
         duplicate = PROFILE_TEXT.replace(
             "Kısa ve doğal bir oturum özeti.",

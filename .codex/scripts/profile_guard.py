@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import unicodedata
 
+from graph_integrity import _markdown_body
 from knowledge_schema import CLAIM_ROW, WIKILINK, markdown_headings
 from user_evidence import USER_LINK, proof_for_link
 
@@ -21,6 +22,7 @@ _PREFERENCE = re.compile(
     r"\|(?P<alias>[^\]]+)\]\]\s+·\s+kullanıcı tercihi\s+·\s+"
     r"(?P<date>\d{4}-\d{2}-\d{2})\.[ \t]*$"
 )
+_EMPTY_SECTION = re.compile(r"(?m)^#{2,3}[ \t]*\r?$")
 _ReadSource = Callable[[Path], str | None]
 
 
@@ -34,15 +36,24 @@ def _heading(text: str, title: str) -> list[tuple[str, str, int, int]]:
 
 def _section(text: str, match: tuple[str, str, int, int]) -> str:
     start = match[3]
-    end = next(
-        (
-            heading[2]
-            for heading in markdown_headings(text)
-            if heading[0] in ("##", "###") and heading[2] > match[2]
-        ),
-        len(text),
-    )
+    masked = _markdown_body(text, mask_frontmatter=False, mask_inline_code=False)
+    boundaries = [
+        heading[2]
+        for heading in markdown_headings(masked)
+        if heading[0] in ("##", "###") and heading[2] > match[2]
+    ]
+    if empty := _EMPTY_SECTION.search(masked, start):
+        boundaries.append(empty.start())
+    end = min(boundaries, default=len(text))
     return text[start:end]
+
+
+def _structured_section(text: str, match: tuple[str, str, int, int]) -> str:
+    return _markdown_body(
+        _section(text, match),
+        mask_frontmatter=False,
+        mask_inline_code=False,
+    )
 
 
 def _iso(value: str) -> date | None:
@@ -178,7 +189,7 @@ def _claim_rows(text: str) -> list[tuple[str, ...]]:
         return []
     return [
         match.groups()
-        for line in _section(text, headings[0]).splitlines()
+        for line in _structured_section(text, headings[0]).splitlines()
         if (match := CLAIM_ROW.fullmatch(line)) is not None
     ]
 
@@ -223,7 +234,11 @@ def _check_preference(
         _daily, error = _read(root, daily_path, reader, "profile-daily-missing", "profile-daily-unavailable")
         if error:
             issues.append(error)
-        for line in (source or '').splitlines():
+        for line in _markdown_body(
+            source or '',
+            mask_frontmatter=False,
+            mask_inline_code=False,
+        ).splitlines():
             parsed = CLAIM_ROW.fullmatch(line)
             if parsed and parsed.groups() == row and USER_LINK.search(line):
                 proof = proof_for_link(root, line, reader=reader)
@@ -267,7 +282,7 @@ def check_profile(
     _check_links(text, root, issues)
     if updated is None or len(style_matches) != 1:
         return tuple(dict.fromkeys(issues))
-    bullets = [line for line in _section(text, style_matches[0]).splitlines()
+    bullets = [line for line in _structured_section(text, style_matches[0]).splitlines()
                if re.match(r"^\s*(?:[-+*]|\d+[.)])\s+", line)]
     if not bullets:
         issues.append("profile-preference-missing")

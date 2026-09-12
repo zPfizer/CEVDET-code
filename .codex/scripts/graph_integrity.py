@@ -67,8 +67,13 @@ def _blank_inline_code(chars: list[str], text: str) -> None:
         index = close + len(delimiter)
 
 
-def _markdown_body(text: str, *, mask_frontmatter: bool = True) -> str:
-    """Mask frontmatter and Markdown code so offsets remain usable for inserts."""
+def _markdown_body(
+    text: str,
+    *,
+    mask_frontmatter: bool = True,
+    mask_inline_code: bool = True,
+) -> str:
+    """Mask frontmatter and Markdown code while preserving source offsets."""
     chars = list(text)
     lines: list[tuple[int, int, int, str]] = []
     offset = 0
@@ -109,7 +114,8 @@ def _markdown_body(text: str, *, mask_frontmatter: bool = True) -> str:
             fence_length = len(fence.group(1))
             _blank(chars, start, end)
             continue
-    _blank_inline_code(chars, "".join(chars))
+    if mask_inline_code:
+        _blank_inline_code(chars, "".join(chars))
     return "".join(chars)
 
 
