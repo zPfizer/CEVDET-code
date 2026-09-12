@@ -215,11 +215,8 @@ HISTORY_TURKISH_DECISION_PAST = re.compile(
     r"m(?:isti|ustu)[mk]$"
 )
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
-    r"(?ix)(?:"
-    rf"\b(?:daha\s+once|onceden)\b(?:[\s,]+\w+){{0,8}}\s+{HISTORY_TURKISH_RETROSPECTIVE_PAST}\b(?=\s*(?:\?|$))"
-    r"|\b(?:daha\s+once|onceden)\b(?:[\s,]+\w+){0,3}\s+karar\w*"
-    r"(?:[\s,]+\w+){0,2}\s+neydi\b(?=\s*(?:\?|$))"
-    r")"
+    rf"(?ix)\b(?:daha\s+once|onceden)\b(?:[\s,]+\w+)*?\s+"
+    rf"(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b(?=\s*(?:\?|$))"
 )
 HISTORY_CHANGE_TAIL = (
     rf"(?:\s*(?:[?!.,;:]|$)|\s+{HISTORY_CHANGE_TEMPORAL}\b"
@@ -1573,6 +1570,7 @@ def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
     return [
         match for match in HISTORY_TURKISH_RETROSPECTIVE_QUERY.finditer(normalized)
         if not any(start <= match.start() < end for start, end in quoted_spans)
+        and (not match.group().endswith("neydi") or re.search(r"\bkarar\w*\b", match.group()))
         and (
             normalized[match.end():].lstrip().startswith("?")
             or re.search(rf"\b(?:{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY}|neydi)$", match.group())
