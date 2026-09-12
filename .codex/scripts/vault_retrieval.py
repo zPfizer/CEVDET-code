@@ -713,7 +713,8 @@ def _stable_entry_snapshot(
                 return None, None, True
             continue
         return entry, after, False
-    return None, None, True
+    # Son denemede her sapma kolu döngü içinde döner; kuyruk savunma hattı.
+    return None, None, True  # pragma: no cover
 
 
 def _is_virtual_companion_view(vault_root: Path, path: Path) -> bool:
@@ -782,7 +783,8 @@ def _stable_source_snapshot(
                 return None, None, None, None, True
             continue
         return relative, text, content_sha256, after, False
-    return None, None, None, None, True
+    # Son denemede her sapma kolu döngü içinde döner; kuyruk savunma hattı.
+    return None, None, None, None, True  # pragma: no cover
 
 
 def _stable_raw_hash(path: Path) -> tuple[str | None, os.stat_result | None, bool]:
@@ -802,7 +804,8 @@ def _stable_raw_hash(path: Path) -> tuple[str | None, os.stat_result | None, boo
                 return None, None, True
             continue
         return value, after, False
-    return None, None, True
+    # Son denemede her sapma kolu döngü içinde döner; kuyruk savunma hattı.
+    return None, None, True  # pragma: no cover
 
 
 def _stable_note_snapshot(
@@ -841,7 +844,8 @@ def _stable_note_snapshot(
                 return None, None, None, None, None, None, True
             continue
         return entry, relative, text, content_sha256, after_hash, after, False
-    return None, None, None, None, None, None, True
+    # Son denemede her sapma kolu döngü içinde döner; kuyruk savunma hattı.
+    return None, None, None, None, None, None, True  # pragma: no cover
 
 
 def _entry_from_file_with_content(
