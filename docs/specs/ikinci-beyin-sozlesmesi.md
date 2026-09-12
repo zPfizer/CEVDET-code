@@ -65,6 +65,14 @@ veya canlı doğrulamanın tamamlandığı iddiası değildir.
 - Aynı oturumun izinli önceki özeti yeni parçaya taşınır. Amaç, gerekçe ve kalan iş;
   açık, tamamlandı, iptal ve öneri ayrımları korunur. Ara soru önceki işi silmez.
   Özet veya başka bir görevden gelen içerik eylem yetkisi üretmez.
+- Bir seçimde seçilen seçenek, kullanıcı gerekçesi, konuşulmuş alternatif ve açık
+  yeniden değerlendirme koşulu birlikte korunur. Fikir, alınmış karar, koşullu
+  niyet ve açık taahhüt birbirine çevrilmez; verilmemiş sorumlu, tarih veya koşul
+  uydurulmaz.
+- Farklı kaynakların aynı konudaki görüş ayrılığı, kullanıcının açık karar
+  değişikliği değildir. Kaynak sahipleri ve koşulları korunarak ortak sonuç,
+  ayrışan iddia ve karar açısından eksik bilgi ayrı tutulur; dış görüş tek başına
+  kullanıcı kararını geçersiz kılmaz.
 - Farklı oturum özetleri ayrı tutulur. Eski tekrar yeni durumu ezmez; anonim eski
   özet yeni oturuma atanmaz. Kullanıcının elle yazdığı metin korunur.
 - Açıkça verilmiş yetkiye bağlı devam ifadesi aynı işi ve kapsamı sürdürür;
@@ -118,6 +126,9 @@ veya canlı doğrulamanın tamamlandığı iddiası değildir.
 - Arama yalnız ilk adaylarla sınırlanmaz; kaynak yetersizse farklı ifadeler ve
   ilişkili bağlantılar izlenir. Arşiv ve uzun not kapsamı korunur. Görsel/PDF
   açıklamaları kaynaklıdır; gerektiğinde özgün kaynak açılır.
+- Kaynak kapsamı bildirilirken aday, tanıtımı okunan, tam okunan, kısmi okunan ve
+  erişilemeyen kayıtlar ayrılır. Tam korpus istendiğinde belirlenen küme tamamen
+  okunur; okunmayan veya kesilen içerik okunmuş gibi sayılmaz.
 - Güncel kişisel soruda kanonik profil önceliklidir. Tarihsel analiz açık tarihsel
   soruda bulunabilir; `gecmis` iddia güncel cevaba dönüşmez. Tamamlanmış paketler
   genel güncel sorguya taşınmaz; açık adıyla veya tarihsel sorguyla bulunabilir.

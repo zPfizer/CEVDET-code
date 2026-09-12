@@ -388,6 +388,16 @@ Bağ.
         self.assertIn("eski kaydı koru", prompt)
         self.assertIn("knowledge/concepts/*.md", prompt)
         self.assertNotIn("knowledge/concepts/**/*.md", prompt)
+        for phrase in (
+            "görüş ayrılığını kullanıcının açık karar değişikliğinden ayır",
+            "dış görüş kullanıcının kararını tek başına geçersiz kılmaz",
+            "ortak sonucu",
+            "ayrışan iddiayı",
+            "karar açısından eksik bilgiyi",
+            "gerekçe, alternatif, koşul ve taahhüt ayrımını",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, prompt)
         repair_prompt = memory_compile.build_schema_repair_prompt(
             "knowledge-schema:knowledge/concepts/ornek.md:derived-schema"
         )

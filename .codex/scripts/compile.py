@@ -120,6 +120,8 @@ TALİMATLAR
 6. Yeni bilgi mevcut bir kayıtla çelişiyorsa eski kaydı koru ve `gecmis` yap;
    yeni kaydı ayrıca `gecerli` olarak ekle. Önceki iddiayı sessizce silme veya
    yeniden yazma.
+   Günlükteki gerekçe, konuşulmuş alternatif, koşul ve taahhütü Detaylar veya
+   Kayıtlar'da koru; Assistant önerisini kullanıcı kararı yapma.
    Saat, tutar ve durum gibi değişken kararların güncel değerini tek esas
    kavramda tut; diğer makalelerde değeri tekrarlamak yerine o kayda bağlan.
    Karar değiştiğinde ilgili kavram ve bağlantılardaki eski değer tekrarlarını

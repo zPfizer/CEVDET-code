@@ -553,6 +553,23 @@ class TranscriptTests(unittest.TestCase):
             self.assertIn(field, prompt)
         self.assertIn("doğrulanamayanı belirsiz", prompt)
 
+    def test_flush_prompt_separates_decisions_intentions_and_proposals(self) -> None:
+        prompt = flush.build_flush_prompt("Kullanıcı seçim ve sonraki adımı anlattı.")
+
+        for phrase in (
+            "seçilen seçeneği",
+            "kullanıcının verdiği gerekçeyi",
+            "konuşulan alternatifleri",
+            "yeniden değerlendirme koşulunu",
+            "Fikri, alınmış",
+            "koşullu niyeti",
+            "açık taahhüdü",
+            "Şimdilik A'yı kullanacağız",
+            "farklı bir dış",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, prompt)
+
     def test_daily_append_uses_day_lock_and_fsyncs_before_return(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

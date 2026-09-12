@@ -76,6 +76,13 @@ DERIVED_RULES = (
         "ekle. Önceden kaynaklanmış bir kaydı silme."
     ),
     (
+        "Farklı kaynakların görüş ayrılığını kullanıcının açık karar değişikliğinden "
+        "ayır; dış görüş kullanıcının kararını tek başına geçersiz kılmaz. Kaynak "
+        "sahipleri ve koşullarıyla ortak sonucu, ayrışan iddiayı ve karar açısından "
+        "eksik bilgiyi ayrı tut. Kullanıcı kararını yalnız gerçek `user-source` "
+        "dayanağıyla güncelle; gerekçe, alternatif, koşul ve taahhüt ayrımını koru."
+    ),
+    (
         "sources değerlerini tekrarsız ve sıralı tut; her kayıt kendi kaynağına, "
         "kavram ve bağlantıdaki her kaynak da Kaynaklar bölümünden "
         "[[daily/YYYY-MM-DD|Kaynak]] wikilink'iyle geri bağlansın."
