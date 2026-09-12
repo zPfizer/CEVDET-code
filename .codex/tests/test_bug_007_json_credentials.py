@@ -725,6 +725,10 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 '${env:Database_Password} += "FIRST_SECRET SECOND_SECRET"',
                 '${env:Database_Password} += <REDACTED>',
             ),
+            (
+                '$env:DATABASE_PASSWORD ??= "FIRST_SECRET SECOND_SECRET"',
+                '$env:DATABASE_PASSWORD ??= <REDACTED>',
+            ),
         )
         for text, expected in cases:
             with self.subTest(text=text):
@@ -746,6 +750,28 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         self.assertEqual(redactions, ('credential',))
         self.assertNotIn('FIRST_SECRET', sanitized)
         self.assertIn('keep this decision', sanitized)
+
+    def test_shell_expansion_after_assignment_whitespace_keeps_safe_context(self) -> None:
+        text = 'password=foo and keep this decision ${name}'
+
+        sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+
+        self.assertEqual(
+            sanitized,
+            'password=<REDACTED> and keep this decision ${name}',
+        )
+        self.assertEqual(redactions, ('credential',))
+        self.assertIn('keep this decision', sanitized)
+
+    def test_cmd_wrapper_switch_before_c_is_fail_closed(self) -> None:
+        with self.assertRaisesRegex(
+            ledger.MemoryPreferenceError,
+            '^memory-credential-container-unverifiable$',
+        ):
+            ledger.sanitize_text(
+                'cmd /d /c set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET',
+                max_chars=None,
+            )
 
     def test_batch_else_assignment_is_bounded(self) -> None:
         text = 'if 1==2 (echo no) else set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET'

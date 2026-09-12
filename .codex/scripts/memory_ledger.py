@@ -99,12 +99,14 @@ BATCH_ASSIGNMENT_PREFIX = re.compile(
     r'''(?im)''' + _BATCH_COMMAND_PREFIX + r'''["']?\Z'''
 )
 BATCH_CMD_WRAPPER_CREDENTIAL = re.compile(
-    r'''(?im)(?:^[ \t]*|(?<=[&|<>()])[ \t]*)@?cmd(?:\.exe)?[ \t]+/c[ \t]+"?set[ \t]+'''
+    r'''(?im)(?:^[ \t]*|(?<=[&|<>()])[ \t]*)@?cmd(?:\.exe)?'''
+    r'''(?:[ \t]+/(?:d|s|q|a|u|e:[^\s\r\n]+|f:[^\s\r\n]+|v:[^\s\r\n]+|t:[^\s\r\n]+))*'''
+    r'''[ \t]+/c[ \t]+"?set[ \t]+'''
     r'''(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
 )
 POWERSHELL_CREDENTIAL = re.compile(
     r'''(?im)(?P<prefix>\$(?:(?i:env):[ \t]*|\{(?i:env):[ \t]*))'''
-    r'''(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')(?P<closing>\}?)(?P<assignment>[ \t]*(?:[+\-*/%]?=)[ \t]*)'''
+    r'''(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')(?P<closing>\}?)(?P<assignment>[ \t]*(?:\?\?=|[+\-*/%]?=)[ \t]*)'''
 )
 POWERSHELL_ASSIGNMENT_PREFIX = re.compile(r'''(?im)(?:\$(?i:env):|\$\{(?i:env):)[ \t]*\Z''')
 TOKEN_PREFIX = re.compile(r"\b(?:sk(?=[-_])|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
@@ -894,8 +896,9 @@ def _contains_unsupported_shell_expansion(text: str, start: int) -> bool:
             continue
         if quote != "'" and character == '$' and text[index + 1:index + 2] in {'{', '('}:
             return True
-        if quote is None and character in {';', '&', '|', '<', '>'}:
-            return False
+        if quote is None:
+            if character.isspace() or character in {';', '&', '|', '<', '>'}:
+                return False
         index += 1
     return False
 
