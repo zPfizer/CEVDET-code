@@ -272,9 +272,11 @@ class _ManagedWorkerHandle:
         self.pid = pid
         self._beyin_process_identity = identity
         self._beyin_command = ["journey-managed-worker", str(pid)]
-        self._beyin_process_group = False
+        self._beyin_process_group = os.name != "nt"
 
     def poll(self) -> int | None:
+        if _posix_process_is_zombie(self.pid):
+            return 0
         return None if process_control.process_is_same(
             self.pid, self._beyin_process_identity
         ) else 0
@@ -303,6 +305,17 @@ class _ManagedWorkerHandle:
             self.terminate()
         else:
             os.kill(self.pid, 9)
+
+
+def _posix_process_is_zombie(pid: int) -> bool:
+    if os.name == "nt":
+        return False
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except (FileNotFoundError, OSError, UnicodeError):
+        return False
+    _prefix, separator, fields = raw.rpartition(") ")
+    return bool(separator and fields and fields.split()[0] == "Z")
 
 
 def _hook_result_diagnostics(result: subprocess.CompletedProcess[str] | None) -> str:
@@ -403,7 +416,7 @@ class JourneyE2ETests(unittest.TestCase):
                 and pid > 0
                 and isinstance(identity, str)
                 and identity
-                and process_control.process_is_same(pid, identity)
+                and self._managed_worker_is_alive(record)
             ):
                 process_control.terminate_process_tree(
                     _ManagedWorkerHandle(pid, identity)
@@ -421,14 +434,7 @@ class JourneyE2ETests(unittest.TestCase):
             if not records:
                 return False
             for record in records:
-                pid = record.get("pid")
-                identity = record.get("identity")
-                if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-                    return False
-                if isinstance(identity, str) and identity:
-                    if process_control.process_is_same(pid, identity):
-                        return False
-                elif process_control.pid_is_alive(pid):
+                if self._managed_worker_is_alive(record):
                     return False
             return True
 
@@ -436,6 +442,19 @@ class JourneyE2ETests(unittest.TestCase):
             _wait_until(all_stopped, DAILY_TIMEOUT_SECONDS),
             "managed worker süreci kapanmadı",
         )
+
+    @staticmethod
+    def _managed_worker_is_alive(record: dict[str, object]) -> bool:
+        pid = record.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return False
+        identity = record.get("identity")
+        if isinstance(identity, str) and identity:
+            return (
+                process_control.process_is_same(pid, identity)
+                and not _posix_process_is_zombie(pid)
+            )
+        return process_control.pid_is_alive(pid) and not _posix_process_is_zombie(pid)
 
     def _assert_prompt_succeeded(self, result, vault: Path, state: Path, marker: str) -> None:
         self.assertEqual(result.returncode, 0, result.stderr)
