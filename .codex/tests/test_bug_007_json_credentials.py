@@ -394,17 +394,101 @@ class Bug007JsonCredentialTests(unittest.TestCase):
             ledger.sanitize_text(text, max_chars=None)
 
     def test_unquoted_windows_batch_credential_value_consumes_full_line(self) -> None:
-        text = 'set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET\nkeep=ordinary'
+        cases = (
+            (
+                'set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET\nkeep=ordinary',
+                'set DATABASE_PASSWORD=<REDACTED>\nkeep=ordinary',
+            ),
+            (
+                'set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET\r\nkeep=ordinary',
+                'set DATABASE_PASSWORD=<REDACTED>\r\nkeep=ordinary',
+            ),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+
+                self.assertEqual(sanitized, expected)
+                self.assertEqual(redactions, ('credential',))
+                self.assertTrue(ledger.contains_secret(text))
+                self.assertEqual(ledger.memory_directive(text).kind, 'secret')
+                self.assertNotIn('FIRST_SECRET', sanitized)
+                self.assertNotIn('SECOND_SECRET', sanitized)
+
+    def test_windows_batch_credential_names_are_case_insensitive(self) -> None:
+        cases = (
+            (
+                'set Database_Password=FIRST_SECRET SECOND_SECRET',
+                'set Database_Password=<REDACTED>',
+            ),
+            (
+                'set database_password=FIRST_SECRET SECOND_SECRET',
+                'set database_password=<REDACTED>',
+            ),
+            (
+                'set "Database_Password=FIRST_SECRET SECOND_SECRET"',
+                'set "Database_Password=<REDACTED>"',
+            ),
+            (
+                'set "database_password=FIRST_SECRET SECOND_SECRET"',
+                'set "database_password=<REDACTED>"',
+            ),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+                self.assertEqual(sanitized, expected)
+                self.assertEqual(redactions, ('credential',))
+                self.assertTrue(ledger.contains_secret(text))
+                self.assertEqual(ledger.memory_directive(text).kind, 'secret')
+                self.assertNotIn('FIRST_SECRET', sanitized)
+                self.assertNotIn('SECOND_SECRET', sanitized)
+
+    def test_posix_credential_assignment_consumes_adjacent_quoted_segments(self) -> None:
+        text = 'DATABASE_PASSWORD="FIRST_""SECOND SECRET"\nkeep=ordinary'
 
         sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
 
         self.assertEqual(
             sanitized,
-            'set DATABASE_PASSWORD=<REDACTED>\nkeep=ordinary',
+            'DATABASE_PASSWORD=<REDACTED>\nkeep=ordinary',
         )
         self.assertEqual(redactions, ('credential',))
-        self.assertNotIn('FIRST_SECRET', sanitized)
-        self.assertNotIn('SECOND_SECRET', sanitized)
+        self.assertNotIn('FIRST_', sanitized)
+        self.assertNotIn('SECOND SECRET', sanitized)
+
+        with self.assertRaisesRegex(
+            ledger.MemoryPreferenceError,
+            '^memory-credential-container-unverifiable$',
+        ):
+            ledger.sanitize_text('DATABASE_PASSWORD="FIRST_""SECOND', max_chars=None)
+
+    def test_unquoted_windows_batch_assignment_preserves_commands_and_escaped_separators(self) -> None:
+        cases = (
+            (
+                'set DATABASE_PASSWORD=FIRST_SECRET && echo keep-decision',
+                'set DATABASE_PASSWORD=<REDACTED> && echo keep-decision',
+            ),
+            (
+                r'set DATABASE_PASSWORD=FIRST ^&^& SECOND_SECRET && echo keep-decision',
+                'set DATABASE_PASSWORD=<REDACTED> && echo keep-decision',
+            ),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+                self.assertEqual(sanitized, expected)
+                self.assertEqual(redactions, ('credential',))
+                self.assertNotIn('FIRST_SECRET', sanitized)
+                self.assertNotIn('SECOND_SECRET', sanitized)
+                self.assertIn('keep-decision', sanitized)
+
+    def test_unverifiable_unquoted_windows_batch_assignment_fails_closed(self) -> None:
+        with self.assertRaisesRegex(
+            ledger.MemoryPreferenceError,
+            '^memory-credential-container-unverifiable$',
+        ):
+            ledger.sanitize_text('set DATABASE_PASSWORD=FIRST_SECRET^\nnext line', max_chars=None)
 
     def test_unterminated_windows_batch_quote_does_not_use_later_line_quote(self) -> None:
         text = 'set "DATABASE_PASSWORD=FIRST_SECRET\nkeep this decision "quoted" tail'
@@ -453,6 +537,9 @@ class Bug007JsonCredentialTests(unittest.TestCase):
             'expected_claim_token=claim-value',
             'MAX_TOKEN=4096',
             'EXPECTED_CLAIM_TOKEN=claim-value',
+            'max_token=4096',
+            'expected_claim_token=claim-value',
+            'Database_Password=FIRST_SECRET',
             'set "max_token=4096"',
             'set "expected_claim_token=claim-value"',
             'set "MAX_TOKEN=4096"',

@@ -43,11 +43,12 @@ AUTHORIZATION = re.compile(
     r'''(?:"Bearer\s+(?:\\.|[^"\\\r\n])+"|'''
     r"""'Bearer\s+(?:\\.|[^'\\\r\n])+'|Bearer\s+[^\s\r\n]+)"""
 )
-_ENV_CREDENTIAL_NAME = (
-    r'(?-i:(?:[A-Z][A-Z0-9]*_)*(?:API_KEY|ACCESS_KEY(?:_ID)?|PASSWORD|'
+_ENV_CREDENTIAL_NAME_BODY = (
+    r'(?:[A-Z][A-Z0-9]*_)*(?:API_KEY|ACCESS_KEY(?:_ID)?|PASSWORD|'
     r'SECRET(?:_(?:ACCESS_)?KEY)?|(?:ACCESS|API|AUTH|CLIENT|CSRF|GITHUB|'
-    r'MY|OAUTH|REFRESH|SESSION|SERVICE)_TOKEN))'
+    r'MY|OAUTH|REFRESH|SESSION|SERVICE)_TOKEN)'
 )
+_ENV_CREDENTIAL_NAME = rf'(?-i:{_ENV_CREDENTIAL_NAME_BODY})'
 CREDENTIAL_NAME = rf'api[_-]?key|password|secret|token|{_ENV_CREDENTIAL_NAME}'
 CREDENTIAL_NAME_RE = re.compile(rf'(?i)^(?:{CREDENTIAL_NAME})$')
 CREDENTIAL = re.compile(
@@ -55,18 +56,23 @@ CREDENTIAL = re.compile(
     r'''(?P=key_quote)\s*[:=]\s*)'''
     r'''(?P<value>[{\[]|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|(?:\\[\s\S]|[^\s\\])+)'''
 )
+BATCH_CREDENTIAL_NAME = rf'(?i:api[_-]?key|password|secret|token|{_ENV_CREDENTIAL_NAME_BODY})'
 BATCH_CREDENTIAL = re.compile(
-    r'''(?im)(?P<prefix>\bset\s+(?P<quote>["']))(?P<key>''' + CREDENTIAL_NAME + r''')\s*=\s*'''
+    r'''(?im)(?P<prefix>\bset\s+(?P<quote>["']))(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')\s*=\s*'''
     r'''(?P<value>(?:(?!(?P=quote))[^\r\n])*)(?P=quote)'''
 )
 BATCH_CREDENTIAL_START = re.compile(
-    r'''(?im)\bset\s+(?P<quote>["'])(?P<key>''' + CREDENTIAL_NAME + r''')\s*=\s*'''
+    r'''(?im)\bset\s+(?P<quote>["'])(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')\s*=\s*'''
 )
 BATCH_CREDENTIAL_UNQUOTED = re.compile(
-    r'''(?im)(?P<prefix>\bset[ \t]+)(?P<key>''' + CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
-    r'''(?P<value>[^\r\n]*)'''
+    r'''(?im)(?P<prefix>\bset[ \t]+)(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
+    r'''(?P<value>(?:\^[^\r\n]|[^&|^<()>;\r\n])*?)'''
+    r'''(?=[ \t]*(?:[&|<()>;]|\r?$))'''
 )
-BATCH_ASSIGNMENT_PREFIX = re.compile(r'''(?im)\bset\s+["']\Z''')
+BATCH_CREDENTIAL_UNQUOTED_START = re.compile(
+    r'''(?im)\bset[ \t]+(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
+)
+BATCH_ASSIGNMENT_PREFIX = re.compile(r'''(?im)\bset\s+["']?\Z''')
 TOKEN_PREFIX = re.compile(r"\b(?:sk(?=[-_])|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
 PERSONAL_CREDENTIAL = re.compile(
     r"(?i)\b(?:api\s+anahtarım|parolam|şifrem|tokenım)\b"
@@ -691,20 +697,48 @@ def _balanced_value_end(text: str, start: int) -> int | None:
         length = min(length * 2, len(text) - start)
 
 
-def _quoted_credential_value_end(text: str, start: int) -> int | None:
-    quote = text[start:start + 1]
-    if quote not in {'"', "'"}:
+# ponytail: consume only adjacent shell fragments; a full shell parser adds no
+# sanitizer guarantee and would broaden this bounded input contract.
+def _quoted_credential_value_end(
+    text: str,
+    start: int,
+    *,
+    shell_segments: bool = False,
+) -> int | None:
+    if text[start:start + 1] not in {'"', "'"}:
         return None
-    escaped = False
-    for index in range(start + 1, len(text)):
-        character = text[index]
-        if escaped:
-            escaped = False
-        elif character == '\\':
-            escaped = True
-        elif character == quote:
+    cursor = start
+    while cursor < len(text):
+        quote = text[cursor]
+        escaped = False
+        index = cursor + 1
+        while index < len(text):
+            character = text[index]
+            if escaped:
+                escaped = False
+            elif character == '\\':
+                escaped = True
+            elif character == quote:
+                break
+            index += 1
+        if index >= len(text):
+            return None
+        if not shell_segments:
             return index + 1
-    return None
+        cursor = index + 1
+        while cursor < len(text):
+            character = text[cursor]
+            if character in {'"', "'"}:
+                break
+            if character == '\\':
+                if cursor + 1 >= len(text):
+                    return None
+                cursor += 2
+                continue
+            if character.isspace() or character in {';', '&', '|', '<', '>', '(', ')'}:
+                return cursor
+            cursor += 1
+    return cursor
 
 
 def _batch_quoted_credential_value_end(text: str, start: int) -> int | None:
@@ -971,6 +1005,12 @@ def sanitize_text(
     for match in BATCH_CREDENTIAL_START.finditer(text):
         if _batch_quoted_credential_value_end(text, match.start('quote')) is None:
             raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+    json_string_spans = [(record[0], record[1]) for record in _json_string_regions(text)]
+    for match in BATCH_CREDENTIAL_UNQUOTED_START.finditer(text):
+        if any(start <= match.start() < end for start, end in json_string_spans):
+            continue
+        if BATCH_CREDENTIAL_UNQUOTED.match(text, match.start()) is None:
+            raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
     replace_outside_json_values(
         BATCH_CREDENTIAL,
         lambda match: f'{match.group("prefix")}{match.group("key")}=<REDACTED>{match.group("quote")}',
@@ -1006,7 +1046,11 @@ def sanitize_text(
             continue
         end = match.end()
         if text[match.start('value')] in {'"', "'"}:
-            quoted_end = _quoted_credential_value_end(text, match.start('value'))
+            quoted_end = _quoted_credential_value_end(
+                text,
+                match.start('value'),
+                shell_segments=match.group('prefix').rstrip().endswith('='),
+            )
             if quoted_end is None:
                 raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
             end = max(end, quoted_end)
