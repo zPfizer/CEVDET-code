@@ -239,6 +239,38 @@ class RedriveDeadLetterTests(unittest.TestCase):
         self.assertTrue(dead_letter_exists)
         self.assertEqual(conflict_reason, "redrive-conflict")
 
+    def test_redrive_reconciles_interrupted_legacy_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            job_id = "c" * 32
+            source = _legacy_failed_job(
+                state, job_id, payload={"reason": "interrupted"}
+            )
+            with self.assertRaisesRegex(RuntimeError, "worker-migration-injected"):
+                workers.migrate_legacy_failed_jobs(
+                    state,
+                    now=1757500000,
+                    _fail_after="destination",
+                )
+
+            redriven, skipped = workers.redrive_dead_letter(
+                state, job_id=job_id, now=1757500001
+            )
+            pending = state / "worker-jobs" / "pending" / source.name
+            source_exists = source.exists()
+            pending_record = workers._load_job(pending)
+            dead_letter = state / "worker-jobs" / "dead-letter" / source.name
+            receipt = state / f"worker-migration-{job_id}.json"
+            dead_letter_exists = dead_letter.exists()
+            receipt_exists = receipt.exists()
+
+        self.assertEqual(redriven, [job_id])
+        self.assertEqual(skipped, [])
+        self.assertFalse(source_exists)
+        self.assertEqual(pending_record["status"], "pending")
+        self.assertFalse(dead_letter_exists)
+        self.assertTrue(receipt_exists)
+
     def test_recovery_collision_does_not_overwrite_redrive_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)

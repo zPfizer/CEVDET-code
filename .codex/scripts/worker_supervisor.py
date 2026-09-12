@@ -1195,6 +1195,7 @@ def prune_succeeded_jobs(state_dir: Path, *, now: float | None = None) -> None:
 def migrate_legacy_failed_jobs(
     state_dir: Path,
     *,
+    job_id: str | None = None,
     now: float | None = None,
     _fail_after: str | None = None,
 ) -> int:
@@ -1206,6 +1207,8 @@ def migrate_legacy_failed_jobs(
     migrated = 0
     with locked(state_dir / "worker-queue"):
         for source in sorted(source_dir.glob("job-*.json")):
+            if job_id is not None and _job_id_from_path(source) != job_id:
+                continue
             try:
                 original = json.loads(source.read_text(encoding="utf-8"))
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -1883,6 +1886,7 @@ def redrive_dead_letter(
     """
     observed_now = time.time() if now is None else now
     _ensure_job_dirs(state_dir)
+    migrate_legacy_failed_jobs(state_dir, job_id=job_id, now=observed_now)
     redriven: list[str] = []
     skipped: list[tuple[str, str]] = []
     with locked(state_dir / "worker-queue"):
