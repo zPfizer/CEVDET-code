@@ -1281,6 +1281,7 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                 "Daha önce veri saklama için hangi seçeneği uygun görmüştük?",
                 "Önceden veri saklama için hangi seçeneği uygun görmüştüm?",
                 "Güncel veri saklama kararı ve daha önce veri saklama konusunda ne karar vermiştik?",
+                "Daha önce veri saklama konusunda ne karar vermiştik ve güncel karar nedir?",
             ):
                 with self.subTest(query=query):
                     terms = retrieval._retrieval_terms(query)
@@ -1325,6 +1326,7 @@ Geçmiş veri saklama kararı: uzun günlükler.
             entries = retrieval.build_vault_map(root, write_cache=False)
             for query in (
                 "Daha önce veri saklama kararı vermiştik, şimdi nasıl değiştirelim?",
+                "Daha önce veri saklama kararı vermiştik ve güncel seçeneği öner",
                 "Güncel veri saklama seçeneğini öner; daha önce bu konuda karar vermemiştik",
                 "Güncel veri saklama seçeneğini öner; daha önce hangi seçeneklerin sorunlu olduğunu bilmemiştik",
                 "Güncel veri saklama seçeneğini öner; daha önce ne seçtiğimizi unutmuştuk",
@@ -1384,7 +1386,26 @@ type: work-packet
 Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun görmüştük; hangisini seçmiştik, neyi seçmiştik; hangisini tercih etmiştik; kayıt {index}.
 """,
                 )
+                _write(
+                    root,
+                    f"🧠 500-Knowledge/baska-guncel-karar-{index}.md",
+                    f"# Güncel Karar Nedir {index}\nBaşka proje {index} güncel karar nedir sorusunun kaydı.\n",
+                )
             entries = retrieval.build_vault_map(root, write_cache=False)
+            history_first = "Daha önce veri saklama konusunda ne karar vermiştik ve güncel karar nedir?"
+            self.assertEqual(
+                retrieval._split_current_history_query(history_first),
+                ("güncel karar nedir? veri saklama konusunda", "Daha önce veri saklama konusunda ne karar vermiştik"),
+            )
+            self.assertEqual(
+                {hit.entry.path for hit in retrieval.search_vault(entries, history_first, top_k=2)},
+                {current, historical},
+            )
+            independent_current = "Daha önce veri saklama konusunda ne karar vermiştik ve güncel TANSU kararı nedir?"
+            self.assertEqual(
+                retrieval._split_current_history_query(independent_current),
+                ("güncel TANSU kararı nedir?", "Daha önce veri saklama konusunda ne karar vermiştik"),
+            )
             query = "Güncel veri saklama kararı ve daha önce ne karar vermiştik?"
             self.assertEqual(
                 retrieval._split_current_history_query(query),
@@ -1397,6 +1418,18 @@ Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun 
                 ("Güncel veri saklama kararı", "daha önce hangi seçeneği uygun görmüştük? veri saklama kararı"),
             )
             scaffold_hits = retrieval.search_vault(entries, scaffold_query, top_k=2)
+            for reference in ("bu konuda", "bununla ilgili"):
+                clause = f"daha önce {reference} ne karar vermiştik?"
+                reference_query = f"Güncel veri saklama kararı ve {clause}"
+                with self.subTest(reference=reference):
+                    self.assertEqual(
+                        retrieval._split_current_history_query(reference_query),
+                        ("Güncel veri saklama kararı", f"{clause} veri saklama kararı"),
+                    )
+                    self.assertEqual(
+                        {hit.entry.path for hit in retrieval.search_vault(entries, reference_query, top_k=2)},
+                        {current, historical},
+                    )
             for option in ("seçenekleri", "seçeneklerimizi", "seçeneğimizi"):
                 clause = f"daha önce hangi {option} uygun görmüştük?"
                 query_with_option = f"Güncel veri saklama kararı ve {clause}"

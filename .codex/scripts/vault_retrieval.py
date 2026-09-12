@@ -216,7 +216,8 @@ HISTORY_TURKISH_DECISION_PAST = re.compile(
 )
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
     rf"(?ix)\b(?:daha\s+once|onceden)\b(?:[\s,]+\w+)*?\s+"
-    rf"(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b(?=\s*(?:\?|$))"
+    rf"(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b"
+    rf"(?=\s*(?:\?|$|(?:ve|ile)\s+{CURRENT_QUERY_CUE}\b))"
 )
 HISTORY_CHANGE_TAIL = (
     rf"(?:\s*(?:[?!.,;:]|$)|\s+{HISTORY_CHANGE_TEMPORAL}\b"
@@ -1592,6 +1593,8 @@ def _retrospective_topic_cue_terms(query: str) -> frozenset[str]:
         marker = re.match(r"\b(?:daha\s+once|onceden)\b", retrospective)
         if marker:
             cue_terms.update(_tokens(marker.group()))
+        for reference in re.finditer(r"\b(?:bu\s+konuda|bununla\s+ilgili)\b", retrospective):
+            cue_terms.update(_tokens(reference.group()))
         past = re.search(rf"\b{HISTORY_TURKISH_RETROSPECTIVE_PAST}\b", retrospective)
         if past:
             cue_terms.update(_tokens(past.group()))
@@ -2016,6 +2019,8 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     }
 
     def topic_terms(scope: str) -> list[str]:
+        if re.fullmatch(rf"{CURRENT_QUERY_CUE}\s+karar\w*\s+(?:ne|nedir)\??", _normalize(scope)):
+            return []
         scope_terms = _retrieval_terms(scope)
         retrospective_cue_terms = _retrospective_topic_cue_terms(scope)
         terms = []
