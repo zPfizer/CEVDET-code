@@ -43,7 +43,12 @@ _DEAD_LETTER_REASONS = frozenset(
 _MAX_TIMESTAMP = datetime.datetime.max.replace(
     tzinfo=datetime.timezone.utc,
 ).timestamp()
-_CREATED = re.compile(r"(?m)^created: (?P<value>.+)$")
+_FRONTMATTER = re.compile(
+    r"\A---\r?\n(?P<body>.*?)(?:\r?\n)---(?:\r?\n|\Z)",
+    re.DOTALL,
+)
+_CREATED = re.compile(r"(?m)^created: (?P<value>[^\r\n]+)$")
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 _COMPILE_STATUS = re.compile(r"(?:ok|fail:[A-Za-z0-9][A-Za-z0-9._:-]{0,127})\Z")
 
 
@@ -95,7 +100,7 @@ def _dead_letter_row(path: Path) -> dict[str, Any]:
     if record is None:
         return _unreadable_dead_letter_row()
     try:
-        from worker_supervisor import _validate_job
+        from worker_supervisor import _has_verified_successor, _validate_job
 
         validation_record = record
         try:
@@ -116,31 +121,40 @@ def _dead_letter_row(path: Path) -> dict[str, Any]:
         "kind": record["kind"],
         "terminal_reason": terminal_reason,
         "finished_ts": record.get("finished_ts"),
+        "recovered": _has_verified_successor(path.parent.parent, record),
     }
 
 
 def worker_counts(state_dir: Path) -> dict[str, int]:
     jobs = state_dir / "worker-jobs"
-    return {stage: len(_json_files(jobs / stage)) for stage in WORKER_STAGES}
+    counts = {stage: len(_json_files(jobs / stage)) for stage in WORKER_STAGES}
+    counts["dead-letter"] = len(_all_dead_letter_rows(state_dir))
+    return counts
 
 
-def _json_files(directory: Path) -> tuple[Path, ...]:
+def _directory_entries(directory: Path, *, error_prefix: str) -> tuple[Path, ...]:
     try:
         directory_stat = directory.lstat()
     except FileNotFoundError:
         return ()
     except (OSError, RuntimeError) as exc:
-        raise OSError("worker-directory-unreadable") from exc
+        raise OSError(f"{error_prefix}-directory-unreadable") from exc
     if (
         stat.S_ISLNK(directory_stat.st_mode)
         or not stat.S_ISDIR(directory_stat.st_mode)
         or directory.is_junction()
     ):
-        raise OSError("worker-directory-invalid")
+        raise OSError(f"{error_prefix}-directory-invalid")
     try:
-        entries = tuple(directory.iterdir())
+        return tuple(directory.iterdir())
     except (OSError, RuntimeError) as exc:
-        raise OSError("worker-directory-unreadable") from exc
+        raise OSError(f"{error_prefix}-directory-unreadable") from exc
+
+
+def _json_files(
+    directory: Path, *, error_prefix: str = "worker"
+) -> tuple[Path, ...]:
+    entries = _directory_entries(directory, error_prefix=error_prefix)
     files = []
     for path in entries:
         if path.suffix != ".json":
@@ -148,27 +162,43 @@ def _json_files(directory: Path) -> tuple[Path, ...]:
         try:
             path_stat = path.lstat()
         except (OSError, RuntimeError) as exc:
-            raise OSError("worker-record-unreadable") from exc
-        if stat.S_ISREG(path_stat.st_mode):
-            files.append(path)
+            raise OSError(f"{error_prefix}-record-unreadable") from exc
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise OSError(f"{error_prefix}-record-invalid")
+        files.append(path)
     return tuple(sorted(files))
 
 
-def dead_letter_rows(state_dir: Path) -> list[dict[str, Any]]:
+def _all_dead_letter_rows(state_dir: Path) -> list[dict[str, Any]]:
     rows = []
     for path in _json_files(state_dir / "worker-jobs" / "dead-letter"):
-        rows.append(_dead_letter_row(path))
+        row = _dead_letter_row(path)
+        if not row.get("recovered", False):
+            rows.append(row)
     rows.sort(key=lambda row: _timestamp_sort_key(row["finished_ts"]), reverse=True)
-    return rows[:DEAD_LETTER_LIMIT]
+    return rows
+
+
+def dead_letter_rows(state_dir: Path) -> list[dict[str, Any]]:
+    return _all_dead_letter_rows(state_dir)[:DEAD_LETTER_LIMIT]
 
 
 def marker_counts(state_dir: Path) -> dict[str, int]:
+    entries = _directory_entries(state_dir, error_prefix="state")
+
     def count(prefix: str) -> int:
-        return sum(
-            1
-            for path in state_dir.glob(f"{prefix}*")
-            if path.is_file() and path.suffix != ".lock"
-        )
+        total = 0
+        for path in entries:
+            if not path.name.startswith(prefix) or path.suffix == ".lock":
+                continue
+            try:
+                path_stat = path.lstat()
+            except (OSError, RuntimeError) as exc:
+                raise OSError("state-marker-unreadable") from exc
+            if not stat.S_ISREG(path_stat.st_mode):
+                raise OSError("state-marker-invalid")
+            total += 1
+        return total
 
     return {
         "read_only": count("memory-read-only-"),
@@ -177,6 +207,17 @@ def marker_counts(state_dir: Path) -> dict[str, int]:
 
 
 def compile_summary(state_dir: Path) -> tuple[str, str]:
+    path = compile_state.state_file(state_dir)
+    try:
+        path_stat = path.lstat()
+    except FileNotFoundError:
+        path_stat = None
+    except (OSError, RuntimeError):
+        return "?", "okunamadı"
+    if path_stat is not None and (
+        stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode)
+    ):
+        return "?", "okunamadı"
     try:
         state = compile_state.load(state_dir)
     except compile_state.PolicyError:
@@ -231,8 +272,8 @@ def health_summary(state_dir: Path) -> str:
 def flush_state_count(state_dir: Path) -> int:
     return sum(
         1
-        for path in state_dir.glob("flush-*.json")
-        if path.is_file()
+        for path in _json_files(state_dir, error_prefix="state")
+        if path.name.startswith("flush-")
     )
 
 
@@ -278,10 +319,22 @@ def _previous_created(output: Path, fallback: str) -> str:
     try:
         with output.open("r", encoding="utf-8") as handle:
             head = handle.read(2048)
-    except (OSError, UnicodeError):
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("report-target-unreadable") from exc
+    frontmatter = _FRONTMATTER.match(head)
+    if frontmatter is None:
         return fallback
-    match = _CREATED.search(head)
-    return match.group("value").strip() if match else fallback
+    match = _CREATED.search(frontmatter.group("body"))
+    if match is None:
+        return fallback
+    value = match.group("value").strip()
+    if _DATE.fullmatch(value) is None:
+        return fallback
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError:
+        return fallback
+    return value
 
 
 def render(

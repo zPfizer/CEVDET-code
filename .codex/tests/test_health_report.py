@@ -25,8 +25,9 @@ def _dead_letter_record(
     finished_ts: object,
     kind: str = "flush",
     terminal_reason: str = "retry-exhausted",
+    recovery_job_id: str | None = None,
 ) -> dict[str, object]:
-    return {
+    record: dict[str, object] = {
         "schema_version": worker_supervisor.JOB_SCHEMA_VERSION,
         "job_id": job_id,
         "kind": kind,
@@ -41,6 +42,9 @@ def _dead_letter_record(
         "retryable": False,
         "lease_until": 0,
     }
+    if recovery_job_id is not None:
+        record["recovery_job_id"] = recovery_job_id
+    return record
 
 
 class HealthReportTests(unittest.TestCase):
@@ -106,6 +110,65 @@ class HealthReportTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "worker-directory-unreadable"):
                     health_report.write_report(vault, target)
             self.assertFalse(target.exists())
+
+    def test_unreadable_marker_enumeration_aborts_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _seed_state(vault)
+            target = vault / "report.md"
+            real_entries = health_report._directory_entries
+
+            def fail_markers(
+                directory: Path, *, error_prefix: str
+            ) -> tuple[Path, ...]:
+                if error_prefix == "state":
+                    raise OSError("state-directory-unreadable")
+                return real_entries(directory, error_prefix=error_prefix)
+
+            with mock.patch.object(
+                health_report,
+                "_directory_entries",
+                side_effect=fail_markers,
+            ):
+                with self.assertRaisesRegex(OSError, "state-directory-unreadable"):
+                    health_report.write_report(vault, target)
+            self.assertFalse(target.exists())
+
+    def test_linked_compile_state_is_reported_as_unreadable(self) -> None:
+        for dangling in (False, True):
+            with self.subTest(dangling=dangling):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    vault = root / "vault"
+                    outside = root / "outside-compile-state.json"
+                    vault.mkdir()
+                    state = _seed_state(vault)
+                    outside.write_text(
+                        json.dumps(
+                            {
+                                "ingested": {},
+                                "cursor": "",
+                                "last_run": "2026-01-01T00:00:00",
+                                "last_status": "ok",
+                                "runs": [],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    path = state / "compile-state.json"
+                    try:
+                        path.symlink_to(
+                            state / "missing-compile-state.json"
+                            if dangling
+                            else outside
+                        )
+                    except (OSError, NotImplementedError) as exc:
+                        self.skipTest(f"symlink unavailable: {exc}")
+
+                    self.assertEqual(
+                        health_report.compile_summary(state),
+                        ("?", "okunamadı"),
+                    )
 
     def test_invalid_compile_metadata_is_not_published(self) -> None:
         cases = (
@@ -231,6 +294,43 @@ class HealthReportTests(unittest.TestCase):
         self.assertNotIn("private-reason", text)
         self.assertEqual(text.count("| ? | ? | ? | ? |"), 2)
 
+    def test_verified_recovered_dead_letter_is_not_stuck(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            dead_letter = state / "worker-jobs" / "dead-letter"
+            succeeded = state / "worker-jobs" / "succeeded"
+            old_id = "6" * 32
+            successor_id = "7" * 32
+            (dead_letter / f"job-{old_id}.json").write_text(
+                json.dumps(
+                    _dead_letter_record(
+                        old_id,
+                        finished_ts=1757500000,
+                        terminal_reason="recovered-by-successor",
+                        recovery_job_id=successor_id,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            successor = _dead_letter_record(
+                successor_id,
+                finished_ts=1757500001,
+            )
+            successor["status"] = "succeeded"
+            (succeeded / f"job-{successor_id}.json").write_text(
+                json.dumps(successor),
+                encoding="utf-8",
+            )
+
+            text = health_report.render(
+                vault, now=datetime.datetime(2026, 9, 11)
+            )
+
+        self.assertIn("| dead-letter | 0 |", text)
+        self.assertIn("Boş — takılı iş yok.", text)
+        self.assertNotIn("Takılı iş var", text)
+
     def test_default_report_write_does_not_clobber_existing_user_text(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -266,6 +366,36 @@ class HealthReportTests(unittest.TestCase):
             preserved = outside.read_text(encoding="utf-8")
 
         self.assertEqual(preserved, "created: 2020-01-01\nprivate\n")
+
+    def test_overwrite_ignores_invalid_created_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _seed_state(vault)
+            target = vault / "report.md"
+            target.write_text(
+                "---\ncreated: private-token: [broken\n---\n", encoding="utf-8"
+            )
+            text = health_report.write_report(
+                vault,
+                target,
+                now=datetime.datetime(2026, 9, 11),
+                overwrite=True,
+            ).read_text(encoding="utf-8")
+
+        self.assertIn("created: 2026-09-11", text)
+        self.assertNotIn("private-token", text)
+
+    def test_overwrite_aborts_when_existing_report_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _seed_state(vault)
+            target = vault / "report.md"
+            original = b"\xff\xfe"
+            target.write_bytes(original)
+
+            with self.assertRaisesRegex(ValueError, "report-target-unreadable"):
+                health_report.write_report(vault, target, overwrite=True)
+            self.assertEqual(target.read_bytes(), original)
 
     def test_default_report_rejects_linked_command_center_parent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -358,7 +488,7 @@ class HealthReportTests(unittest.TestCase):
         self.assertIn("updated: 2026-09-11", text)
 
     def test_previous_created_reads_only_bounded_prefix(self) -> None:
-        reader = mock.mock_open(read_data="created: 2026-01-01\n")
+        reader = mock.mock_open(read_data="---\ncreated: 2026-01-01\n---\n")
         with (
             mock.patch.object(Path, "lstat", return_value=mock.Mock(st_mode=stat.S_IFREG)),
             mock.patch.object(Path, "open", reader),
