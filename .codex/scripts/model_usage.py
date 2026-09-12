@@ -60,6 +60,20 @@ def _unsafe_usage_target(path: Path) -> bool:
     )
 
 
+def _ensure_record_boundary(path: Path) -> None:
+    """Separate a torn final write before appending the next JSONL record."""
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        if size == 0:
+            return
+        handle.seek(-1, 2)
+        if handle.read(1) == b"\n":
+            return
+    with path.open("ab") as handle:
+        handle.write(b"\n")
+
+
 def record(
     state_dir: Path,
     *,
@@ -89,6 +103,8 @@ def record(
             usage_path = _usage_path(state_dir, moment.date())
             if _unsafe_usage_target(usage_path):
                 return
+            if usage_path.exists():
+                _ensure_record_boundary(usage_path)
             with usage_path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
             _prune(state_dir, moment.date())
@@ -96,11 +112,15 @@ def record(
         return
 
 
-def _iter_records(state_dir: Path, since: datetime.date) -> list[dict[str, Any]]:
+def _iter_records(
+    state_dir: Path,
+    since: datetime.date,
+    until: datetime.date | None = None,
+) -> list[dict[str, Any]]:
     records = []
     for path in sorted(Path(state_dir).glob("model-usage-*.jsonl")):
         day = _file_day(path)
-        if day is None or day < since:
+        if day is None or day < since or (until is not None and day > until):
             continue
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
@@ -128,7 +148,7 @@ def usage_summary(
     moment = now or datetime.datetime.now()
     since = moment.date() - datetime.timedelta(days=days - 1)
     summary: dict[str, dict[str, int]] = {}
-    for entry in _iter_records(state_dir, since):
+    for entry in _iter_records(state_dir, since, until=moment.date()):
         purpose = str(entry.get("purpose", "unknown"))
         bucket = summary.setdefault(
             purpose,

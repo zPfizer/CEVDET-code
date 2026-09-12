@@ -84,6 +84,45 @@ class ModelUsageTests(unittest.TestCase):
         self.assertEqual(summary["flush"]["prompt_chars"], 400)
         self.assertEqual(summary["compile"]["calls"], 1)
 
+    def test_summary_excludes_future_dated_ledgers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            now = datetime.datetime(2026, 9, 11, 12, 0)
+            model_usage.record(
+                state,
+                purpose="compile",
+                prompt_chars=10,
+                duration_ms=5,
+                outcome="ok",
+                now=now + datetime.timedelta(days=10),
+            )
+
+            summary = model_usage.usage_summary(state, days=7, now=now)
+
+        self.assertEqual(summary, {})
+
+    def test_record_separates_an_incomplete_jsonl_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            ledger = state / "model-usage-20260911.jsonl"
+            ledger.parent.mkdir(parents=True, exist_ok=True)
+            ledger.write_text('{"schema": 1, "outcome":', encoding="utf-8")
+            model_usage.record(
+                state,
+                purpose="compile",
+                prompt_chars=10,
+                duration_ms=5,
+                outcome="ok",
+                now=datetime.datetime(2026, 9, 11, 12, 0),
+            )
+            lines = ledger.read_bytes().splitlines()
+            summary = model_usage.usage_summary(
+                state, days=7, now=datetime.datetime(2026, 9, 11, 12, 0)
+            )
+
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(summary["compile"]["calls"], 1)
+
     def test_run_exec_records_failure_outcome_with_purpose(self) -> None:
         # Muhasebe boru hattı uçtan uca: geçersiz CLI yolu bile amaçla kayda düşer.
         with tempfile.TemporaryDirectory() as temporary:
