@@ -102,6 +102,8 @@ def _load_mapping(path: Path, attachment_id: str) -> dict[str, Any] | None:
         raise ValueError('attachment-mapping-invalid')
     if payload.get('source_attachment') != f'{attachment_id}/pasted-text.txt':
         raise ValueError('attachment-mapping-invalid')
+    if 'source_changed' in payload and payload['source_changed'] is not True:
+        raise ValueError('attachment-mapping-invalid')
     for field in ('envelope_sha256', 'source_sanitized_sha256', 'source_sha256', 'suppression_revision'):
         if not isinstance(payload.get(field), str) or not HEX64.fullmatch(payload[field]):
             raise ValueError('attachment-mapping-invalid')
@@ -360,11 +362,26 @@ def _capture_one_core(
             raw_digest = source_record['source_sanitized_sha256']
             visible = source_record['visible']
             redactions = source_record['redactions']
-            if mapping is not None and mapping['source_sanitized_sha256'] != raw_digest:
-                raise ValueError('attachment-content-changed')
+            if mapping is not None:
+                changed = mapping['source_sanitized_sha256'] != raw_digest
+                if changed or mapping.get('source_changed'):
+                    updated = dict(mapping)
+                    if changed:
+                        updated['source_changed'] = True
+                    else:
+                        updated.pop('source_changed')
+                    if updated != mapping:
+                        with _publication_scope(state_dir, session_id):
+                            with suppression_guard(vault_root / '.codex/private-memory', hashes):
+                                _write_mapping(mapping_path, updated)
+                        mapping = updated
+                if changed:
+                    raise ValueError('attachment-content-changed')
         else:
             if mapping is None:
                 raise ValueError('attachment-recovery-unavailable')
+            if mapping.get('source_changed'):
+                raise ValueError('attachment-content-changed')
             if mapping['status'] == 'empty':
                 if mapping['suppression_revision'] != _suppression_revision(hashes):
                     raise ValueError('attachment-recovery-unavailable')

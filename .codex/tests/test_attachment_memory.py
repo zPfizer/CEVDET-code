@@ -68,12 +68,6 @@ class AttachmentMemoryTests(unittest.TestCase):
                 self.assertNotIn('note_relative', mapping)
                 self.assertNotIn('note_sha256', mapping)
                 self.assertEqual(list(state.glob('attachment-empty-*')), [])
-                source.write_text('Changed source.', encoding='utf-8')
-                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
-                    attachment_memory.capture_sources(
-                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
-                        frozenset(), summarize, state_dir=state,
-                    )
                 source.unlink()
                 self.assertEqual(
                     attachment_memory.capture_sources(
@@ -135,6 +129,37 @@ class AttachmentMemoryTests(unittest.TestCase):
                 self.assertEqual(capture(text, 4, hashes), other)
                 self.assertEqual(note.read_bytes(), original)
                 self.assertEqual(summarize.call_count, 2)
+
+    def test_observed_source_change_blocks_missing_source_recovery_until_reverified(self):
+        summary = '\n\n'.join('## ' + h + '\nSummary.' for h in flush.EXPECTED_SECTIONS)
+        for outcome in ('FLUSH_BOS', summary):
+            with self.subTest(empty=outcome == 'FLUSH_BOS'), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                home = root / 'home'
+                source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+                source.parent.mkdir(parents=True)
+                source.write_text('Original source.', encoding='utf-8')
+                text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+                summarize = mock.Mock(return_value=outcome)
+                with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                    def capture():
+                        return attachment_memory.capture_sources(
+                            [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                            frozenset(), summarize, state_dir=root / 'state',
+                        )
+                    initial = capture()
+                    source.write_text('Changed source.', encoding='utf-8')
+                    with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                        capture()
+                    self.assertEqual(source.read_text(encoding='utf-8'), 'Changed source.')
+                    source.unlink()
+                    with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                        capture()
+                    source.write_text('Original source.', encoding='utf-8')
+                    self.assertEqual(capture(), initial)
+                    source.unlink()
+                    self.assertEqual(capture(), initial)
+                    self.assertEqual(summarize.call_count, 1)
 
     def test_empty_source_receipt_does_not_cross_suppression_revision(self):
         with tempfile.TemporaryDirectory() as temp:
