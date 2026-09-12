@@ -878,6 +878,10 @@ class DoctorTests(unittest.TestCase):
                         "transcript_path": "transcript.jsonl",
                         "continuation": True,
                         "continuation_reason": "tail",
+                        "coverage": {"start": 0, "end": 1},
+                        "coverage_count": 1,
+                        "coverage_end": 1,
+                        "coverage_digest": "a" * 64,
                     },
                     "turnend",
                     vault_root=state,
@@ -923,6 +927,13 @@ class DoctorTests(unittest.TestCase):
                 ("prompt", "private prompt"),
                 ("message", "private message"),
                 ("unknown", "private value"),
+                ("continuation", "private prompt"),
+                ("continuation_reason", "private continuation reason"),
+                ("coverage", {"message": "private message"}),
+                ("continuation_reason", 7),
+                ("continuation", "true"),
+                ("continuation_reason", "a" * 65),
+                ("coverage", 3),
             ):
                 with self.subTest(field=field):
                     path.write_text(

@@ -697,6 +697,49 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
     }
     if not set(payload).issubset(allowed):
         return False
+    forbidden = {
+        "content",
+        "excerpt",
+        "message",
+        "messages",
+        "prompt",
+        "session_id",
+        "thread_id",
+        "transcript",
+    }
+
+    def is_metadata(value: object) -> bool:
+        if value is None or type(value) is bool:
+            return True
+        if type(value) is int:
+            return 0 <= value
+        if isinstance(value, str):
+            return re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", value) is not None
+        if isinstance(value, list):
+            return all(is_metadata(item) for item in value)
+        if isinstance(value, dict):
+            return all(
+                isinstance(key, str)
+                and key.casefold() not in forbidden
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", key)
+                is not None
+                and is_metadata(item)
+                for key, item in value.items()
+            )
+        return False
+
+    def is_continuation_field(field: str) -> bool:
+        value = payload[field]
+        if field == "continuation_reason":
+            return isinstance(value, str) and is_metadata(value)
+        if field == "continuation":
+            return type(value) is bool
+        if field in {"coverage_count", "coverage_end"}:
+            return type(value) is int and value >= 0
+        if field == "coverage_digest":
+            return isinstance(value, str) and is_metadata(value)
+        return isinstance(value, dict) and is_metadata(value)
+
     return (
         type(payload.get("delivery_schema_version")) is int
         and payload["delivery_schema_version"] == HOOK_INPUT_SCHEMA_VERSION
@@ -716,6 +759,11 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
                 payload["reason"] == "sessionend"
                 and payload["transcript_path"] is None
             )
+        )
+        and all(
+            is_continuation_field(field)
+            for field in FLUSH_CONTINUATION_FIELDS
+            if field in payload
         )
     )
 
