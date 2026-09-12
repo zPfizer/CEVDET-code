@@ -1263,6 +1263,8 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
             entries = retrieval.build_vault_map(root, write_cache=False)
             for query in (
                 "Daha önce veri saklama konusunda ne karar vermiştik?",
+                "Daha önce, veri saklama konusunda ne karar vermiştik?",
+                "Daha önce veri saklama konusunda, ne karar vermiştik?",
                 "Daha önce veri saklama konusunda ne karar vermiştik",
                 "Önceden veri saklama konusunda ne karar vermiştik?",
                 "Daha önce veri saklama konusunda ne karar vermiştim?",
@@ -1324,6 +1326,7 @@ Geçmiş veri saklama kararı: uzun günlükler.
                 "Güncel veri saklama seçeneğini öner; daha önce hangi seçeneklerin sorunlu olduğunu bilmemiştik",
                 "Güncel veri saklama seçeneğini öner; daha önce ne seçtiğimizi unutmuştuk",
                 "Güncel veri saklama seçeneğini öner; daha önce ne seçeceğimizi unutmuştuk",
+                "Güncel veri saklama seçeneğini öner; daha önce hangi seçeneğin iyi olduğunu düşünerek karar vermiştik",
             ):
                 with self.subTest(query=query):
                     terms = retrieval._retrieval_terms(query)
@@ -1386,6 +1389,18 @@ Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun 
                 ("Güncel veri saklama kararı", "daha önce hangi seçeneği uygun görmüştük? veri saklama kararı"),
             )
             scaffold_hits = retrieval.search_vault(entries, scaffold_query, top_k=2)
+            for option in ("seçenekleri", "seçeneklerimizi", "seçeneğimizi"):
+                clause = f"daha önce hangi {option} uygun görmüştük?"
+                query_with_option = f"Güncel veri saklama kararı ve {clause}"
+                with self.subTest(option=option):
+                    self.assertEqual(
+                        retrieval._split_current_history_query(query_with_option),
+                        ("Güncel veri saklama kararı", f"{clause} veri saklama kararı"),
+                    )
+                    self.assertEqual(
+                        {hit.entry.path for hit in retrieval.search_vault(entries, query_with_option, top_k=2)},
+                        {current, historical},
+                    )
 
             preference_clause = "daha önce hangisini tercih etmiştik?"
             preference_query = f"Güncel veri saklama kararı ve {preference_clause}"

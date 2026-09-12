@@ -202,7 +202,7 @@ HISTORY_TURKISH_NOMINAL_CHANGE_QUERY = re.compile(
 # A bounded first-person past form or decision question makes
 # `daha önce`/`önceden` retrospective; imperative forms such as
 # `daha önce bitir` stay current.
-HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS = frozenset({"hangi", "secenegi", "uygun"})
+HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS = frozenset({"hangi", "uygun"})
 HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY = r"m(?:iydi|uydu)[mk]"
 HISTORY_TURKISH_RETROSPECTIVE_PAST = (
     rf"\w+m(?:(?:isti|ustu)[mk]|(?:is|us)\s+{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY})"
@@ -215,9 +215,9 @@ HISTORY_TURKISH_DECISION_PAST = re.compile(
 )
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
     r"(?ix)(?:"
-    rf"\b(?:daha\s+once|onceden)\b(?:\s+\w+){{0,8}}\s+{HISTORY_TURKISH_RETROSPECTIVE_PAST}\b(?=\s*(?:\?|$))"
-    r"|\b(?:daha\s+once|onceden)\b(?:\s+\w+){0,3}\s+karar\w*"
-    r"(?:\s+\w+){0,2}\s+neydi\b(?=\s*(?:\?|$))"
+    rf"\b(?:daha\s+once|onceden)\b(?:[\s,]+\w+){{0,8}}\s+{HISTORY_TURKISH_RETROSPECTIVE_PAST}\b(?=\s*(?:\?|$))"
+    r"|\b(?:daha\s+once|onceden)\b(?:[\s,]+\w+){0,3}\s+karar\w*"
+    r"(?:[\s,]+\w+){0,2}\s+neydi\b(?=\s*(?:\?|$))"
     r")"
 )
 HISTORY_CHANGE_TAIL = (
@@ -1573,8 +1573,10 @@ def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
         if normalized[match.end():].lstrip().startswith("?")
         or re.search(rf"\b(?:{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY}|neydi)$", match.group())
         or (
-            HISTORY_TURKISH_DECISION_PAST.search(match.group())
-            and _retrospective_question_terms(match.group())
+            (decision := HISTORY_TURKISH_DECISION_PAST.search(match.group()))
+            # Direct wh + optional object + decision predicate. Remote wh-words
+            # inside a background explanation are not question evidence.
+            and _retrospective_question_terms(" ".join(match.group()[:decision.start()].split()[-2:]))
         )
     ]
 
@@ -1597,6 +1599,7 @@ def _retrospective_topic_cue_terms(query: str) -> frozenset[str]:
                 term
                 for term in _tokens(retrospective)
                 if term in HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS
+                or any(term == root or _matches_history_inflection(term, root) for root in ("secenek", "seceneg"))
             )
         decision = re.search(
             rf"\b(?P<decision>karar\w*)\b(?=\s+(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b)",
