@@ -343,6 +343,30 @@ class JourneyE2ETests(unittest.TestCase):
             state, "session-end", session_id, expected_generation, result,
         )
 
+    def _assert_pending_session_end_transport(
+        self, state: Path, session_id: str, transcript: Path,
+    ) -> tuple[str, str]:
+        jobs = list((state / "worker-jobs" / "pending").glob("*.json"))
+        self.assertEqual(len(jobs), 1, _debug_state(state))
+        job = json.loads(jobs[0].read_text(encoding="utf-8"))
+        self.assertEqual(job["kind"], "flush")
+        self.assertEqual(job["payload"]["reason"], "sessionend")
+        hook_input = Path(job["payload"]["hook_input"])
+        transport = json.loads(hook_input.read_text(encoding="utf-8"))
+        self.assertEqual(transport["session_id"], session_id)
+        self.assertEqual(transport["transcript_path"], str(transcript))
+        return job["job_id"], str(hook_input)
+
+    def _assert_session_end_source_was_consumed(
+        self, state: Path, job_id: str, hook_input: str,
+    ) -> None:
+        receipt = state / "worker-jobs" / "succeeded" / f"job-{job_id}.json"
+        self.assertTrue(receipt.is_file(), _debug_state(state))
+        job = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual(job["kind"], "flush")
+        self.assertEqual(job["payload"]["reason"], "sessionend")
+        self.assertEqual(job["payload"]["hook_input"], hook_input)
+
     def test_model_stub_rejects_missing_or_misordered_transcript(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cevo-journey-stub-") as temporary:
             root = Path(temporary)
@@ -422,7 +446,13 @@ class JourneyE2ETests(unittest.TestCase):
             ended = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(ended.returncode, 0, ended.stderr)
             self._assert_session_end_succeeded(state, session_id, result=ended)
+            first_job_id, first_hook_input = self._assert_pending_session_end_transport(
+                state, session_id, transcript,
+            )
             _drain_worker(vault, environment)
+            self._assert_session_end_source_was_consumed(
+                state, first_job_id, first_hook_input,
+            )
 
             daily = vault / "daily" / f"{event_date}.md"
 
@@ -484,10 +514,17 @@ class JourneyE2ETests(unittest.TestCase):
             self._assert_session_end_succeeded(
                 state, session_id, expected_generation=2, result=repeated,
             )
+            replay_job_id, replay_hook_input = self._assert_pending_session_end_transport(
+                state, session_id, transcript,
+            )
             _drain_worker(vault, environment)
+            self._assert_session_end_source_was_consumed(
+                state, replay_job_id, replay_hook_input,
+            )
             self.assertTrue(
                 _wait_until(
                     lambda: _queue_idle(state)
+                    and replay_job_id in _successful_session_ends(state)
                     and bool(_successful_session_ends(state) - first_receipts),
                     DAILY_TIMEOUT_SECONDS,
                 ),
