@@ -125,6 +125,7 @@
 !/.codex/tests/test_full_content_retrieval.py
 !/.codex/tests/test_graph_integrity.py
 !/.codex/tests/test_hook_scope.py
+!/.codex/tests/test_journey_e2e.py
 !/.codex/tests/test_knowledge_provenance.py
 !/.codex/tests/test_knowledge_schema_paths.py
 !/.codex/tests/test_memory_controls.py
