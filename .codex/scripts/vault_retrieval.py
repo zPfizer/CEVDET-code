@@ -218,10 +218,10 @@ HISTORY_TURKISH_RETROSPECTIVE_PAST = (
 # only. An embedded wh-word in `hangi ... olduğunu bilmemiştik` is not enough.
 HISTORY_TURKISH_DECISION_PAST = re.compile(
     rf"\b(?:(?:karar\w*|tercih|uygun)\s+{HISTORY_TURKISH_RETROSPECTIVE_PAST}"
-    rf"|(?:sec|benimse)\w*{HISTORY_TURKISH_PAST_SUFFIX})$"
+    rf"|(?:sec|benimse|kararlastir)\w*{HISTORY_TURKISH_PAST_SUFFIX})$"
 )
 HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY = (
-    rf"(?=\s*(?:[?,]|$|(?:ve|ile)\s+{CURRENT_QUERY_CUE}\b))"
+    rf"(?=\s*(?:[,.!?;:\r\n]|$|(?:ve|ile)\s+{CURRENT_QUERY_CUE}\b))"
 )
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
     rf"(?ix)\b(?:daha\s+once|onceden)\b[^.!?;:\r\n]*?\s+"
