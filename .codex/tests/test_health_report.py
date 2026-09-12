@@ -193,6 +193,7 @@ class HealthReportTests(unittest.TestCase):
     def test_invalid_compile_metadata_is_not_published(self) -> None:
         cases = (
             {"last_run": "bozuk\nprivate-run", "last_status": "ok"},
+            {"last_run": "2026-09-10\n12:00:00", "last_status": "ok"},
             {"last_run": "2026-09-10T12:00:00", "last_status": "bad\nprivate-status"},
             {"last_run": "2026-09-10T12:00:00", "last_status": ["ok"]},
         )
@@ -221,6 +222,26 @@ class HealthReportTests(unittest.TestCase):
                         "Derleyici son çalışma: ? (durum: bozuk kayıt)", text
                     )
                     self.assertNotIn("private-", text)
+
+    def test_maintenance_lane_and_cleanup_fence_are_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            pending = state / "maintenance" / "worker-jobs" / "pending"
+            pending.mkdir(parents=True)
+            (pending / "job-maintenance.json").write_text("{}", encoding="utf-8")
+            fence = state / "maintenance" / "worker-tree-cleanup-unverified.json"
+            fence.parent.mkdir(parents=True, exist_ok=True)
+            fence.write_text("{}", encoding="utf-8")
+
+            text = health_report.render(
+                vault, now=datetime.datetime(2026, 9, 11)
+            )
+
+        self.assertIn("| pending | 1 |", text)
+        self.assertIn("Worker temizleme fence'i etkin", text)
+        self.assertIn("maintenance", text)
+        self.assertNotIn("Boş — takılı iş yok.", text)
 
     def test_invalid_health_component_is_reported_as_unreadable(self) -> None:
         cases = (

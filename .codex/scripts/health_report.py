@@ -51,6 +51,9 @@ _FRONTMATTER = re.compile(
 )
 _CREATED = re.compile(r"(?m)^created: (?P<value>[^\r\n]+)$")
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
+_COMPILE_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2})?\Z"
+)
 _COMPILE_STATUS = re.compile(r"(?:ok|fail:[A-Za-z0-9][A-Za-z0-9._:-]{0,127})\Z")
 
 
@@ -132,15 +135,30 @@ def _dead_letter_row(path: Path) -> dict[str, Any]:
 
 
 def worker_counts(state_dir: Path) -> dict[str, int]:
-    jobs = _worker_jobs_root(state_dir)
-    if jobs is None:
-        return {stage: 0 for stage in WORKER_STAGES}
-    counts = {stage: len(_json_files(jobs / stage)) for stage in WORKER_STAGES}
-    counts["dead-letter"] = len(_all_dead_letter_rows(state_dir, jobs=jobs))
+    jobs_roots = _worker_job_roots(state_dir)
+    counts = {stage: 0 for stage in WORKER_STAGES}
+    for jobs in jobs_roots:
+        for stage in WORKER_STAGES:
+            counts[stage] += len(_json_files(jobs / stage))
+    counts["dead-letter"] = len(
+        _all_dead_letter_rows(state_dir, jobs=jobs_roots)
+    )
     return counts
 
 
 def _worker_jobs_root(state_dir: Path) -> Path | None:
+    try:
+        lane_stat = state_dir.lstat()
+    except FileNotFoundError:
+        return None
+    except (OSError, RuntimeError) as exc:
+        raise OSError("worker-directory-unreadable") from exc
+    if (
+        stat.S_ISLNK(lane_stat.st_mode)
+        or not stat.S_ISDIR(lane_stat.st_mode)
+        or state_dir.is_junction()
+    ):
+        raise OSError("worker-directory-invalid")
     jobs = state_dir / "worker-jobs"
     try:
         jobs_stat = jobs.lstat()
@@ -155,6 +173,15 @@ def _worker_jobs_root(state_dir: Path) -> Path | None:
     ):
         raise OSError("worker-directory-invalid")
     return jobs
+
+
+def _worker_job_roots(state_dir: Path) -> tuple[Path, ...]:
+    roots = []
+    for lane in (state_dir, state_dir / "maintenance"):
+        jobs = _worker_jobs_root(lane)
+        if jobs is not None:
+            roots.append(jobs)
+    return tuple(roots)
 
 
 def _directory_entries(directory: Path, *, error_prefix: str) -> tuple[Path, ...]:
@@ -195,22 +222,34 @@ def _json_files(
 
 
 def _all_dead_letter_rows(
-    state_dir: Path, *, jobs: Path | None = None
+    state_dir: Path, *, jobs: Sequence[Path] | None = None
 ) -> list[dict[str, Any]]:
-    jobs = _worker_jobs_root(state_dir) if jobs is None else jobs
-    if jobs is None:
-        return []
+    jobs = _worker_job_roots(state_dir) if jobs is None else jobs
     rows = []
-    for path in _json_files(jobs / "dead-letter"):
-        row = _dead_letter_row(path)
-        if not row.get("recovered", False):
-            rows.append(row)
+    for jobs_root in jobs:
+        for path in _json_files(jobs_root / "dead-letter"):
+            row = _dead_letter_row(path)
+            if not row.get("recovered", False):
+                rows.append(row)
     rows.sort(key=lambda row: _timestamp_sort_key(row["finished_ts"]), reverse=True)
     return rows
 
 
 def dead_letter_rows(state_dir: Path) -> list[dict[str, Any]]:
     return _all_dead_letter_rows(state_dir)[:DEAD_LETTER_LIMIT]
+
+
+def worker_fences(state_dir: Path) -> tuple[str, ...]:
+    from worker_supervisor import has_unverified_process_tree
+
+    fences = []
+    for label, lane in (
+        ("global", state_dir),
+        ("maintenance", state_dir / "maintenance"),
+    ):
+        if has_unverified_process_tree(lane):
+            fences.append(label)
+    return tuple(fences)
 
 
 def marker_counts(state_dir: Path) -> dict[str, int]:
@@ -260,6 +299,8 @@ def compile_summary(state_dir: Path) -> tuple[str, str]:
         try:
             datetime.datetime.fromisoformat(last_run)
         except ValueError:
+            return "?", "bozuk kayıt"
+        if _COMPILE_TIMESTAMP.fullmatch(last_run) is None:
             return "?", "bozuk kayıt"
     if _COMPILE_STATUS.fullmatch(last_status) is None:
         return "?", "bozuk kayıt"
@@ -383,6 +424,7 @@ def render(
     markers = marker_counts(state_dir)
     last_run, last_status = compile_summary(state_dir)
     dead_rows = dead_letter_rows(state_dir)
+    fences = worker_fences(state_dir)
 
     lines = [
         "---",
@@ -417,6 +459,12 @@ def render(
             f"| {row['job_id']} | {row['kind']} | {row['terminal_reason']} | {_format_ts(row['finished_ts'])} |"
             for row in dead_rows
         )
+    elif fences:
+        lines.append(
+            "Worker temizleme fence'i etkin — kuyruk güvenle doğrulanamıyor: "
+            + ", ".join(fences)
+            + "."
+        )
     else:
         lines.append("Boş — takılı iş yok.")
     lines += [
@@ -428,6 +476,7 @@ def render(
         f"- Flush durum dosyası: {flush_state_count(state_dir)}",
         f"- Derleyici son çalışma: {last_run} (durum: {last_status})",
         f"- Sağlık kaydı (health.json): {health_summary(state_dir)}",
+        f"- Worker temizleme fence'i: {', '.join(fences) if fences else 'yok'}",
         "",
     ]
     return "\n".join(lines)
