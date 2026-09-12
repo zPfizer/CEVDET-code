@@ -254,8 +254,10 @@ class StaleReviewTests(unittest.TestCase):
 
     def test_source_path_escape_is_not_statted_or_echoed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            vault = Path(temporary)
-            outside = vault.parent / "outside-secret.md"
+            root = Path(temporary)
+            vault = root / "vault"
+            vault.mkdir()
+            outside = root / "outside-secret.md"
             outside.write_text("özel içerik", encoding="utf-8")
             try:
                 _note(
