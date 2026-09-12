@@ -117,9 +117,10 @@ TALİMATLAR
    makaleleri Grep ve Read ile incele. Knowledge dizinini topluca okuma.
 5. Makaleleri kullanıcının dili olan Türkçe yaz. Slug değerlerini ASCII
    kebab-case biçiminde yaz.
-6. Yeni bilgi mevcut bir kayıtla çelişiyorsa eski kaydı koru ve `gecmis` yap;
-   yeni kaydı ayrıca `gecerli` olarak ekle. Önceki iddiayı sessizce silme veya
-   yeniden yazma.
+6. Yukarıdaki `BELLEK ŞEMASI KURALLARI` içindeki çelişki ve kaynak ayrılığı
+   kuralını tek otorite olarak uygula; aynı uzun hükmü burada tekrar yazma.
+   Günlükteki gerekçe, konuşulmuş alternatif, koşul ve taahhütü Detaylar veya
+   Kayıtlar'da koru; Assistant önerisini kullanıcı kararı yapma.
    Saat, tutar ve durum gibi değişken kararların güncel değerini tek esas
    kavramda tut; diğer makalelerde değeri tekrarlamak yerine o kayda bağlan.
    Karar değiştiğinde ilgili kavram ve bağlantılardaki eski değer tekrarlarını
@@ -1487,7 +1488,12 @@ def _promote_changes(
     compile_state.save_publication(state_dir, journal)
 
 
-def _run_codex(prompt: str, stage: Path) -> str | None:
+def _run_codex(
+    prompt: str,
+    stage: Path,
+    *,
+    state_dir: Path | None = None,
+) -> str | None:
     """Rewrite the staging tree in place; only the failure reason comes back.
 
     The prompt travels as a file inside the stage so the argv stays short; the
@@ -1505,6 +1511,14 @@ def _run_codex(prompt: str, stage: Path) -> str | None:
             timeout=900,
             stage=stage,
             propagate_cleanup_error=True,
+            usage_state_dir=state_dir or STATE_DIR,
+            usage_prompt_chars=len(prompt),
+            usage_output_optional=True,
+            purpose=(
+                'compile-repair'
+                if prompt.startswith('BELLEK ŞEMASI ONARIMI')
+                else 'compile'
+            ),
         )
     except ProcessTreeCleanupError:
         cleanup_unverified = True
@@ -1544,6 +1558,11 @@ def _compile_one(
     runner: Runner | None = None,
     memory_root: Path | None = None,
 ) -> tuple[str | None, str]:
+    def run_model(prompt: str, stage: Path) -> str | None:
+        if runner is not None:
+            return runner(prompt, stage)
+        return _run_codex(prompt, stage, state_dir=state_dir)
+
     stage: Path | None = None
     phase = "prepare"
     try:
@@ -1607,7 +1626,7 @@ def _compile_one(
             sorted(taxonomy.canonical),
         )
         phase = "run-codex"
-        error = (runner or _run_codex)(prompt, stage)
+        error = run_model(prompt, stage)
         if error is not None:
             return error, error
         if load_suppressed_hashes(private_root) != hashes:
@@ -1621,7 +1640,7 @@ def _compile_one(
             vault_root / ".codex" / "tag-taxonomy.json",
             before,
             previous_texts,
-            runner=runner,
+            runner=run_model,
         )
         if repair_error is not None:
             return "schema-repair", repair_error
@@ -2243,7 +2262,7 @@ def _run_locked(
         if model_calls_used >= max_calls:
             return "model-call-budget-exhausted"
         model_calls_used += 1
-        return _run_codex(prompt, stage)
+        return _run_codex(prompt, stage, state_dir=state_dir)
 
     selected = changed[:max_calls]
     if dry_run:

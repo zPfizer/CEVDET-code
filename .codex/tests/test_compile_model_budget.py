@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -13,6 +14,47 @@ from test_second_brain_acceptance import _deterministic_compiler, _seed_vault
 
 
 class CompileModelBudgetTests(unittest.TestCase):
+    def test_run_codex_uses_explicit_active_usage_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            active_state = root / 'active'
+            stage = active_state / 'compile-stage-test'
+            stage.mkdir(parents=True)
+            fallback_state = root / 'fallback'
+
+            with patch.object(compiler, 'STATE_DIR', fallback_state), \
+                    patch.object(compiler.codex_runner, '_bounded_exec', return_value=(None, None)):
+                self.assertIsNone(compiler._run_codex('prompt', stage, state_dir=active_state))
+
+            self.assertTrue(list(active_state.glob('model-usage-*.jsonl')))
+            self.assertEqual(list(fallback_state.glob('model-usage-*.jsonl')), [])
+
+    def test_run_codex_accounts_for_file_backed_prompt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            state_dir = stage / '.state'
+            prompts = ('short', 'long prompt ' * 100)
+            wrapper = (
+                'Read .__alf4_compile_prompt.md. Follow its instructions.'
+                ' Do not modify that file.'
+            )
+
+            with patch.object(compiler, 'STATE_DIR', state_dir), \
+                    patch.object(compiler.codex_runner, '_bounded_exec', return_value=(None, None)) as execute:
+                for prompt in prompts:
+                    self.assertIsNone(compiler._run_codex(prompt, stage))
+
+            entries = [
+                json.loads(line)
+                for path in state_dir.glob('model-usage-*.jsonl')
+                for line in path.read_text(encoding='utf-8').splitlines()
+            ]
+
+        self.assertEqual([item['prompt_chars'] for item in entries], [len(item) for item in prompts])
+        self.assertEqual([item['purpose'] for item in entries], ['compile', 'compile'])
+        self.assertEqual([item['outcome'] for item in entries], ['ok', 'ok'])
+        self.assertEqual([item.args[0] for item in execute.call_args_list], [wrapper, wrapper])
+
     def test_repair_counts_against_budget_and_leaves_invalid_daily_pending(self):
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -20,7 +62,7 @@ class CompileModelBudgetTests(unittest.TestCase):
             state_dir = vault / '.codex/scripts/.state'
             calls = []
 
-            def invalid_generation(_prompt, stage):
+            def invalid_generation(_prompt, stage, **_kwargs):
                 calls.append('model')
                 (stage / 'knowledge/index.md').write_text('broken-index\n', encoding='utf-8')
 
@@ -48,7 +90,7 @@ class CompileModelBudgetTests(unittest.TestCase):
             _seed_vault(vault)
             state_dir = vault / '.codex/scripts/.state'
 
-            def invalid_generation(_prompt, stage):
+            def invalid_generation(_prompt, stage, **_kwargs):
                 (stage / 'knowledge/index.md').write_text('broken-index\n', encoding='utf-8')
 
             with patch.object(compiler, 'VAULT_ROOT', vault), \
@@ -68,7 +110,7 @@ class CompileModelBudgetTests(unittest.TestCase):
             state_dir = vault / '.codex/scripts/.state'
             calls = []
 
-            def valid_generation(prompt, stage):
+            def valid_generation(prompt, stage, **_kwargs):
                 calls.append(prompt)
                 return _deterministic_compiler(prompt, stage)
 
@@ -96,7 +138,7 @@ class CompileModelBudgetTests(unittest.TestCase):
             state_dir = vault / '.codex/scripts/.state'
             calls = []
 
-            def valid_generation(prompt, stage):
+            def valid_generation(prompt, stage, **_kwargs):
                 calls.append(prompt)
                 return _deterministic_compiler(prompt, stage)
 

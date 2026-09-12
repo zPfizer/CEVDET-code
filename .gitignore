@@ -59,6 +59,7 @@
 !/.codex/scripts/jsonl_tail.py
 !/.codex/scripts/knowledge_schema.py
 !/.codex/scripts/memory_ledger.py
+!/.codex/scripts/model_usage.py
 !/.codex/scripts/process_control.py
 !/.codex/scripts/profile_guard.py
 !/.codex/scripts/quote_grammar.py
@@ -66,6 +67,7 @@
 !/.codex/scripts/tag_taxonomy.py
 !/.codex/scripts/transcript_index.py
 !/.codex/scripts/user_evidence.py
+!/.codex/scripts/vault_backup.py
 !/.codex/scripts/vault_corpus.py
 !/.codex/scripts/vault_retrieval.py
 !/.codex/scripts/worker_supervisor.py
@@ -125,12 +127,14 @@
 !/.codex/tests/test_full_content_retrieval.py
 !/.codex/tests/test_graph_integrity.py
 !/.codex/tests/test_hook_scope.py
+!/.codex/tests/test_journey_e2e.py
 !/.codex/tests/test_knowledge_provenance.py
 !/.codex/tests/test_knowledge_schema_paths.py
 !/.codex/tests/test_memory_controls.py
 !/.codex/tests/test_memory_preferences_flow.py
 !/.codex/tests/test_memory_source_read.py
 !/.codex/tests/test_natural_recall.py
+!/.codex/tests/test_model_usage.py
 !/.codex/tests/test_profile_enforcement.py
 !/.codex/tests/test_profile_guard.py
 !/.codex/tests/test_python_audit_regressions.py
@@ -149,6 +153,7 @@
 !/.codex/tests/test_state_store.py
 !/.codex/tests/test_transcript_index.py
 !/.codex/tests/test_user_evidence.py
+!/.codex/tests/test_vault_backup.py
 !/.codex/tests/test_vault_contract.py
 !/.codex/tests/test_vault_corpus.py
 !/.codex/tests/test_vault_ingestion_slice_a.py
@@ -156,6 +161,7 @@
 !/.codex/tests/test_vault_ingestion_slice_c.py
 !/.codex/tests/test_vault_tag_quality.py
 !/.codex/tests/test_worker_handoff.py
+!/.codex/tests/test_worker_redrive.py
 !/.codex/tests/test_worker_result_contract.py
 !/.gitattributes
 !/.gitignore
