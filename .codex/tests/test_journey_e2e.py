@@ -25,6 +25,7 @@ import unittest
 import uuid
 
 from _fixtures import CODEX_DIR
+import process_control
 import user_evidence
 
 CANNED_TODO = "Atlas planını yaz."
@@ -67,6 +68,51 @@ def _copy_runtime(vault: Path) -> Path:
     for source in (CODEX_DIR / "scripts").glob("*.py"):
         shutil.copy2(source, codex / "scripts" / source.name)
     shutil.copy2(CODEX_DIR / "hooks" / "hook.py", codex / "hooks" / "hook.py")
+    (codex / "hooks" / "journey_hook_runner.py").write_text(
+        "from __future__ import annotations\n"
+        "import json\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "import subprocess\n"
+        "import sys\n"
+        "scripts = Path(__file__).resolve().parent.parent / 'scripts'\n"
+        "if str(scripts) not in sys.path:\n"
+        "    sys.path.insert(0, str(scripts))\n"
+        "import hook\n"
+        "import worker_supervisor\n"
+        "\n"
+        "def managed_popen(command, **kwargs):\n"
+        "    options = dict(kwargs)\n"
+        "    if os.name == 'nt':\n"
+        "        breakaway = getattr(subprocess, 'CREATE_BREAKAWAY_FROM_JOB', 0x01000000)\n"
+        "        options['creationflags'] = int(options.get('creationflags', 0)) & ~breakaway\n"
+        "    process = subprocess.Popen(list(command), **options)\n"
+        "    registry = os.environ.get('CEVO_JOURNEY_WORKER_REGISTRY')\n"
+        "    if registry:\n"
+        "        identity = worker_supervisor.process_control.process_identity(process.pid)\n"
+        "        with Path(registry).open('a', encoding='utf-8') as stream:\n"
+        "            stream.write(json.dumps({'pid': process.pid, 'identity': identity}) + '\\n')\n"
+        "    return process\n"
+        "\n"
+        "def enqueue_flush(payload, reason, *, popen_factory=subprocess.Popen, deadline=None):\n"
+        "    del popen_factory\n"
+        "    return worker_supervisor.enqueue_flush(\n"
+        "        hook.STATE_DIR, payload, reason, vault_root=hook.VAULT_ROOT,\n"
+        "        launcher=managed_popen, deadline=deadline,\n"
+        "    )\n"
+        "\n"
+        "def ensure_supervisor(state_dir, *, vault_root, launcher=subprocess.Popen, now=None, deadline=None):\n"
+        "    del launcher\n"
+        "    return worker_supervisor.ensure_supervisor(\n"
+        "        state_dir, vault_root=vault_root, launcher=managed_popen,\n"
+        "        now=now, deadline=deadline,\n"
+        "    )\n"
+        "\n"
+        "hook.enqueue_flush = enqueue_flush\n"
+        "hook.ensure_supervisor = ensure_supervisor\n"
+        "raise SystemExit(hook.main(sys.argv[1:]))\n",
+        encoding="utf-8",
+    )
     return codex
 
 
@@ -150,7 +196,11 @@ def _run_hook(
     return subprocess.run(
         # Üretim paritesi: Codex host kancayı --strict OLMADAN, fail-open
         # çalıştırır. Sonuç iddiaları dönüş koduna değil çıktılara dayanır.
-        [sys.executable, str(vault / ".codex" / "hooks" / "hook.py"), event],
+        [
+            sys.executable,
+            str(vault / ".codex" / "hooks" / "journey_hook_runner.py"),
+            event,
+        ],
         cwd=vault,
         input=json.dumps(payload, ensure_ascii=False),
         text=True,
@@ -229,25 +279,6 @@ def _drain_worker(vault: Path, environment: dict[str, str]) -> None:
     )
 
 
-def _reserve_manual_worker(state: Path) -> None:
-    """Keep queue admission independent from CI's detached-process policy."""
-    now = int(time.time())
-    (state / "worker-supervisor.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "status": "running",
-                "generation": 1,
-                "launch_token": "journey-test",
-                "owner_pid": os.getpid(),
-                "lease_until": now + 90,
-                "updated_ts": now,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
 def _queue_idle(state: Path) -> bool:
     jobs = state / "worker-jobs"
     return all(
@@ -274,7 +305,53 @@ class JourneyE2ETests(unittest.TestCase):
         environment = dict(os.environ)
         environment["CODEX_CLI_PATH"] = str(stub)
         environment["CODEX_HOME"] = str(home)
+        environment["CEVO_JOURNEY_WORKER_REGISTRY"] = str(
+            stub.parent / "worker-processes.jsonl"
+        )
         return environment
+
+    @staticmethod
+    def _managed_worker_records(
+        environment: dict[str, str],
+    ) -> list[dict[str, object]]:
+        path = Path(environment["CEVO_JOURNEY_WORKER_REGISTRY"])
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return []
+        records: list[dict[str, object]] = []
+        for line in lines:
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                records.append(value)
+        return records
+
+    def _assert_managed_workers_stopped(
+        self, environment: dict[str, str],
+    ) -> None:
+        def all_stopped() -> bool:
+            records = self._managed_worker_records(environment)
+            if not records:
+                return False
+            for record in records:
+                pid = record.get("pid")
+                identity = record.get("identity")
+                if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                    return False
+                if isinstance(identity, str) and identity:
+                    if process_control.process_is_same(pid, identity):
+                        return False
+                elif process_control.pid_is_alive(pid):
+                    return False
+            return True
+
+        self.assertTrue(
+            _wait_until(all_stopped, DAILY_TIMEOUT_SECONDS),
+            "managed worker süreci kapanmadı",
+        )
 
     def _assert_prompt_succeeded(self, result, vault: Path, state: Path, marker: str) -> None:
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -361,7 +438,10 @@ class JourneyE2ETests(unittest.TestCase):
         self, state: Path, job_id: str, hook_input: str,
     ) -> None:
         receipt = state / "worker-jobs" / "succeeded" / f"job-{job_id}.json"
-        self.assertTrue(receipt.is_file(), _debug_state(state))
+        self.assertTrue(
+            _wait_until(receipt.is_file, DAILY_TIMEOUT_SECONDS),
+            _debug_state(state),
+        )
         job = json.loads(receipt.read_text(encoding="utf-8"))
         self.assertEqual(job["kind"], "flush")
         self.assertEqual(job["payload"]["reason"], "sessionend")
@@ -442,7 +522,6 @@ class JourneyE2ETests(unittest.TestCase):
             self.assertEqual(list((state / "worker-jobs").glob("*/*.json")), [])
 
             event_date = datetime.date.today().isoformat()
-            _reserve_manual_worker(state)
             ended = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(ended.returncode, 0, ended.stderr)
             self._assert_session_end_succeeded(state, session_id, result=ended)
@@ -453,6 +532,7 @@ class JourneyE2ETests(unittest.TestCase):
             self._assert_session_end_source_was_consumed(
                 state, first_job_id, first_hook_input,
             )
+            self._assert_managed_workers_stopped(environment)
 
             daily = vault / "daily" / f"{event_date}.md"
 
@@ -508,7 +588,6 @@ class JourneyE2ETests(unittest.TestCase):
             self.assertIn(evidence_link, daily_text)
 
             # Aynı kapanışın tekrarı ikinci bir kayıt üretmemeli (idempotency).
-            _reserve_manual_worker(state)
             repeated = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
             self._assert_session_end_succeeded(
@@ -521,6 +600,7 @@ class JourneyE2ETests(unittest.TestCase):
             self._assert_session_end_source_was_consumed(
                 state, replay_job_id, replay_hook_input,
             )
+            self._assert_managed_workers_stopped(environment)
             self.assertTrue(
                 _wait_until(
                     lambda: _queue_idle(state)
@@ -557,6 +637,7 @@ class JourneyE2ETests(unittest.TestCase):
             self.assertIn(CANNED_TODO, context)
             self.assertIn(CANNED_CLAIM, context)
             self.assertIn(evidence_link, context)
+            self._assert_managed_workers_stopped(environment)
 
     def test_read_only_turn_blocks_the_whole_write_chain(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cevo-journey-ro-", ignore_cleanup_errors=True) as temporary:
