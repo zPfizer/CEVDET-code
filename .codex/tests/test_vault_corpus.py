@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 import sys
 import tempfile
@@ -12,6 +12,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import doctor  # noqa: E402
+import graph_integrity  # noqa: E402
 import tag_taxonomy  # noqa: E402
 import vault_corpus  # noqa: E402
 
@@ -48,6 +49,52 @@ def _build_vault(root: Path) -> None:
 
 
 class VaultCorpusTests(unittest.TestCase):
+    def test_dotted_link_targets_never_resolve_to_truncated_filename(self) -> None:
+        for exists in (False, True):
+            with self.subTest(target_exists=exists), tempfile.TemporaryDirectory() as temporary:
+                vault = Path(temporary)
+                knowledge = vault / "knowledge"
+                knowledge.mkdir()
+                (knowledge / "v1.md").write_text("# Unrelated", encoding="utf-8")
+                (knowledge / "index.md").write_text("[[knowledge/v1.2]]", encoding="utf-8")
+                if exists:
+                    (knowledge / "v1.2.md").write_text("# Target", encoding="utf-8")
+                notes = vault_corpus.vault_notes(vault)
+                result = vault_corpus.resolve_link(
+                    "knowledge/v1.2", vault_corpus.by_key(notes), vault_corpus.by_stem(notes),
+                )
+                self.assertEqual(result.key if result else None, "knowledge/v1.2.md" if exists else None)
+                self.assertEqual(doctor._vault_link_check(doctor.Context(vault)).status,
+                                 "OK" if exists else "FAIL")
+                _total, isolated = graph_integrity.graph_summary(notes)
+                self.assertIn("knowledge/v1.md", isolated)
+                self.assertEqual("knowledge/index.md" in isolated, not exists)
+
+    def test_short_links_with_or_without_md_reach_the_same_note(self) -> None:
+        for target in ("Hedef", "Hedef.md", "v1.2", "v1.2.md"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                vault = Path(temporary)
+                knowledge = vault / "knowledge"
+                knowledge.mkdir()
+                name = "v1.2.md" if target.startswith("v1.2") else "Hedef.md"
+                (knowledge / name).write_text("# Target", encoding="utf-8")
+                (knowledge / "index.md").write_text(f"[[{target}]]", encoding="utf-8")
+                notes = vault_corpus.vault_notes(vault)
+                result = vault_corpus.resolve_link(target, vault_corpus.by_key(notes),
+                                                  vault_corpus.by_stem(notes))
+                self.assertEqual(result.key if result else None, f"knowledge/{name}")
+                self.assertEqual(doctor._vault_link_check(doctor.Context(vault)).status, "OK")
+                self.assertEqual(graph_integrity.graph_summary(notes), (2, []))
+
+    def test_link_fallback_keeps_ambiguity_and_vault_boundary_guards(self) -> None:
+        notes = tuple(vault_corpus.NoteIndex(Path(key), PurePosixPath(key), "")
+                      for key in ("knowledge/Hedef.md", "daily/Hedef.md"))
+        keyed, stems = vault_corpus.by_key(notes), vault_corpus.by_stem(notes)
+        for target in ("Hedef", "Hedef.md", "../Hedef.md", "/Hedef.md", "C:/Hedef.md"):
+            with self.subTest(target=target):
+                self.assertIsNone(vault_corpus.resolve_link(target, keyed, stems))
+        self.assertIs(vault_corpus.resolve_link("knowledge/Hedef.md", keyed, stems), notes[0])
+
     def test_companion_sources_are_not_duplicate_notes_but_other_sources_remain(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
