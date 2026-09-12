@@ -9,14 +9,19 @@ commit edilmiş durumu kapsar; çalışma ağacındaki commit'lenmemiş değişi
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import time
 from typing import Sequence
 
-BUNDLE_NAME = re.compile(r"vault-\d{8}-\d{6}(?:-\d+)?\.bundle$")
+from file_lock import locked
+
+
+BUNDLE_NAME = re.compile(r"vault-(\d{8}-\d{6})(?:-(\d+))?\.bundle$")
 DEFAULT_KEEP = 14
 GIT_TIMEOUT_SECONDS = 600
 
@@ -53,6 +58,28 @@ def _require_repo(vault: Path) -> None:
     _git(vault, "rev-parse", "--git-dir")
 
 
+def _owned_destination(dest: Path, vault: Path) -> Path:
+    source_key = os.path.normcase(str(vault)).encode("utf-8")
+    source_id = hashlib.sha256(source_key).hexdigest()
+    return dest / f".vault-{source_id}"
+
+
+def _lock_target(dest: Path) -> Path:
+    return dest / "vault-backup"
+
+
+def _prepare_dest(vault: Path, dest: Path) -> tuple[Path, Path]:
+    vault = Path(vault).resolve()
+    dest = Path(dest).resolve()
+    _require_repo(vault)
+    if dest == vault or vault in dest.parents:
+        raise BackupError(f"yedek hedefi vault içinde olamaz: {dest}")
+    dest.mkdir(parents=True, exist_ok=True)
+    owned_dest = _owned_destination(dest, vault)
+    owned_dest.mkdir(exist_ok=True)
+    return vault, owned_dest
+
+
 def _unique_bundle_path(dest: Path, stamp: str) -> Path:
     candidate = dest / f"vault-{stamp}.bundle"
     counter = 0
@@ -62,18 +89,14 @@ def _unique_bundle_path(dest: Path, stamp: str) -> Path:
     return candidate
 
 
-def create_bundle(vault: Path, dest: Path, *, now: float | None = None) -> Path:
-    """Bundle'ı geçici ada yazar, doğrular, sonra son adına taşır."""
-    vault = Path(vault).resolve()
-    dest = Path(dest).resolve()
-    _require_repo(vault)
-    if dest == vault or vault in dest.parents:
-        raise BackupError(f"yedek hedefi vault içinde olamaz: {dest}")
-    dest.mkdir(parents=True, exist_ok=True)
-
+def _create_bundle_locked(vault: Path, dest: Path, *, now: float | None = None) -> Path:
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
     final = _unique_bundle_path(dest, stamp)
-    partial = final.with_name(final.name + ".tmp")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{final.name}-", suffix=".tmp", dir=dest,
+    )
+    os.close(descriptor)
+    partial = Path(temporary_name)
     try:
         _git(vault, "bundle", "create", str(partial), "--all")
         _git(vault, "bundle", "verify", str(partial))
@@ -83,13 +106,26 @@ def create_bundle(vault: Path, dest: Path, *, now: float | None = None) -> Path:
     return final
 
 
-def prune_bundles(dest: Path, keep: int) -> list[Path]:
-    """En yeni `keep` bundle kalır; desene uymayan dosyalara dokunulmaz."""
+def create_bundle(vault: Path, dest: Path, *, now: float | None = None) -> Path:
+    """Bundle'ı geçici ada yazar, doğrular, sonra son adına taşır."""
+    vault, owned_dest = _prepare_dest(vault, dest)
+    with locked(_lock_target(owned_dest)):
+        return _create_bundle_locked(vault, owned_dest, now=now)
+
+
+def _bundle_sort_key(path: Path) -> tuple[str, int]:
+    match = BUNDLE_NAME.fullmatch(path.name)
+    if match is None:
+        raise ValueError(f"geçersiz bundle adı: {path.name}")
+    return match.group(1), int(match.group(2) or "0")
+
+
+def _prune_bundles_locked(dest: Path, keep: int) -> list[Path]:
     if keep < 1:
         raise BackupError(f"keep en az 1 olmalı: {keep}")
     bundles = sorted(
         (path for path in Path(dest).glob("vault-*.bundle") if BUNDLE_NAME.fullmatch(path.name)),
-        key=lambda path: path.name,
+        key=_bundle_sort_key,
         reverse=True,
     )
     removed: list[Path] = []
@@ -97,6 +133,34 @@ def prune_bundles(dest: Path, keep: int) -> list[Path]:
         stale.unlink()
         removed.append(stale)
     return removed
+
+
+def prune_bundles(dest: Path, keep: int, *, vault: Path | None = None) -> list[Path]:
+    """En yeni `keep` bundle kalır; desene uymayan dosyalara dokunulmaz.
+
+    `vault` verilirse yalnız o Vault'un kaynak namespace'i budanır. `vault`
+    verilmeden çağrı, zaten kaynak-sahipli bir dizin için tutulur.
+    """
+    dest = Path(dest).resolve()
+    if vault is not None:
+        vault = Path(vault).resolve()
+        if dest == vault or vault in dest.parents:
+            raise BackupError(f"yedek hedefi vault içinde olamaz: {dest}")
+        dest = _owned_destination(dest, vault)
+    if not dest.is_dir():
+        return []
+    with locked(_lock_target(dest)):
+        return _prune_bundles_locked(dest, keep)
+
+
+def _create_and_prune(
+    vault: Path, dest: Path, keep: int, *, now: float | None = None,
+) -> tuple[Path, list[Path]]:
+    vault, owned_dest = _prepare_dest(vault, dest)
+    with locked(_lock_target(owned_dest)):
+        bundle = _create_bundle_locked(vault, owned_dest, now=now)
+        removed = _prune_bundles_locked(owned_dest, keep)
+    return bundle, removed
 
 
 def working_tree_summary(vault: Path) -> tuple[int, int]:
@@ -127,8 +191,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     vault = Path(args.vault).resolve()
     dest = args.dest if args.dest is not None else vault.parent / f"{vault.name}-yedek"
     try:
-        bundle = create_bundle(vault, dest)
-        removed = prune_bundles(dest, args.keep)
+        bundle, removed = _create_and_prune(vault, dest, args.keep)
         tracked, untracked = working_tree_summary(vault)
     except BackupError as error:
         print(f"YEDEK BAŞARISIZ: {error}")
