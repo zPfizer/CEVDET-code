@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
 from pathlib import Path
 import re
 import stat
@@ -54,11 +55,35 @@ def _unsafe_usage_target(path: Path) -> bool:
         path_stat = path.lstat()
     except FileNotFoundError:
         return False
+    return _link_or_reparse(path_stat) or not stat.S_ISREG(path_stat.st_mode)
+
+
+def _link_or_reparse(path_stat: os.stat_result) -> bool:
     return (
         stat.S_ISLNK(path_stat.st_mode)
         or bool(getattr(path_stat, "st_file_attributes", 0) & _REPARSE_POINT)
-        or not stat.S_ISREG(path_stat.st_mode)
     )
+
+
+def _unsafe_usage_directory(path: Path) -> bool:
+    """Reject linked/reparse state directories and ancestors before mkdir/open."""
+    requested = Path(path).absolute()
+    current = requested
+    try:
+        while True:
+            try:
+                path_stat = current.lstat()
+            except FileNotFoundError:
+                path_stat = None
+            if path_stat is not None:
+                if _link_or_reparse(path_stat) or not stat.S_ISDIR(path_stat.st_mode):
+                    return True
+            parent = current.parent
+            if parent == current:
+                return False
+            current = parent
+    except OSError:
+        return True
 
 
 def _ensure_record_boundary(path: Path) -> None:
@@ -96,6 +121,8 @@ def record(
         "result_chars": int(result_chars),
     }
     state_dir = Path(state_dir)
+    if _unsafe_usage_directory(state_dir):
+        return
     state_dir.mkdir(parents=True, exist_ok=True)
     line = json.dumps(entry, ensure_ascii=False)
     try:

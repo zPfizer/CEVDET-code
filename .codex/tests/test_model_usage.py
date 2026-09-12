@@ -261,6 +261,28 @@ class ModelUsageTests(unittest.TestCase):
             self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel")
             self.assertEqual(list(state.glob("model-usage-*.jsonl")), [])
 
+    def test_record_drops_linked_state_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outside = root / "outside"
+            outside.mkdir()
+            state = root / "state"
+            try:
+                state.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            model_usage.record(
+                state,
+                purpose="compile",
+                prompt_chars=10,
+                duration_ms=5,
+                outcome="ok",
+                now=datetime.datetime(2026, 9, 11, 12, 0),
+            )
+
+            self.assertEqual(list(outside.iterdir()), [])
+
     def test_summary_skips_records_with_invalid_numeric_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
