@@ -24,17 +24,23 @@ import time
 from file_lock import locked
 from jsonl_tail import IncompleteRecord, iter_records, seek_tail
 from knowledge_schema import markdown_headings
-from memory_ledger import is_session_only, sanitize_text, load_suppressed_hashes, session_only_path
+from memory_ledger import (
+    is_session_only,
+    load_suppressed_hashes,
+    memory_read,
+    sanitize_text,
+    session_only_path,
+)
 from memory_ledger import is_read_only_turn, memory_write_guard, MemoryReadOnlyError
 from process_control import ProcessTreeCleanupError
 from worker_supervisor import load_hook_input, resolve_hook_input
 from state_store import (
     atomic_write_json,
     atomic_write_text,
-    clear_health as clear_component_health,
+    discard_health,
+    report_health,
     session_scope,
     state_dir_of,
-    write_health as write_component_health,
 )
 
 
@@ -87,16 +93,13 @@ def write_health(
     session_id: str | None = None,
 ) -> None:
     """Record the latest flush problem without letting reporting crash."""
-    try:
-        write_component_health(
-            state_dir,
-            component="flush",
-            error=error,
-            warning=warning,
-            scope_key=session_scope(session_id),
-        )
-    except OSError:
-        pass
+    report_health(
+        state_dir,
+        component="flush",
+        error=error,
+        warning=warning,
+        scope_key=session_scope(session_id),
+    )
 
 
 def clear_health(
@@ -105,14 +108,11 @@ def clear_health(
     *,
     session_id: str | None = None,
 ) -> None:
-    try:
-        clear_component_health(
-            state_dir,
-            component=component,
-            scope_key=session_scope(session_id),
-        )
-    except OSError:
-        pass
+    discard_health(
+        state_dir,
+        component=component,
+        scope_key=session_scope(session_id),
+    )
 
 
 def clear_health_error(
@@ -122,22 +122,19 @@ def clear_health_error(
     *,
     session_id: str | None = None,
 ) -> None:
-    try:
-        clear_component_health(
+    discard_health(
+        state_dir,
+        component=component,
+        scope_key=session_scope(session_id),
+        expected_error=error,
+    )
+    if session_id is not None:
+        discard_health(
             state_dir,
             component=component,
-            scope_key=session_scope(session_id),
+            scope_key="global",
             expected_error=error,
         )
-        if session_id is not None:
-            clear_component_health(
-                state_dir,
-                component=component,
-                scope_key="global",
-                expected_error=error,
-            )
-    except OSError:
-        pass
 
 
 _ensure_daily_graph_link = graph_integrity.ensure_daily_graph_link
@@ -760,6 +757,138 @@ def maybe_trigger_compile(
     return True
 
 
+class _LegacyChunkValues:
+    """Şema-1 kapsama doğrulaması: eski politika değerlerini bir kez okur.
+
+    flush_once içindeki closure'dan çıkarıldı; davranış birebir aynı,
+    limit başına önbellek korunur.
+    """
+
+    def __init__(
+        self,
+        index: transcript_index.TranscriptIndex,
+        transcript_path: Path,
+        hashes: frozenset[str],
+    ) -> None:
+        self._index = index
+        self._transcript_path = transcript_path
+        self._hashes = hashes
+        self._cache: dict[int, list[tuple[str, str]]] = {}
+
+    def values(self, limit: int) -> list[tuple[str, str]] | None:
+        if limit in self._cache:
+            return self._cache[limit]
+        if limit < 0 or limit > len(self._index.chunks):
+            return None
+        references = self._index.chunks[:limit]
+        row_ids = list(dict.fromkeys(reference.row_index for reference in references))
+        if row_ids:
+            values = transcript_index.read_selected_rows(
+                self._index,
+                self._transcript_path,
+                row_ids,
+                hashes=self._hashes,
+                parser=_message_parts_for_index,
+                text_from_content=_text_from_content,
+                max_line_bytes=MAX_TRANSCRIPT_LINE_BYTES,
+                verify_source=False,
+            )
+        else:
+            values = {}
+        result: list[tuple[str, str]] = []
+        for reference in references:
+            role, text = values[reference.row_index]
+            chunks = self._index.rows[reference.row_index]['filtered_chunks']
+            offset = sum(chunk['length'] for chunk in chunks[:reference.chunk_index])
+            result.append((role, text[offset:offset + reference.length]))
+        self._cache[limit] = result
+        return result
+
+    def fingerprint(self, limit: int) -> str | None:
+        values = self.values(limit)
+        if values is None:
+            return None
+        return hashlib.sha256(
+            json.dumps(values, ensure_ascii=False).encode('utf-8')
+        ).hexdigest()
+
+
+class _SourceSummarizer:
+    """Ek kaynak özeti: 270 sn'lik ortak bütçe ve her çağrıda tazelik kontrolü.
+
+    flush_once içindeki closure'dan çıkarıldı; `model_used` bayrağı sonraki
+    model çağrısının kalan bütçeyi kullanmasını sağlar.
+    """
+
+    def __init__(
+        self,
+        vault_root: Path,
+        state_dir: Path,
+        session_id: str,
+        index: transcript_index.TranscriptIndex,
+        hashes: frozenset[str],
+        *,
+        deadline: float,
+    ) -> None:
+        self._vault_root = vault_root
+        self._state_dir = state_dir
+        self._session_id = session_id
+        self._index = index
+        self._hashes = hashes
+        self.deadline = deadline
+        self.model_used = False
+
+    def __call__(self, source_text: str) -> str:
+        self.model_used = True
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError('attachment-time-budget-exceeded')
+        result, error = run_codex(
+            build_flush_prompt(source_text), self._vault_root,
+            timeout=min(240, remaining), purpose='attachment',
+        )
+        if error or not result or (result != 'FLUSH_BOS' and not validate_summary(result)):
+            raise ValueError('attachment-summary-failed')
+        if is_session_only(self._state_dir, self._session_id):
+            raise ValueError('memory-session-excluded')
+        try:
+            self._index.verify_source_current()
+            if load_suppressed_hashes(self._vault_root / '.codex/private-memory') != self._hashes:
+                raise ValueError('memory-preferences-changed')
+        except (OSError, ValueError) as exc:
+            raise ValueError(str(exc) or 'transcript-index-source-drift') from exc
+        return result
+
+
+def _bounded_turn_values(
+    index: transcript_index.TranscriptIndex,
+    transcript_path: Path,
+    bounded_refs: Sequence[transcript_index.ChunkRef],
+    hashes: frozenset[str],
+) -> tuple[list[int], dict[int, tuple[str, str]], list[tuple[str, str]]]:
+    """Seçili chunk'ların satır değerleri ve sıra metinleri; okuma hatasını yükseltir."""
+    source_indices = list(dict.fromkeys(reference.row_index for reference in bounded_refs))
+    source_values: dict[int, tuple[str, str]] = {}
+    if source_indices:
+        source_values = transcript_index.read_selected_rows(
+            index,
+            transcript_path,
+            source_indices,
+            hashes=hashes,
+            parser=_message_parts_for_index,
+            text_from_content=_text_from_content,
+            max_line_bytes=MAX_TRANSCRIPT_LINE_BYTES,
+            verify_source=False,
+        )
+    turns: list[tuple[str, str]] = []
+    for reference in bounded_refs:
+        role, text = source_values[reference.row_index]
+        chunks = index.rows[reference.row_index]['filtered_chunks']
+        offset = sum(chunk['length'] for chunk in chunks[:reference.chunk_index])
+        turns.append((role, text[offset:offset + reference.length]))
+    return source_indices, source_values, turns
+
+
 def flush_once(
     args: argparse.Namespace,
     event_time: dt.datetime,
@@ -834,44 +963,8 @@ def flush_once(
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             raise ValueError('flush-coverage-invalid')
 
-        legacy_values_cache: dict[int, list[tuple[str, str]]] = {}
-
-        def legacy_values(limit: int) -> list[tuple[str, str]] | None:
-            if limit in legacy_values_cache:
-                return legacy_values_cache[limit]
-            if limit < 0 or limit > len(all_chunks):
-                return None
-            references = all_chunks[:limit]
-            row_ids = list(dict.fromkeys(reference.row_index for reference in references))
-            if row_ids:
-                values = transcript_index.read_selected_rows(
-                    index,
-                    transcript_path,
-                    row_ids,
-                    hashes=hashes,
-                    parser=_message_parts_for_index,
-                    text_from_content=_text_from_content,
-                    max_line_bytes=MAX_TRANSCRIPT_LINE_BYTES,
-                    verify_source=False,
-                )
-            else:
-                values = {}
-            result: list[tuple[str, str]] = []
-            for reference in references:
-                role, text = values[reference.row_index]
-                chunks = index.rows[reference.row_index]['filtered_chunks']
-                offset = sum(chunk['length'] for chunk in chunks[:reference.chunk_index])
-                result.append((role, text[offset:offset + reference.length]))
-            legacy_values_cache[limit] = result
-            return result
-
-        def legacy_fingerprint(limit: int) -> str | None:
-            values = legacy_values(limit)
-            if values is None:
-                return None
-            return hashlib.sha256(
-                json.dumps(values, ensure_ascii=False).encode('utf-8')
-            ).hexdigest()
+        legacy = _LegacyChunkValues(index, transcript_path, hashes)
+        legacy_fingerprint = legacy.fingerprint
 
         current_policy = transcript_index.POLICY_VERSION
         coverage_update: dict[str, Any] | None = None
@@ -1103,34 +1196,18 @@ def flush_once(
             return fail_incomplete_tail()
         # Attachment envelopes must remain whole even when their conversational
         # text spans several model batches.
-        source_indices = list(dict.fromkeys(reference.row_index for reference in bounded_refs))
-        source_values: dict[int, tuple[str, str]] = {}
-        if source_indices:
-            try:
-                source_values = transcript_index.read_selected_rows(
-                    index,
-                    transcript_path,
-                    source_indices,
-                    hashes=hashes,
-                    parser=_message_parts_for_index,
-                    text_from_content=_text_from_content,
-                    max_line_bytes=MAX_TRANSCRIPT_LINE_BYTES,
-                    verify_source=False,
-                )
-            except (OSError, ValueError) as exc:
-                _record_flush_failure(
-                    state_dir,
-                    session_id,
-                    now_epoch,
-                    str(exc) or 'transcript-index-read-failed',
-                )
-                return 1
-        turns: list[tuple[str, str]] = []
-        for reference in bounded_refs:
-            role, text = source_values[reference.row_index]
-            chunks = index.rows[reference.row_index]['filtered_chunks']
-            offset = sum(chunk['length'] for chunk in chunks[:reference.chunk_index])
-            turns.append((role, text[offset:offset + reference.length]))
+        try:
+            source_indices, source_values, turns = _bounded_turn_values(
+                index, transcript_path, bounded_refs, hashes,
+            )
+        except (OSError, ValueError) as exc:
+            _record_flush_failure(
+                state_dir,
+                session_id,
+                now_epoch,
+                str(exc) or 'transcript-index-read-failed',
+            )
+            return 1
         source_turns = [source_values[row_id] for row_id in source_indices]
         evidence_turns = list(source_turns)
         if source_indices and turns and needs_context(turns[0][1]):
@@ -1163,25 +1240,9 @@ def flush_once(
             _record_flush_failure(state_dir, session_id, now_epoch, str(exc))
             return 1
         source_deadline = time.monotonic() + 270
-        source_model_used = False
-        def summarize_source(source_text: str) -> str:
-            nonlocal source_model_used
-            source_model_used = True
-            remaining = source_deadline - time.monotonic()
-            if remaining <= 0:
-                raise ValueError('attachment-time-budget-exceeded')
-            result, error = run_codex(build_flush_prompt(source_text), vault_root, timeout=min(240, remaining), purpose='attachment')
-            if error or not result or (result != 'FLUSH_BOS' and not validate_summary(result)):
-                raise ValueError('attachment-summary-failed')
-            if is_session_only(state_dir, session_id):
-                raise ValueError('memory-session-excluded')
-            try:
-                index.verify_source_current()
-                if load_suppressed_hashes(vault_root / '.codex/private-memory') != hashes:
-                    raise ValueError('memory-preferences-changed')
-            except (OSError, ValueError) as exc:
-                raise ValueError(str(exc) or 'transcript-index-source-drift') from exc
-            return result
+        summarize_source = _SourceSummarizer(
+            vault_root, state_dir, session_id, index, hashes, deadline=source_deadline,
+        )
 
         try:
             sources = attachment_memory.capture_sources(
@@ -1407,7 +1468,7 @@ def flush_once(
                 _record_flush_failure(state_dir, session_id, now_epoch, 'previous-summary-unavailable')
                 return 1
             prompt = build_flush_prompt(transcript, previous_summary=previous_summary)
-            if sources or source_model_used:
+            if sources or summarize_source.model_used:
                 remaining = source_deadline - time.monotonic()
                 if remaining <= 0:
                     _record_flush_failure(state_dir, session_id, now_epoch, 'attachment-time-budget-exceeded')
@@ -1477,6 +1538,7 @@ def flush_once(
             summary = SessionSummary(bind_evidence(
                 SessionSummary.parse(summary).sections, evidence_turns, event_time.isoformat(),
                 previous_summary=previous_summary, vault_root=vault_root,
+                memory_reader=memory_read,
             )).render()
             summary_digest = hashlib.sha256(summary.encode("utf-8")).hexdigest()
             idempotency_key = _flush_idempotency_key(

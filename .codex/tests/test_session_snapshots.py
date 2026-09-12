@@ -12,7 +12,7 @@ import flush
 import hook
 import user_evidence
 import daily_store
-from memory_ledger import mark_session_only, suppress_derived_memory, load_suppressed_hashes
+from memory_ledger import mark_session_only, memory_read, suppress_derived_memory, load_suppressed_hashes
 
 
 def summary(goal, pending):
@@ -46,10 +46,10 @@ class SessionSnapshotTests(unittest.TestCase):
             next_day = time + dt.timedelta(days=1)
             carried = flush.SessionSummary(user_evidence.bind_evidence(
                 flush.SessionSummary.parse(previous).sections, [], next_day.isoformat(),
-                previous_summary=previous, vault_root=root)).render()
+                previous_summary=previous, vault_root=root,
+                memory_reader=memory_read)).render()
             daily_store.publish(root, state, carried, 'turnend', next_day, idempotency_key='b'*64)
             suppress_derived_memory(root / '.codex/private-memory', 'daily/2026-09-07.md')
-            from memory_ledger import memory_read
             with memory_read(root) as memory:
                 _path, text = memory.read_source(root / 'daily/2026-09-08.md')
             self.assertNotIn('Hız önemli', text)
@@ -123,7 +123,6 @@ class SessionSnapshotTests(unittest.TestCase):
                 daily = (root / f'daily/{day}.md').read_text(encoding='utf-8')
                 self.assertEqual(len(user_evidence.EVIDENCE.findall(daily)), 1)
             suppress_derived_memory(root / '.codex/private-memory', 'Atlas raporu pazartesi hazır olsun.')
-            from memory_ledger import memory_read
             with memory_read(root) as memory:
                 _path, hidden = memory.read_source(root / 'daily/2026-09-08.md')
             self.assertNotIn('Atlas raporu pazartesi hazır olacak.', hidden)
