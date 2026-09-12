@@ -159,6 +159,11 @@ MEMORY_PUBLICATION_WARNING = (
     'Ham bilgi dosyalarına veya eski önbelleğe geçme; bilgi yok sonucuna varma. '
     'Eksik doğrulamayı kısa biçimde bildir.'
 )
+MEMORY_SCOPE_WARNING = (
+    '[Hafıza Bağlamı] SessionStart güvenli kapsam kilidini zamanında alamadı; '
+    'bağlam üretimi doğrulanamadı. Ham notlara veya eski önbelleğe geçme; '
+    'bilgi yok sonucuna varma.'
+)
 
 _LEADING_SKILL_LINK = re.compile(
     r"^\s*\[\$[^\]\r\n]+\]\(([^)\r\n]+)\)\s*",
@@ -1199,6 +1204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     hook_deadline = _hook_deadline(args.event)
     scope_validated = False
+    session_start_warning_emitted = False
     try:
         payload = _load_payload()
         _validate_hook_scope(payload, deadline=hook_deadline)
@@ -1293,6 +1299,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _emit_context('SessionStart', (emitted_context or '') +
                         '\n[Hafıza Devamlılığı] Bekleyen kayıtların işlenmesi doğrulanamadı. '
                         'Mevcut bağlamı kullan; eksik kayıtları bilgi yokluğu sayma.')
+                    session_start_warning_emitted = True
                     raise
                 _emit_context("SessionStart", emitted_context)
         elif args.event == "user-prompt":
@@ -1433,6 +1440,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+        if (
+            args.event == "session-start"
+            and isinstance(exc, LockUnavailable)
+            and not session_start_warning_emitted
+        ):
+            _emit_context("SessionStart", MEMORY_SCOPE_WARNING)
+            session_start_warning_emitted = True
         try:
             write_hook_health(
                 STATE_DIR,

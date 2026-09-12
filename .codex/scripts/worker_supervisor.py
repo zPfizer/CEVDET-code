@@ -245,7 +245,7 @@ def enqueue_flush(
     for field in FLUSH_CONTINUATION_FIELDS:
         if field in payload:
             transport[field] = payload[field]
-    atomic_write_json(hook_input, transport)
+    atomic_write_json(hook_input, transport, deadline=deadline)
     job_payload = {
         "hook_input": str(hook_input),
         "reason": reason,
@@ -739,6 +739,7 @@ def _coalesce_pending_flush_locked(
     payload: dict[str, Any],
     *,
     now: float,
+    deadline: float | None = None,
 ) -> Path | None:
     incoming = {"payload": payload}
     scope = _flush_scope(incoming)
@@ -782,7 +783,7 @@ def _coalesce_pending_flush_locked(
         retained["payload"].pop("superseded_hook_inputs", None)
     retained["generation"] = int(retained.get("generation", 0)) + 1
     retained["coalesced_ts"] = int(now)
-    atomic_write_json(retained_path, retained)
+    atomic_write_json(retained_path, retained, deadline=deadline)
     excluded_paths = {retained_path.resolve(strict=False)}
     for duplicate_path, _job in matches[1:]:
         try:
@@ -820,7 +821,7 @@ def _coalesce_pending_flush_locked(
             merged_payload.pop("superseded_hook_inputs", None)
         if merged_payload != retained.get("payload", {}):
             retained["payload"] = merged_payload
-            atomic_write_json(retained_path, retained)
+            atomic_write_json(retained_path, retained, deadline=deadline)
     return retained_path
 
 
@@ -858,6 +859,7 @@ def _enqueue_job_locked(
     payload: dict[str, Any],
     *,
     observed_now: float,
+    deadline: float | None = None,
 ) -> Path:
     if kind == "flush":
         existing = _find_hook_input_job_locked(state_dir, payload)
@@ -878,6 +880,7 @@ def _enqueue_job_locked(
             state_dir,
             payload,
             now=observed_now,
+            deadline=deadline,
         )
         if kind == "flush"
         else None
@@ -907,6 +910,7 @@ def _enqueue_job_locked(
             "schema_version": JOB_SCHEMA_VERSION,
             "enqueue_sequence": enqueue_sequence,
         },
+        deadline=deadline,
     )
     job_id = uuid.uuid4().hex
     job = {
@@ -921,7 +925,7 @@ def _enqueue_job_locked(
         "payload": payload,
     }
     path = _job_root(state_dir) / "pending" / f"job-{job_id}.json"
-    atomic_write_json(path, job)
+    atomic_write_json(path, job, deadline=deadline)
     return path
 
 
@@ -1408,6 +1412,7 @@ def enqueue_job(
                 kind,
                 payload,
                 observed_now=observed_now,
+                deadline=deadline,
             )
     except LockUnavailable as exc:
         if deadline is None:
@@ -1476,6 +1481,7 @@ def ensure_supervisor(
                     "lease_until": observed_now + LAUNCH_LEASE_SECONDS,
                     "updated_ts": int(observed_now),
                 },
+                deadline=deadline,
             )
     except LockUnavailable as exc:
         if deadline is None:
@@ -1514,7 +1520,11 @@ def ensure_supervisor(
                         "updated_ts": int(observed_now),
                     }
                 )
-                atomic_write_json(_supervisor_receipt_path(state_dir), current)
+                atomic_write_json(
+                    _supervisor_receipt_path(state_dir),
+                    current,
+                    deadline=deadline,
+                )
         raise
     return True
 

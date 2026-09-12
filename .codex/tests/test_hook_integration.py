@@ -113,6 +113,68 @@ class HookIntegrationTests(unittest.TestCase):
         inspect.assert_not_called()
         ensure.assert_not_called()
 
+    def test_session_start_scope_lock_contention_emits_safe_context_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            session_id = "scope-contention"
+            memory_ledger.mark_read_only_turn(state, session_id)
+            marker = memory_ledger._read_only_path(state, session_id)
+            ready = state / "scope-lock-ready"
+            holder_script = (
+                "import sys,time;"
+                "from pathlib import Path;"
+                "sys.path.insert(0,sys.argv[1]);"
+                "from file_lock import locked;"
+                "resource=Path(sys.argv[2]);ready=Path(sys.argv[3]);"
+                "guard=locked(resource);guard.__enter__();"
+                "ready.write_text('ready', encoding='ascii');"
+                "time.sleep(float(sys.argv[4]));"
+                "guard.__exit__(None,None,None)"
+            )
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    holder_script,
+                    str(SCRIPTS_DIR),
+                    str(marker),
+                    str(ready),
+                    "1.0",
+                ],
+                cwd=vault,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            try:
+                limit = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < limit:
+                    time.sleep(0.01)
+                if not ready.exists():
+                    raise AssertionError("scope lock holder did not start")
+                output = io.StringIO()
+                payload = {"session_id": session_id, "cwd": str(vault)}
+                with (
+                    mock.patch.object(hook, "VAULT_ROOT", vault),
+                    mock.patch.object(hook, "STATE_DIR", state),
+                    mock.patch.object(hook, "_validate_hook_scope"),
+                    mock.patch.object(hook, "_hook_deadline", return_value=time.monotonic() + 0.2),
+                    mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                    mock.patch.object(sys, "stdout", output),
+                ):
+                    result = hook.main(["session-start", "--strict"])
+            finally:
+                child.wait(timeout=5)
+
+            emitted = json.loads(output.getvalue())
+
+        self.assertEqual(result, 1)
+        context = emitted["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("güvenli kapsam kilidini zamanında alamadı", context)
+        self.assertIn("Ham notlara veya eski önbelleğe geçme", context)
+
     def test_session_start_holds_scope_lock_until_maintenance_admission(self) -> None:
         """A marker completing after the snapshot must wait for SessionStart writes."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -282,6 +344,68 @@ class HookIntegrationTests(unittest.TestCase):
             lane / "worker-queue",
         ])
         self.assertTrue(all(timeout is not None for _path, timeout in seen))
+
+    def test_enqueue_transport_sequence_and_job_writes_share_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / ".state"
+            transcript = root / "transcript.jsonl"
+            transcript.write_text("{}", encoding="utf-8")
+            deadline = time.monotonic() + 30
+            seen: list[tuple[Path, float | None]] = []
+            real_atomic_write_json = workers.atomic_write_json
+
+            def capture(path: Path, payload: object, **kwargs: object) -> None:
+                seen.append((path, kwargs.get("deadline")))
+                real_atomic_write_json(path, payload, **kwargs)
+
+            with (
+                mock.patch.object(workers, "atomic_write_json", side_effect=capture),
+                mock.patch.object(workers, "ensure_supervisor"),
+            ):
+                result = workers.enqueue_flush(
+                    state,
+                    {"session_id": "enqueue-deadline", "transcript_path": str(transcript)},
+                    "turnend",
+                    vault_root=root,
+                    deadline=deadline,
+                )
+
+        self.assertEqual(result.parent.name, "pending")
+        self.assertGreaterEqual(len(seen), 3)
+        self.assertTrue(all(value == deadline for _path, value in seen))
+
+    def test_supervisor_launch_failure_receipt_writes_share_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / ".state"
+            deadline = time.monotonic() + 30
+            seen: list[tuple[str | None, float | None]] = []
+            real_atomic_write_json = workers.atomic_write_json
+
+            def capture(path: Path, payload: object, **kwargs: object) -> None:
+                if path == state / "worker-supervisor.json":
+                    seen.append((payload.get("status") if isinstance(payload, dict) else None,
+                                 kwargs.get("deadline")))
+                real_atomic_write_json(path, payload, **kwargs)
+
+            with (
+                mock.patch.object(workers, "atomic_write_json", side_effect=capture),
+                mock.patch.object(
+                    workers,
+                    "spawn_detached",
+                    side_effect=OSError("synthetic-launch-failure"),
+                ),
+            ):
+                with self.assertRaises(OSError):
+                    workers.ensure_supervisor(
+                        state,
+                        vault_root=root,
+                        deadline=deadline,
+                    )
+
+        self.assertEqual([status for status, _value in seen], ["launching", "failed"])
+        self.assertTrue(all(value == deadline for _status, value in seen))
 
     def test_maybe_trigger_compile_passes_deadline_to_maintenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
