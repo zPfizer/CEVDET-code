@@ -204,7 +204,7 @@ HISTORY_TURKISH_NOMINAL_CHANGE_QUERY = re.compile(
 # `daha önce bitir` stay current.
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
     r"(?ix)(?:"
-    r"\b(?:daha\s+once|onceden)\b(?:\W+\w+){0,8}\W+\w+misti[mk]\b"
+    r"\b(?:daha\s+once|onceden)\b(?:\W+\w+){0,8}\W+\w+m(?:isti|ustu)[mk]\b"
     r"|\b(?:daha\s+once|onceden)\b(?:\W+\w+){0,3}\W+karar\w*"
     r"(?:\W+\w+){0,2}\W+neydi\b"
     r")"
@@ -1547,6 +1547,28 @@ def _has_history_context(query: str) -> bool:
     return False
 
 
+def _retrospective_topic_cue_terms(query: str) -> frozenset[str]:
+    cue_terms: set[str] = set()
+    normalized = _normalize(query)
+    for match in HISTORY_TURKISH_RETROSPECTIVE_QUERY.finditer(normalized):
+        retrospective = match.group()
+        marker = re.match(r"\b(?:daha\s+once|onceden)\b", retrospective)
+        if marker:
+            cue_terms.update(_tokens(marker.group()))
+        past = re.search(r"\b\w+m(?:isti|ustu)[mk]\b", retrospective)
+        if past:
+            cue_terms.add(past.group())
+        decision = re.search(
+            r"\b(?P<decision>karar\w*)\b(?=\W+(?:\w+m(?:isti|ustu)[mk]|neydi)\b)",
+            retrospective,
+        )
+        if decision:
+            cue_terms.add(decision.group("decision"))
+        if re.search(r"\bneydi\b", retrospective):
+            cue_terms.add("neydi")
+    return frozenset(cue_terms)
+
+
 def _has_history_query_cues(query_terms: frozenset[str], query: str = "") -> bool:
     # ponytail: `tarih` alone is ambiguous date/history wording; explicit history cues widen recall.
     history_terms = query_terms & HISTORY_QUERY_TERMS
@@ -1947,6 +1969,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
 
     def topic_terms(scope: str) -> list[str]:
         scope_terms = _retrieval_terms(scope)
+        retrospective_cue_terms = _retrospective_topic_cue_terms(scope)
         terms = []
         for match in re.finditer(r"(?<!\w)[\w]+(?!\w)", scope):
             raw_terms = _tokens(match[0])
@@ -1958,6 +1981,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
                 and term not in scope_connector_terms
                 and term not in SCOPE_COMMAND_TERMS
                 and not term.isdigit()
+                and term not in retrospective_cue_terms
                 and not any(_matches_history_inflection(term, root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
                 for term in raw_terms
             ):

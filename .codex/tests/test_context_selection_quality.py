@@ -1058,6 +1058,8 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "önceden ne karar vermiştik?": True,
             "daha önce ne karar vermiştim?": True,
             "önceden kararımız neydi?": True,
+            "daha önce hangi seçeneği uygun görmüştük?": True,
+            "önceden hangi seçeneği uygun görmüştüm?": True,
             "önceden haber ver": False,
             "daha önce bitir": False,
             "önceki sayfa, güncel hook checklist göster": False,
@@ -1257,6 +1259,8 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                 "Önceden veri saklama konusunda ne karar vermiştik?",
                 "Daha önce veri saklama konusunda ne karar vermiştim?",
                 "Önceden veri saklama kararımız neydi?",
+                "Daha önce veri saklama için hangi seçeneği uygun görmüştük?",
+                "Önceden veri saklama için hangi seçeneği uygun görmüştüm?",
                 "Güncel veri saklama kararı ve daha önce veri saklama konusunda ne karar vermiştik?",
             ):
                 with self.subTest(query=query):
@@ -1269,6 +1273,67 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                     )
                     self.assertTrue(any("güncel uygulama" in hit.excerpt for hit in hits))
                     self.assertTrue(any("geçmiş uygulama" in hit.excerpt for hit in hits))
+
+    def test_mixed_topicless_retrospective_clause_inherits_current_subject(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current = "🧠 500-Knowledge/veri-saklama-guncel.md"
+            historical = "🎯 100-Command-Center/veri-saklama-eski.md"
+            _write(
+                root,
+                current,
+                """---
+title: Veri Saklama Kararı
+status: active
+type: note
+---
+# Veri Saklama Kararı
+Güncel veri saklama kararı: kısa günlükler.
+""",
+            )
+            _write(
+                root,
+                historical,
+                """---
+title: Geçmiş Veri Saklama Kararı
+status: historical
+type: research-analysis
+---
+# Geçmiş Veri Saklama Kararı
+Geçmiş veri saklama kararı: uzun günlükler.
+""",
+            )
+            for index in range(4):
+                _write(
+                    root,
+                    f"🎯 100-Command-Center/baska-karar-{index}.md",
+                    f"""---
+title: Başka Karar {index}
+status: completed
+type: work-packet
+---
+# Başka Karar {index}
+Başka proje kararı: daha önce bu kararı vermiştik; kayıt {index}.
+""",
+                )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            query = "Güncel veri saklama kararı ve daha önce ne karar vermiştik?"
+            self.assertEqual(
+                retrieval._split_current_history_query(query),
+                ("Güncel veri saklama kararı", "daha önce ne karar vermiştik? veri saklama kararı"),
+            )
+            hits = retrieval.search_vault(entries, query, top_k=2)
+
+            explicit_topic_query = "Güncel veri saklama kararı ve daha önce TANSU kararı vermiştik?"
+            self.assertEqual(
+                retrieval._split_current_history_query(explicit_topic_query),
+                ("Güncel veri saklama kararı", "daha önce TANSU kararı vermiştik?"),
+            )
+
+        self.assertEqual(
+            {hit.entry.path for hit in hits},
+            {current, historical},
+        )
 
     def test_identical_copies_do_not_fill_top_three_when_an_independent_source_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
