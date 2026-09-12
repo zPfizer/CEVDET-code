@@ -75,6 +75,41 @@ class HealthReportTests(unittest.TestCase):
         self.assertIn("kayıt yok (temiz)", text)
         self.assertIn("Derleyici son çalışma: hiç", text)
 
+    def test_invalid_health_component_is_reported_as_unreadable(self) -> None:
+        cases = (
+            {"compile:global": ["malformed"]},
+            {"compile:global": {"status": "unknown"}},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            for components in cases:
+                with self.subTest(components=components):
+                    (state / "health.json").write_text(
+                        json.dumps(
+                            {
+                                "schema_version": health_report.HEALTH_SCHEMA_VERSION,
+                                "components": components,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    self.assertEqual(health_report.health_summary(state), "okunamadı")
+
+            (state / "health.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": health_report.HEALTH_SCHEMA_VERSION,
+                        "components": {
+                            "compile:global": {"status": "error"},
+                            "flush:global": {"status": "warning"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(health_report.health_summary(state), "hata=1 uyarı=1")
+
     def test_malformed_dead_letter_timestamps_sort_and_render_as_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -156,6 +191,29 @@ class HealthReportTests(unittest.TestCase):
         self.assertIn("created: 2026-01-01", text)
         self.assertIn("updated: 2026-09-11", text)
         self.assertNotIn("Kullanici eki", text)
+
+    def test_rewrite_preserves_created_date_for_custom_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _seed_state(vault)
+            target = vault / "report.md"
+            first = datetime.datetime(2026, 1, 1, 9, 0)
+            health_report.write_report(vault, target, now=first)
+            second = datetime.datetime(2026, 9, 11, 9, 0)
+            text = health_report.write_report(
+                vault, target, now=second, overwrite=True
+            ).read_text(encoding="utf-8")
+
+        self.assertIn("created: 2026-01-01", text)
+        self.assertIn("updated: 2026-09-11", text)
+
+    def test_previous_created_reads_only_bounded_prefix(self) -> None:
+        reader = mock.mock_open(read_data="created: 2026-01-01\n")
+        with mock.patch.object(Path, "open", reader):
+            created = health_report._previous_created(Path("panel.md"), "fallback")
+
+        self.assertEqual(created, "2026-01-01")
+        reader.return_value.__enter__.return_value.read.assert_called_once_with(2048)
 
 
 if __name__ == "__main__":

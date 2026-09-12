@@ -16,7 +16,7 @@ import re
 from typing import Any, Sequence
 
 import compile_state
-from state_store import atomic_write_text, state_dir_of
+from state_store import HEALTH_SCHEMA_VERSION, atomic_write_text, state_dir_of
 
 PANEL_RELATIVE = Path("🎯 100-Command-Center") / "Cevo Sağlık.md"
 WORKER_STAGES = (
@@ -30,6 +30,7 @@ WORKER_STAGES = (
 )
 DEAD_LETTER_LIMIT = 10
 MAX_RECORD_BYTES = 131072
+_HEALTH_STATUSES = frozenset({"error", "warning"})
 _MAX_TIMESTAMP = datetime.datetime.max.replace(
     tzinfo=datetime.timezone.utc,
 ).timestamp()
@@ -96,8 +97,18 @@ def health_summary(state_dir: Path) -> str:
     loaded = _bounded_json(path)
     if loaded is None:
         return "okunamadı"
+    if loaded.get("schema_version") != HEALTH_SCHEMA_VERSION:
+        return "okunamadı"
     components = loaded.get("components")
     if not isinstance(components, dict):
+        return "okunamadı"
+    if any(
+        not isinstance(key, str)
+        or not isinstance(entry, dict)
+        or not isinstance(entry.get("status"), str)
+        or entry["status"] not in _HEALTH_STATUSES
+        for key, entry in components.items()
+    ):
         return "okunamadı"
     errors = sum(1 for entry in components.values() if isinstance(entry, dict) and entry.get("status") == "error")
     warnings = sum(1 for entry in components.values() if isinstance(entry, dict) and entry.get("status") == "warning")
@@ -146,18 +157,25 @@ def _format_ts(value: Any) -> str:
 
 def _previous_created(output: Path, fallback: str) -> str:
     try:
-        head = output.read_text(encoding="utf-8")[:2048]
+        with output.open("r", encoding="utf-8") as handle:
+            head = handle.read(2048)
     except (OSError, UnicodeError):
         return fallback
     match = _CREATED.search(head)
     return match.group("value").strip() if match else fallback
 
 
-def render(vault: Path, *, now: datetime.datetime | None = None) -> str:
+def render(
+    vault: Path,
+    *,
+    now: datetime.datetime | None = None,
+    output: Path | None = None,
+) -> str:
     state_dir = state_dir_of(vault)
     moment = now or datetime.datetime.now()
     today = moment.strftime("%Y-%m-%d")
-    created = _previous_created(vault / PANEL_RELATIVE, today)
+    selected_output = output if output is not None else vault / PANEL_RELATIVE
+    created = _previous_created(selected_output, today)
 
     counts = worker_counts(state_dir)
     markers = marker_counts(state_dir)
@@ -222,7 +240,7 @@ def write_report(
 ) -> Path:
     vault = Path(vault).resolve()
     target = output if output is not None else vault / PANEL_RELATIVE
-    atomic_write_text(target, render(vault, now=now), overwrite=overwrite)
+    atomic_write_text(target, render(vault, now=now, output=target), overwrite=overwrite)
     return target
 
 
