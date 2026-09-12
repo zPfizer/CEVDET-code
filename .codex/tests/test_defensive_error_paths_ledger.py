@@ -102,6 +102,69 @@ class SanitizerEdges(unittest.TestCase):
 
 
 class SuppressionEdges(unittest.TestCase):
+    def test_suppression_controls_junction_is_rejected_before_read_write_or_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            private = vault / ".codex" / "private-memory"
+            outside = root / "outside-controls"
+            private.mkdir(parents=True)
+            outside.mkdir()
+            repeated = "unutulacak"
+            (outside / "suppressions.jsonl").write_text(
+                json.dumps({
+                    "schema": 1,
+                    "ts": 1,
+                    "target_sha256": memory_ledger.memory_text_hash(repeated),
+                }) + "\n",
+                encoding="utf-8",
+            )
+            controls = private / "controls"
+            try:
+                _junction(controls, outside)
+            except (OSError, subprocess.CalledProcessError) as exc:
+                self.skipTest(f"junction unavailable: {exc}")
+            before = {
+                path.relative_to(outside): path.read_bytes()
+                for path in outside.rglob("*")
+                if path.is_file()
+            }
+            try:
+                with self.assertRaisesRegex(
+                    memory_ledger.MemoryPreferenceError,
+                    "memory-suppression-path-invalid",
+                ):
+                    memory_ledger.load_suppressed_hashes(private)
+                with self.assertRaisesRegex(
+                    memory_ledger.MemoryPreferenceError,
+                    "memory-suppression-path-invalid",
+                ):
+                    memory_ledger.suppress_derived_memory(private, repeated, now=1.0)
+                with self.assertRaisesRegex(
+                    memory_ledger.MemoryPreferenceError,
+                    "memory-suppression-path-invalid",
+                ):
+                    memory_ledger.suppress_derived_memory(private, "yeni hedef", now=1.0)
+                with self.assertRaisesRegex(
+                    memory_ledger.MemoryPreferenceError,
+                    "memory-suppression-path-invalid",
+                ):
+                    with memory_ledger.suppression_guard(private, frozenset()):
+                        pass
+                after = {
+                    path.relative_to(outside): path.read_bytes()
+                    for path in outside.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after, before)
+                self.assertFalse((outside / "suppressions.lock").exists())
+            finally:
+                subprocess.run(
+                    ["cmd", "/c", "rmdir", str(controls)],
+                    check=False,
+                    capture_output=True,
+                )
+
     def test_invalid_and_unreadable_suppression_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             private = Path(temporary)

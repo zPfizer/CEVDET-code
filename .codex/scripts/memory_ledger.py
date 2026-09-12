@@ -16,7 +16,7 @@ import unicodedata
 from file_lock import locked, timeout_for_deadline
 from compile_state import PolicyError, PublicationSnapshot, require_publication_snapshot
 from state_store import atomic_write_text
-from profile_guard import PROFILE_RELATIVE, check_profile
+from profile_guard import PROFILE_RELATIVE, _reparse, check_profile
 from quote_grammar import QUOTED_CASE_SUFFIX, QUOTED_CONTENT
 from user_evidence import filter_evidence, USER_LINK, proof_for_link
 
@@ -1441,6 +1441,48 @@ def _suppression_path(private_root: Path) -> Path:
     return private_root / "controls" / "suppressions.jsonl"
 
 
+def _checked_suppression_path(private_root: Path) -> Path:
+    """Keep the suppression ledger and its lock inside private memory."""
+    private = Path(private_root)
+    path = _suppression_path(private)
+    absolute_private = private.absolute()
+    filesystem_root = Path(absolute_private.anchor or Path.cwd().anchor)
+    controls = absolute_private / "controls"
+    absolute_path = controls / "suppressions.jsonl"
+    lock = absolute_path.with_suffix(".lock")
+    try:
+        if any(
+            _reparse(candidate, filesystem_root)
+            for candidate in (absolute_private, controls, absolute_path, lock)
+        ):
+            raise ValueError("linked suppression path")
+        private_resolved = absolute_private.resolve(strict=False)
+        controls_resolved = controls.resolve(strict=False)
+        path_resolved = absolute_path.resolve(strict=False)
+        if (
+            controls_resolved != private_resolved / "controls"
+            or path_resolved != private_resolved / "controls" / "suppressions.jsonl"
+            or (absolute_private.exists() and not absolute_private.is_dir())
+            or (controls.exists() and not controls.is_dir())
+        ):
+            raise ValueError("suppression path escaped private memory")
+        for candidate in (absolute_path, lock):
+            if candidate.exists() or candidate.is_symlink():
+                metadata = candidate.lstat()
+                candidate_resolved = candidate.resolve(strict=False)
+                if (
+                    candidate_resolved != private_resolved / "controls" / candidate.name
+                    or not candidate.is_file()
+                    or metadata.st_nlink != 1
+                ):
+                    raise ValueError("linked suppression file")
+    except MemoryPreferenceError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
+    return path
+
+
 def _suppression_hashes_from_lines(lines: Sequence[str]) -> frozenset[str]:
     hashes: set[str] = set()
     for raw in lines:
@@ -1460,7 +1502,7 @@ def _suppression_hashes_from_lines(lines: Sequence[str]) -> frozenset[str]:
 
 
 def load_suppressed_hashes(private_root: Path) -> frozenset[str]:
-    path = _suppression_path(private_root)
+    path = _checked_suppression_path(private_root)
     try:
         # Writers atomically replace the file; read-only callers need no lock file.
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -1843,8 +1885,9 @@ def suppression_guard(
     timeout: float | None = None,
 ) -> Iterator[None]:
     """Fence a short publication against a concurrent forget request."""
-    path = _suppression_path(private_root)
+    path = _checked_suppression_path(private_root)
     with locked(path, timeout=timeout):
+        _checked_suppression_path(private_root)
         lines = path.read_text(encoding='utf-8').splitlines() if path.exists() else []
         if _suppression_hashes_from_lines(lines) != expected:
             raise ValueError('memory-preferences-changed')
@@ -1859,9 +1902,10 @@ def suppress_derived_memory(
     deadline: float | None = None,
 ) -> Path:
     target_hash = memory_text_hash(target)
-    path = _suppression_path(private_root)
+    path = _checked_suppression_path(private_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with locked(path, timeout=timeout_for_deadline(deadline)):
+        _checked_suppression_path(private_root)
         if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError("memory-suppression-deadline")
         lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
