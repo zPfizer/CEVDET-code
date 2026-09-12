@@ -111,6 +111,27 @@ class RedriveDeadLetterTests(unittest.TestCase):
         self.assertEqual(recovered["generation"], 3)
         self.assertEqual(recovered["attempt"], 0)
 
+    def test_unmarked_pending_status_stays_in_dead_letter(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            job_id = "c" * 32
+            dead_letter = _dead_letter_job(
+                state,
+                job_id,
+                status="pending",
+                payload={"reason": "unmarked"},
+            )
+
+            recovered = workers.recover_stale_jobs(state, now=1757500001)
+
+            pending = state / "worker-jobs" / "pending" / dead_letter.name
+            stayed = dead_letter.is_file()
+            moved = pending.is_file()
+
+        self.assertEqual(recovered, 0)
+        self.assertTrue(stayed)
+        self.assertFalse(moved)
+
     def test_redrive_revives_job_as_valid_pending(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -410,24 +431,50 @@ class RedriveDeadLetterTests(unittest.TestCase):
                 self.assertIn("redrive zaten sürüyor", message)
 
     def test_redrive_does_not_duplicate_marked_active_job(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary)
-            job_id = "a" * 32
-            _active_job(state, job_id, "running")
-            dead_letter = _dead_letter_job(
-                state, job_id, payload={"reason": "stale-copy"}
-            )
+        for status in ("running", "succeeded"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                job_id = "a" * 32
+                if status == "running":
+                    _active_job(state, job_id, status)
+                else:
+                    _succeeded_job(
+                        state,
+                        job_id,
+                        payload={"reason": "active"},
+                        redriven_ts=1757500000,
+                    )
+                dead_letter = _dead_letter_job(
+                    state, job_id, payload={"reason": "stale-copy"}
+                )
 
-            redriven, skipped = workers.redrive_dead_letter(state, job_id=job_id)
+                redriven, skipped = workers.redrive_dead_letter(
+                    state, job_id=job_id
+                )
 
-            pending = state / "worker-jobs" / "pending" / dead_letter.name
-            duplicate_pending = pending.exists()
-            dead_letter_stayed = dead_letter.is_file()
+                pending = state / "worker-jobs" / "pending" / dead_letter.name
+                saved = workers._load_job(dead_letter)
+                duplicate_pending = pending.exists()
+                dead_letter_stayed = dead_letter.is_file()
 
-        self.assertEqual(redriven, [job_id])
-        self.assertEqual(skipped, [])
-        self.assertFalse(duplicate_pending)
-        self.assertTrue(dead_letter_stayed)
+                if status == "succeeded":
+                    (state / "worker-jobs" / "succeeded" / dead_letter.name).unlink()
+                    retried, retry_skipped = workers.redrive_dead_letter(
+                        state, job_id=job_id
+                    )
+                    conflict_still_there = dead_letter.is_file()
+
+            self.assertEqual(redriven, [job_id])
+            self.assertEqual(skipped, [(job_id, "redrive çakışması")])
+            self.assertEqual(saved["terminal_reason"], "redrive-conflict")
+            self.assertFalse(duplicate_pending)
+            self.assertTrue(dead_letter_stayed)
+            if status == "succeeded":
+                self.assertEqual(retried, [])
+                self.assertEqual(
+                    retry_skipped, [(job_id, "redrive çakışması")]
+                )
+                self.assertTrue(conflict_still_there)
 
     def test_cli_targeted_missing_job_returns_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

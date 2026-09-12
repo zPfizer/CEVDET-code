@@ -1510,7 +1510,17 @@ def recover_stale_jobs(state_dir: Path, *, now: float | None = None) -> int:
                 try:
                     value = json.loads(path.read_text(encoding='utf-8'))
                     target = value.get('status') if isinstance(value, dict) else None
-                    if not isinstance(target, str) or target not in targets:
+                    if (
+                        not isinstance(target, str)
+                        or target not in targets
+                        or (
+                            source_state == "dead-letter"
+                            and (
+                                not isinstance(value, dict)
+                                or not _has_redrive_marker(value)
+                            )
+                        )
+                    ):
                         continue
                     destination = _job_root(state_dir) / target / path.name
                     _validate_job(destination, value)
@@ -1600,8 +1610,18 @@ def redrive_dead_letter(
                 continue
             if job_id is not None and job["job_id"] != job_id:
                 continue
+            if (
+                job.get("terminal_reason") == "redrive-conflict"
+                and job.get("retryable") is False
+            ):
+                skipped.append((job["job_id"], "redrive çakışması"))
+                continue
             if job["job_id"] in seen_redriven:
-                # A stale duplicate must never create a second executable record.
+                # Persist the conflict so a later receipt prune cannot reopen it.
+                job["terminal_reason"] = "redrive-conflict"
+                job["retryable"] = False
+                atomic_write_json(path, job)
+                skipped.append((job["job_id"], "redrive çakışması"))
                 continue
             if _has_verified_successor(_job_root(state_dir), job):
                 skipped.append((job["job_id"], "zaten kurtarılmış"))
