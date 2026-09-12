@@ -709,7 +709,7 @@ def _prepared_summary_path(state_dir: Path, idempotency_key: str) -> Path:
     return state_dir / f"flush-prepared-{idempotency_key}.md"
 
 
-def run_codex(prompt: str, vault_root: Path, *, timeout: float = 240) -> tuple[str | None, str | None]:
+def run_codex(prompt: str, vault_root: Path, *, timeout: float = 240, purpose: str = 'flush') -> tuple[str | None, str | None]:
     """Summarise in a read-only sandbox; the summary itself is the result."""
     summary, reason = codex_runner.run_exec(
         prompt,
@@ -717,6 +717,8 @@ def run_codex(prompt: str, vault_root: Path, *, timeout: float = 240) -> tuple[s
         timeout=timeout,
         forbidden_root=vault_root,
         propagate_cleanup_error=True,
+        usage_state_dir=state_dir_of(vault_root),
+        purpose=purpose,
     )
     if reason is None and summary is None:
         return None, "codex-output-missing"
@@ -852,7 +854,8 @@ class _SourceSummarizer:
         if remaining <= 0:
             raise ValueError('attachment-time-budget-exceeded')
         result, error = run_codex(
-            build_flush_prompt(source_text), self._vault_root, timeout=min(240, remaining)
+            build_flush_prompt(source_text), self._vault_root,
+            timeout=min(240, remaining), purpose='attachment',
         )
         if error or not result or (result != 'FLUSH_BOS' and not validate_summary(result)):
             raise ValueError('attachment-summary-failed')

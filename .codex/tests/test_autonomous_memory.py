@@ -412,7 +412,7 @@ class AutonomousMemoryTests(unittest.TestCase):
 
             calls = []
 
-            def run_codex(prompt, stage):
+            def run_codex(prompt, stage, **_kwargs):
                 if not calls:
                     calls.append('transient')
                     return 'transient'
@@ -440,7 +440,7 @@ class AutonomousMemoryTests(unittest.TestCase):
             worker.enqueue_maintenance(state, vault_root=root, start_supervisor=False)
             calls = []
 
-            def run_codex(prompt, stage):
+            def run_codex(prompt, stage, **_kwargs):
                 if prompt.startswith('BELLEK ŞEMASI ONARIMI'):
                     calls.append('repair')
                     target = next((stage / 'knowledge/concepts').glob('gunluk-*.md'))

@@ -59,6 +59,7 @@
 !/.codex/scripts/jsonl_tail.py
 !/.codex/scripts/knowledge_schema.py
 !/.codex/scripts/memory_ledger.py
+!/.codex/scripts/model_usage.py
 !/.codex/scripts/process_control.py
 !/.codex/scripts/profile_guard.py
 !/.codex/scripts/quote_grammar.py
@@ -133,6 +134,7 @@
 !/.codex/tests/test_memory_preferences_flow.py
 !/.codex/tests/test_memory_source_read.py
 !/.codex/tests/test_natural_recall.py
+!/.codex/tests/test_model_usage.py
 !/.codex/tests/test_profile_enforcement.py
 !/.codex/tests/test_profile_guard.py
 !/.codex/tests/test_python_audit_regressions.py
