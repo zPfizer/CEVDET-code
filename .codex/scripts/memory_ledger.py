@@ -16,6 +16,7 @@ from file_lock import locked
 from compile_state import PolicyError, PublicationSnapshot, require_publication_snapshot
 from state_store import atomic_write_text
 from profile_guard import PROFILE_RELATIVE, check_profile
+from quote_grammar import QUOTED_CASE_SUFFIX, QUOTED_CONTENT
 from user_evidence import filter_evidence, USER_LINK, proof_for_link
 
 
@@ -132,19 +133,9 @@ NON_PERSISTENT_DIRECTIVES = {
     "what-known",
 }
 
-# These are quoted data, not requests. Keep the original text for target extraction.
-_QUOTED_CASE_SUFFIX = r"(?:(?i:['’]?y?[ıiuü])(?!\w))?"
-_QUOTED_CASE_SUFFIX_RE = re.compile(_QUOTED_CASE_SUFFIX)
-QUOTED_CONTENT = re.compile(
-    r'(?:(?ms:^[ \t]*(?P<fence>(?P<fence_char>`|~)(?P=fence_char){2,})[^\r\n]*\r?\n'
-    r'(?P<fenced_body>.*?)(?:^[ \t]*(?P=fence)(?P=fence_char)*[ \t]*\r?$|\Z))|'
-    # Embedded multiline snippets remain data; only the named line-fence
-    # branch can be unwrapped as a whole-message read-only restriction.
-    r'```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z)|'
-    r'(?m:^[ \t]*>[^\n]*|^(?: {4}|\t)[^\n]*)|'
-    r'`[^`\n]*`|"[^"\n]*"|“[^”]*”|‘[^’]*’|«[^»]*»'
-    r')' + _QUOTED_CASE_SUFFIX
-)
+# Quote grammar (QUOTED_CONTENT, QUOTED_CASE_SUFFIX) lives in quote_grammar.py
+# so user_evidence can share it at module level without an import cycle.
+_QUOTED_CASE_SUFFIX_RE = re.compile(QUOTED_CASE_SUFFIX)
 _QUOTE_PAIRS = (
     ("'", "'"), ('"', '"'), ("“", "”"), ("‘", "’"),
     ("`", "`"), ("«", "»"),
@@ -261,7 +252,7 @@ _QUOTED_PATH = (
             if opening == "'"
             else rf"[^{re.escape(closing)}\r\n]*"
         )
-        + rf"\.{_WRITE_EXTENSION}{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
+        + rf"\.{_WRITE_EXTENSION}{re.escape(closing)}{QUOTED_CASE_SUFFIX}"
         for opening, closing in _QUOTE_PAIRS
     )
     + ")"
@@ -275,7 +266,7 @@ _QUOTED_FILENAME = (
             if opening == "'"
             else rf"[^{re.escape(closing)}\r\n]+"
         )
-        + rf"{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
+        + rf"{re.escape(closing)}{QUOTED_CASE_SUFFIX}"
         for opening, closing in _QUOTE_PAIRS
     )
     + ")"
@@ -289,7 +280,7 @@ _QUOTED_DIRECTORY = (
             if opening == "'"
             else rf"[^{re.escape(closing)}\r\n]*?"
         )
-        + rf"{re.escape(closing)}{_QUOTED_CASE_SUFFIX}"
+        + rf"{re.escape(closing)}{QUOTED_CASE_SUFFIX}"
         for opening, closing in _QUOTE_PAIRS
     )
     + ")"

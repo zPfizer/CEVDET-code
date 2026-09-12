@@ -9,6 +9,8 @@ import json
 import re
 from typing import TypedDict
 
+from quote_grammar import QUOTED_CONTENT
+
 
 SOURCE = re.compile(r'<!-- user-source:\s*(\{[^\n]*\})\s*-->')
 EVIDENCE = re.compile(r'<!-- user-evidence:\s*(\{[^\n]*\})\s*-->')
@@ -117,8 +119,7 @@ def _evidence_record(value: Mapping[str, object]) -> EvidenceRecord | None:
 
 
 def _authored_quote(message: str, quote: str) -> bool:
-    # Reuse the privacy classifier's quote grammar after module initialization.
-    from memory_ledger import QUOTED_CONTENT
+    # Shares the privacy classifier's quote grammar via the quote_grammar leaf module.
     spans = list(QUOTED_CONTENT.finditer(message)) + list(re.finditer(
         r'<(untrusted_text|quoted_text|message_from_agent|tool_result|assistant)\b[^>]*>[\s\S]*?</\1>'
         r"|(?<!\w)'[^'\n]*'(?!\w)", message, re.I))
@@ -175,16 +176,23 @@ def _record(
 def bind_evidence(
     sections: dict[str, str], turns: Sequence[tuple[str, str]], captured_at: str,
     *, previous_summary: str = '', vault_root: Path | None = None,
+    memory_reader: Callable[[Path], object] | None = None,
 ) -> dict[str, str]:
-    """Only code creates evidence. Unbacked decisions remain explicitly uncertain synthesis."""
+    """Only code creates evidence. Unbacked decisions remain explicitly uncertain synthesis.
+
+    Önceki özet doğrulanacaksa okuyucu dışarıdan verilir (memory_ledger'ın
+    memory_read'i); bu modül ledger'ı import etmez, bağımlılık oku tek yönde
+    kalır (ledger → evidence).
+    """
     day = datetime.fromisoformat(captured_at).date().isoformat()
     result: dict[str, str] = {}
     records: dict[str, EvidenceRecord] = {}
     uncertain: list[str] = []
     prior: dict[str, EvidenceRecord] = {}
     if previous_summary and vault_root is not None:
-        from memory_ledger import memory_read
-        with memory_read(vault_root) as memory:
+        if memory_reader is None:
+            raise ValueError('user-evidence-memory-reader-required')
+        with memory_reader(vault_root) as memory:
             for line in previous_summary.splitlines():
                 proof = proof_for_link(vault_root, line, reader=lambda path: memory.read_source(path)[1])
                 if proof:
