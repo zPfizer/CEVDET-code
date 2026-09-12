@@ -200,19 +200,21 @@ HISTORY_TURKISH_NOMINAL_CHANGE_QUERY = re.compile(
     r"(?:\W+\w+){0,2}\W+"
     rf"\b(?:{HISTORY_CHANGE_NOUN_PATTERN})\b"
 )
-# A bounded first-person past form or decision question makes
+# A past predicate or decision question makes
 # `daha önce`/`önceden` retrospective; imperative forms such as
 # `daha önce bitir` stay current.
 HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS = frozenset({"hangi", "uygun"})
-HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY = r"m(?:iydi|uydu)[mk]"
+HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY = r"(?:m(?:iydi|uydu)[mk]|m[iu])"
+HISTORY_TURKISH_PAST_SUFFIX = r"[dt][iu](?:m|n|k|n[iu]z|lar|ler)?"
 HISTORY_TURKISH_RETROSPECTIVE_PAST = (
-    rf"\w+m(?:(?:isti|ustu)[mk]|(?:is|us)\s+{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY})"
+    rf"(?:\w+m(?:is|us)\s+{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY}"
+    rf"|\w+{HISTORY_TURKISH_PAST_SUFFIX}(?:\s+m[iu])?)"
 )
 # Without explicit question punctuation/auxiliary, cover decision predicates
 # only. An embedded wh-word in `hangi ... olduğunu bilmemiştik` is not enough.
 HISTORY_TURKISH_DECISION_PAST = re.compile(
-    r"\b(?:karar\w*\s+ver|sec|tercih\s+et|uygun\s+gor|benimse)"
-    r"m(?:isti|ustu)[mk]$"
+    r"\b(?:karar\w*\s+(?:ver|al)|sec|tercih\s+et|uygun\s+gor|benimse)"
+    rf"(?:ma|me)?(?:m(?:is|us))?{HISTORY_TURKISH_PAST_SUFFIX}$"
 )
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
     rf"(?ix)\b(?:daha\s+once|onceden)\b[^.!?;:\r\n]*?\s+"
@@ -1594,7 +1596,7 @@ def _retrospective_topic_cue_terms(query: str) -> frozenset[str]:
             cue_terms.update(_tokens(marker.group()))
         for reference in re.finditer(r"\b(?:bu\s+konuda|bununla\s+ilgili)\b", retrospective):
             cue_terms.update(_tokens(reference.group()))
-        past = re.search(rf"\b{HISTORY_TURKISH_RETROSPECTIVE_PAST}\b", retrospective)
+        past = re.search(rf"\b{HISTORY_TURKISH_RETROSPECTIVE_PAST}\b$", retrospective)
         if past:
             cue_terms.update(_tokens(past.group()))
         question_terms = _retrospective_question_terms(retrospective)
@@ -1612,7 +1614,7 @@ def _retrospective_topic_cue_terms(query: str) -> frozenset[str]:
         )
         if decision:
             cue_terms.add(decision.group("decision"))
-        if re.search(r"\btercih\s+etm", retrospective):
+        if past and past.group().startswith(("et", "ed")) and re.search(r"\btercih\s*$", retrospective[:past.start()]):
             cue_terms.add("tercih")
         if re.search(r"\bneydi\b", retrospective):
             cue_terms.add("neydi")
