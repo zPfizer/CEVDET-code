@@ -159,9 +159,9 @@ MEMORY_PUBLICATION_WARNING = (
     'Ham bilgi dosyalarına veya eski önbelleğe geçme; bilgi yok sonucuna varma. '
     'Eksik doğrulamayı kısa biçimde bildir.'
 )
-MEMORY_SCOPE_WARNING = (
-    '[Hafıza Bağlamı] SessionStart güvenli kapsam kilidini zamanında alamadı; '
-    'bağlam üretimi doğrulanamadı. Ham notlara veya eski önbelleğe geçme; '
+MEMORY_CONTEXT_WARNING = (
+    '[Hafıza Bağlamı] SessionStart bağlamı güvenli biçimde doğrulanamadı; '
+    'bağlam üretimi tamamlanamadı. Ham notlara veya eski önbelleğe geçme; '
     'bilgi yok sonucuna varma.'
 )
 
@@ -1443,10 +1443,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         if (
             args.event == "session-start"
-            and isinstance(exc, LockUnavailable)
             and not session_start_context_emitted
         ):
-            _emit_context("SessionStart", MEMORY_SCOPE_WARNING)
+            _emit_context("SessionStart", MEMORY_CONTEXT_WARNING)
             session_start_context_emitted = True
         try:
             write_hook_health(

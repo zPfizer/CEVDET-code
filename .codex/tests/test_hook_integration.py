@@ -172,7 +172,7 @@ class HookIntegrationTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         context = emitted["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("güvenli kapsam kilidini zamanında alamadı", context)
+        self.assertIn("bağlamı güvenli biçimde doğrulanamadı", context)
         self.assertIn("Ham notlara veya eski önbelleğe geçme", context)
 
     def test_session_start_receipt_failure_does_not_emit_second_context_json(self) -> None:
@@ -212,6 +212,38 @@ class HookIntegrationTests(unittest.TestCase):
             emitted["hookSpecificOutput"]["additionalContext"],
             "ctx",
         )
+
+    def test_session_start_pre_emit_failures_emit_one_safe_context_warning(self) -> None:
+        failures = (
+            workers.LockUnavailable("scope-busy"),
+            OSError("context-unavailable"),
+            memory_ledger.MemoryPreferenceError("memory-preferences-changed"),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                with tempfile.TemporaryDirectory() as temporary:
+                    vault = Path(temporary)
+                    state = vault / ".codex/scripts/.state"
+                    deadline = time.monotonic() + 30
+                    payload = {"session_id": "pre-emit-failure", "cwd": str(vault)}
+                    output = io.StringIO()
+                    with (
+                        mock.patch.object(hook, "VAULT_ROOT", vault),
+                        mock.patch.object(hook, "STATE_DIR", state),
+                        mock.patch.object(hook, "_validate_hook_scope"),
+                        mock.patch.object(hook, "_hook_deadline", return_value=deadline),
+                        mock.patch.object(hook, "build_session_context", side_effect=failure),
+                        mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                        mock.patch.object(sys, "stdout", output),
+                    ):
+                        result = hook.main(["session-start", "--strict"])
+
+                lines = output.getvalue().splitlines()
+                self.assertEqual(result, 1)
+                self.assertEqual(len(lines), 1)
+                context = json.loads(lines[0])["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("bağlamı güvenli biçimde doğrulanamadı", context)
+                self.assertIn("Ham notlara veya eski önbelleğe geçme", context)
 
     def test_session_start_holds_scope_lock_until_maintenance_admission(self) -> None:
         """A marker completing after the snapshot must wait for SessionStart writes."""
