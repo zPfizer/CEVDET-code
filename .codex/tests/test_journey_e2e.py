@@ -11,6 +11,7 @@ gerçek modeli veya App oturumunu doğrulamaz.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -229,6 +230,23 @@ class JourneyE2ETests(unittest.TestCase):
         environment["CODEX_HOME"] = str(home)
         return environment
 
+    def _assert_prompt_succeeded(self, result, vault: Path, state: Path, marker: str) -> None:
+        self.assertEqual(result.returncode, 0, result.stderr)
+        emitted = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(emitted["hookEventName"], "UserPromptSubmit")
+        context = emitted["additionalContext"]
+        receipt_path = state / "runtime-user-prompt.json"
+        self.assertTrue(receipt_path.exists(), "user-prompt başarı makbuzu yok")
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(receipt["event"], "user-prompt")
+        self.assertEqual(receipt["event_generation"], 1)
+        self.assertEqual(receipt["cwd"], str(vault))
+        self.assertEqual(receipt["outcome"], "emitted")
+        self.assertEqual(
+            receipt["context_sha256"], hashlib.sha256(context.encode("utf-8")).hexdigest()
+        )
+        self.assertIn(marker, context)
+
     def test_model_stub_rejects_missing_transcript_content(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cevo-journey-stub-") as temporary:
             root = Path(temporary)
@@ -269,7 +287,7 @@ class JourneyE2ETests(unittest.TestCase):
                  "prompt": "Atlas projesine başlayalım; hızlı ilerleyelim."},
                 environment,
             )
-            self.assertEqual(prompt.returncode, 0, prompt.stderr)
+            self._assert_prompt_succeeded(prompt, vault, state, "[Vault Arama Sonucu]")
             # Prompt yalnız oturumu açar; kayıt session-end'den gelmeli.
             self.assertEqual(list((state / "worker-jobs").glob("*/*.json")), [])
 
@@ -351,7 +369,7 @@ class JourneyE2ETests(unittest.TestCase):
                 {**payload, "prompt": "Salt okunur modda sadece incele, dosya değiştirme."},
                 environment,
             )
-            self.assertEqual(prompt.returncode, 0, prompt.stderr)
+            self._assert_prompt_succeeded(prompt, vault, state, "Salt okunur kapsam açık")
 
             ended = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(ended.returncode, 0, ended.stderr)
