@@ -234,8 +234,8 @@ class RedriveDeadLetterTests(unittest.TestCase):
         self.assertEqual(redriven, [])
         self.assertEqual(skipped, [(job_id, "redrive çakışması")])
         self.assertEqual(conflict["terminal_reason"], "redrive-conflict")
-        self.assertEqual(migrated, 1)
-        self.assertFalse(source_exists)
+        self.assertEqual(migrated, 0)
+        self.assertTrue(source_exists)
         self.assertTrue(dead_letter_exists)
         self.assertEqual(conflict_reason, "redrive-conflict")
 
@@ -357,6 +357,57 @@ class RedriveDeadLetterTests(unittest.TestCase):
             conflict_after_prune["terminal_reason"], "redrive-conflict"
         )
         self.assertFalse(duplicate_pending)
+
+    def test_legacy_migration_preserves_independent_dead_letter_collision(self) -> None:
+        for with_active in (False, True):
+            with self.subTest(with_active=with_active), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                job_id = "c" * 32
+                source = _legacy_failed_job(
+                    state,
+                    job_id,
+                    payload={"reason": "same"},
+                    last_error="legacy-failure",
+                    finished_ts=1757400200,
+                )
+                if with_active:
+                    _pending_job(
+                        state,
+                        job_id,
+                        payload={"reason": "same"},
+                    )
+                destination = _dead_letter_job(
+                    state,
+                    job_id,
+                    payload={"reason": "same"},
+                    last_error="destination-failure",
+                    terminal_reason="retry-exhausted",
+                )
+
+                migrated = workers.migrate_legacy_failed_jobs(
+                    state, now=1757500001
+                )
+                source_exists = source.exists()
+                saved = workers._load_job(destination)
+                receipt = state / f"worker-migration-{job_id}.json"
+                receipt_exists = receipt.exists()
+                migrated_again = workers.migrate_legacy_failed_jobs(
+                    state, now=1757500002
+                )
+                source_still_exists = source.exists()
+                source_last_error = json.loads(
+                    source.read_text(encoding="utf-8")
+                )["last_error"]
+
+            self.assertEqual(migrated, 0)
+            self.assertTrue(source_exists)
+            self.assertEqual(source_last_error, "legacy-failure")
+            self.assertEqual(saved["status"], "dead-letter")
+            self.assertEqual(saved["terminal_reason"], "redrive-conflict")
+            self.assertEqual(saved["last_error"], "destination-failure")
+            self.assertFalse(receipt_exists)
+            self.assertEqual(migrated_again, 0)
+            self.assertTrue(source_still_exists)
 
     def test_redrive_revives_job_as_valid_pending(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

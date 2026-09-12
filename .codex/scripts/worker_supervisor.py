@@ -1235,6 +1235,14 @@ def migrate_legacy_failed_jobs(
                     # chronology is ambiguous. Preserve the legacy failure as
                     # a terminal conflict instead of discarding either copy.
                     destination = _job_root(state_dir) / "dead-letter" / source.name
+                    conflict = dict(original)
+                    _mark_redrive_conflict(
+                        conflict, active, now=observed_now
+                    )
+                    conflict.pop("claim_token", None)
+                    conflict.pop("owner_pid", None)
+                    conflict.pop("owner_identity", None)
+                    conflict["lease_until"] = 0
                     if destination.exists():
                         try:
                             existing = _load_job(destination)
@@ -1242,18 +1250,14 @@ def migrate_legacy_failed_jobs(
                             raise ValueError("worker-legacy-state-conflict") from exc
                         if not _same_redrive_identity(existing, original):
                             raise ValueError("worker-legacy-state-conflict")
+                        if _same_migration_record(existing, conflict):
+                            source.unlink()
+                            migrated += 1
+                            continue
                         _mark_redrive_conflict(existing, active, now=observed_now)
                         atomic_write_json(destination, existing, sort_keys=True)
-                    else:
-                        conflict = dict(original)
-                        _mark_redrive_conflict(
-                            conflict, active, now=observed_now
-                        )
-                        conflict.pop("claim_token", None)
-                        conflict.pop("owner_pid", None)
-                        conflict.pop("owner_identity", None)
-                        conflict["lease_until"] = 0
-                        atomic_write_json(destination, conflict, sort_keys=True)
+                        continue
+                    atomic_write_json(destination, conflict, sort_keys=True)
                     source.unlink()
                     migrated += 1
                     continue
@@ -1282,6 +1286,12 @@ def migrate_legacy_failed_jobs(
                     raise ValueError("worker-legacy-state-conflict") from exc
                 if not _same_redrive_identity(existing, original):
                     raise ValueError("worker-legacy-state-conflict")
+                if not _same_migration_record(existing, after):
+                    # A same-identity dead-letter is not proof of an interrupted
+                    # migration. Keep the legacy source and fence the collision.
+                    _mark_redrive_conflict(existing, original, now=observed_now)
+                    atomic_write_json(destination, existing, sort_keys=True)
+                    continue
                 receipt = state_dir / f"worker-migration-{job_id}.json"
                 atomic_write_json(
                     receipt,
@@ -1358,6 +1368,14 @@ def _same_redrive_identity(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return left.get("kind") == right.get("kind") and left.get("payload") == right.get(
         "payload"
     )
+
+
+def _same_migration_record(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_without_finished = dict(left)
+    right_without_finished = dict(right)
+    left_without_finished.pop("finished_ts", None)
+    right_without_finished.pop("finished_ts", None)
+    return left_without_finished == right_without_finished
 
 
 def _redrive_conflict_reason(
