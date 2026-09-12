@@ -102,6 +102,42 @@ class SanitizerEdges(unittest.TestCase):
 
 
 class SuppressionEdges(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "requires Windows directory handle guard")
+    def test_pinned_controls_directory_blocks_junction_swap_during_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            private = root / "vault" / ".codex" / "private-memory"
+            controls = private / "controls"
+            outside = root / "outside-controls"
+            controls.mkdir(parents=True)
+            outside.mkdir()
+            real_write = memory_ledger.atomic_write_text
+            rmdir_result = None
+
+            def write(path: Path, text: str, **kwargs: object) -> None:
+                nonlocal rmdir_result
+                rmdir_result = subprocess.run(
+                    ["cmd", "/c", "rmdir", str(controls)],
+                    check=False,
+                    capture_output=True,
+                )
+                if rmdir_result.returncode == 0:
+                    _junction(controls, outside)
+                real_write(path, text, **kwargs)
+
+            with mock.patch.object(memory_ledger, "atomic_write_text", side_effect=write):
+                memory_ledger.suppress_derived_memory(private, "hedef", now=1.0)
+
+            self.assertIsNotNone(rmdir_result)
+            self.assertNotEqual(rmdir_result.returncode, 0)
+            self.assertTrue(controls.is_dir())
+            self.assertFalse(controls.is_junction())
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertIn(
+                memory_ledger.memory_text_hash("hedef"),
+                memory_ledger.load_suppressed_hashes(private),
+            )
+
     def test_suppression_controls_junction_is_rejected_before_read_write_or_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
