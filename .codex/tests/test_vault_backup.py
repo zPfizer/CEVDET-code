@@ -131,6 +131,27 @@ class VaultBackupTests(unittest.TestCase):
             self.assertTrue(old_bundle.exists())
             self.assertTrue(new_bundle.exists())
 
+    def test_same_root_clone_at_reused_path_gets_distinct_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            template = root / "template"
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(template)
+            _git(root, "clone", "-q", template.as_uri(), str(vault))
+            old_bundle = vault_backup.create_bundle(vault, dest)
+            old_namespace = old_bundle.parent
+
+            vault.rename(root / "old-vault")
+            _git(root, "clone", "-q", template.as_uri(), str(vault))
+            new_bundle = vault_backup.create_bundle(vault, dest)
+            removed = vault_backup.prune_bundles(dest, keep=1, vault=vault)
+
+            self.assertNotEqual(old_namespace, new_bundle.parent)
+            self.assertEqual(removed, [])
+            self.assertTrue(old_bundle.exists())
+            self.assertTrue(new_bundle.exists())
+
     def test_repo_without_commits_fails_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

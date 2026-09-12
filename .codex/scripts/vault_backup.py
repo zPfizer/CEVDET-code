@@ -156,7 +156,23 @@ def _repository_identity(vault: Path) -> str:
     roots = sorted(set(_git(vault, "rev-list", "--all", "--max-parents=0").stdout.split()))
     if not roots:
         raise BackupError(f"vault Git kök commit'i yok: {vault}")
-    return "\n".join(roots)
+    git_dir_text = _git(vault, "rev-parse", "--git-dir").stdout.strip()
+    git_dir = Path(git_dir_text)
+    if not git_dir.is_absolute():
+        git_dir = vault / git_dir
+    try:
+        git_stat = git_dir.resolve().stat()
+    except OSError as error:
+        raise BackupError(f"vault Git dizini kimliği okunamadı: {git_dir}") from error
+    birthtime = (
+        getattr(git_stat, "st_birthtime_ns", git_stat.st_ctime_ns)
+        if os.name == "nt" else ""
+    )
+    return "\n".join(roots) + (
+        f"\ngit-dir={git_dir.resolve()}"
+        f"\nst_dev={git_stat.st_dev}\nst_ino={git_stat.st_ino}"
+        f"\nst_birthtime_ns={birthtime}"
+    )
 
 
 def _owned_destination(dest: Path, vault: Path) -> Path:
