@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import unicodedata
 
-from knowledge_schema import CLAIM_ROW, WIKILINK
+from knowledge_schema import CLAIM_ROW, WIKILINK, markdown_headings
 from user_evidence import USER_LINK, proof_for_link
 
 
@@ -24,14 +24,25 @@ _PREFERENCE = re.compile(
 _ReadSource = Callable[[Path], str | None]
 
 
-def _heading(text: str, title: str) -> list[re.Match[str]]:
-    return list(re.finditer(rf"(?m)^## {re.escape(title)}[ \t]*$", text))
+def _heading(text: str, title: str) -> list[tuple[str, str, int, int]]:
+    return [
+        match
+        for match in markdown_headings(text)
+        if match[0] == "##" and match[1] == title
+    ]
 
 
-def _section(text: str, match: re.Match[str]) -> str:
-    rest = text[match.end() :]
-    end = re.search(r"(?m)^#{2,3}(?:\s|$)", rest)
-    return rest[: end.start()] if end else rest
+def _section(text: str, match: tuple[str, str, int, int]) -> str:
+    start = match[3]
+    end = next(
+        (
+            heading[2]
+            for heading in markdown_headings(text)
+            if heading[0] in ("##", "###") and heading[2] > match[2]
+        ),
+        len(text),
+    )
+    return text[start:end]
 
 
 def _iso(value: str) -> date | None:

@@ -94,6 +94,47 @@ class ProfileGuardTests(unittest.TestCase):
             self.assertEqual(profile_guard.check_profile(root, crlf), ())
             self.assertIn("Kısa ve doğal", profile_guard.portrait(crlf))
 
+    def test_fenced_headings_do_not_hide_or_end_the_portrait(self) -> None:
+        text = PROFILE_TEXT.replace(
+            "Kısa ve doğal bir oturum özeti.\n\n",
+            "Kısa ve doğal bir oturum özeti.\n\n"
+            "```markdown\n"
+            "## Oturum Portresi\n"
+            "örnek başlık\n"
+            "```\n\n"
+            "Portre içinde devam.\n\n",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seed_profile(root)
+
+            self.assertEqual(profile_guard.check_profile(root, text), ())
+
+        self.assertEqual(
+            profile_guard.portrait(text),
+            "## Oturum Portresi\n\n"
+            "Kısa ve doğal bir oturum özeti.\n\n"
+            "```markdown\n"
+            "## Oturum Portresi\n"
+            "örnek başlık\n"
+            "```\n\n"
+            "Portre içinde devam.",
+        )
+
+    def test_real_duplicate_portrait_headings_remain_invalid(self) -> None:
+        duplicate = PROFILE_TEXT.replace(
+            "Kısa ve doğal bir oturum özeti.",
+            "Kısa ve doğal bir oturum özeti.\n\n## Oturum Portresi\n\nİkinci gerçek başlık.",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seed_profile(root)
+
+            self.assertIn("profile-portrait", profile_guard.check_profile(root, duplicate))
+            self.assertEqual(profile_guard.portrait(duplicate), "")
+
     def test_missing_and_overflowing_portrait_are_rejected(self) -> None:
         missing = PROFILE_TEXT.replace(
             "## Oturum Portresi\n\nKısa ve doğal bir oturum özeti.\n\n", ""
