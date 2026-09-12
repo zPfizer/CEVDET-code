@@ -55,7 +55,12 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def _require_repo(vault: Path) -> None:
     if not vault.is_dir():
         raise BackupError(f"vault dizini yok: {vault}")
-    _git(vault, "rev-parse", "--git-dir")
+    top_level = _git(vault, "rev-parse", "--show-toplevel").stdout.strip()
+    if not top_level:
+        raise BackupError(f"vault Git kökü okunamadı: {vault}")
+    discovered = Path(top_level).resolve()
+    if os.path.normcase(str(discovered)) != os.path.normcase(str(vault)):
+        raise BackupError(f"vault Git deposunun kökü olmalı: {vault}")
 
 
 def _owned_destination(dest: Path, vault: Path) -> Path:
@@ -65,7 +70,30 @@ def _owned_destination(dest: Path, vault: Path) -> Path:
 
 
 def _lock_target(dest: Path) -> Path:
-    return dest / "vault-backup"
+    return dest.with_name(f"{dest.name}.guard")
+
+
+def _namespace_is_link(path: Path) -> bool:
+    junction_check = getattr(path, "is_junction", None)
+    return path.is_symlink() or (callable(junction_check) and junction_check())
+
+
+def _validate_owned_destination(dest: Path, owned_dest: Path) -> None:
+    try:
+        if _namespace_is_link(owned_dest):
+            raise BackupError(f"yedek namespace'i link olamaz: {owned_dest}")
+        owned_dest.mkdir(exist_ok=True)
+        if _namespace_is_link(owned_dest):
+            raise BackupError(f"yedek namespace'i link olamaz: {owned_dest}")
+        if not owned_dest.is_dir():
+            raise BackupError(f"yedek namespace'i dizin olmalı: {owned_dest}")
+        resolved = owned_dest.resolve()
+        if resolved != owned_dest or resolved.parent != dest:
+            raise BackupError(f"yedek namespace'i hedef dışına taşamaz: {owned_dest}")
+    except BackupError:
+        raise
+    except OSError as exc:
+        raise BackupError(f"yedek namespace'i doğrulanamadı: {owned_dest}") from exc
 
 
 def _prepare_dest(vault: Path, dest: Path) -> tuple[Path, Path]:
@@ -76,7 +104,7 @@ def _prepare_dest(vault: Path, dest: Path) -> tuple[Path, Path]:
         raise BackupError(f"yedek hedefi vault içinde olamaz: {dest}")
     dest.mkdir(parents=True, exist_ok=True)
     owned_dest = _owned_destination(dest, vault)
-    owned_dest.mkdir(exist_ok=True)
+    _validate_owned_destination(dest, owned_dest)
     return vault, owned_dest
 
 
@@ -110,6 +138,7 @@ def create_bundle(vault: Path, dest: Path, *, now: float | None = None) -> Path:
     """Bundle'ı geçici ada yazar, doğrular, sonra son adına taşır."""
     vault, owned_dest = _prepare_dest(vault, dest)
     with locked(_lock_target(owned_dest)):
+        _validate_owned_destination(owned_dest.parent, owned_dest)
         return _create_bundle_locked(vault, owned_dest, now=now)
 
 
@@ -120,7 +149,9 @@ def _bundle_sort_key(path: Path) -> tuple[str, int]:
     return match.group(1), int(match.group(2) or "0")
 
 
-def _prune_bundles_locked(dest: Path, keep: int) -> list[Path]:
+def _prune_bundles_locked(
+    dest: Path, keep: int, *, preserve: Path | None = None,
+) -> list[Path]:
     if keep < 1:
         raise BackupError(f"keep en az 1 olmalı: {keep}")
     bundles = sorted(
@@ -128,8 +159,19 @@ def _prune_bundles_locked(dest: Path, keep: int) -> list[Path]:
         key=_bundle_sort_key,
         reverse=True,
     )
+    if preserve is None:
+        retained = set(bundles[:keep])
+    else:
+        if preserve not in bundles:
+            raise BackupError(f"güncel bundle bulunamadı: {preserve}")
+        retained = {preserve}
+        for path in bundles:
+            if path != preserve and len(retained) < keep:
+                retained.add(path)
     removed: list[Path] = []
-    for stale in bundles[keep:]:
+    for stale in bundles:
+        if stale in retained:
+            continue
         stale.unlink()
         removed.append(stale)
     return removed
@@ -139,6 +181,7 @@ def prune_bundles(dest: Path, keep: int, *, vault: Path) -> list[Path]:
     """Yalnız `vault` kaynak namespace'inin en yeni bundle'larını tutar."""
     _vault, owned_dest = _prepare_dest(vault, dest)
     with locked(_lock_target(owned_dest)):
+        _validate_owned_destination(owned_dest.parent, owned_dest)
         return _prune_bundles_locked(owned_dest, keep)
 
 
@@ -147,15 +190,16 @@ def _create_and_prune(
 ) -> tuple[Path, list[Path], int]:
     vault, owned_dest = _prepare_dest(vault, dest)
     with locked(_lock_target(owned_dest)):
+        _validate_owned_destination(owned_dest.parent, owned_dest)
         bundle = _create_bundle_locked(vault, owned_dest, now=now)
-        removed = _prune_bundles_locked(owned_dest, keep)
+        removed = _prune_bundles_locked(owned_dest, keep, preserve=bundle)
         bundle_size = bundle.stat().st_size
     return bundle, removed, bundle_size
 
 
 def working_tree_summary(vault: Path) -> tuple[int, int]:
     """(izlenen değişiklik, izlenmeyen dosya) sayıları; bundle bunları kapsamaz."""
-    status = _git(vault, "status", "--porcelain")
+    status = _git(vault, "status", "--porcelain", "--untracked-files=all")
     tracked = untracked = 0
     for line in status.stdout.splitlines():
         if line.startswith("??"):

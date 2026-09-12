@@ -74,6 +74,37 @@ class VaultBackupTests(unittest.TestCase):
             with self.assertRaises(vault_backup.BackupError):
                 vault_backup.create_bundle(vault, root / "yedek")
 
+    def test_subdirectory_vault_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            _init_repo(repository)
+            vault = repository / "subdir"
+            vault.mkdir()
+
+            with self.assertRaises(vault_backup.BackupError):
+                vault_backup.create_bundle(vault, root / "yedek")
+
+    def test_linked_source_namespace_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            outside = root / "outside"
+            _init_repo(vault)
+            outside.mkdir()
+            namespace = _owned_dest(vault, dest)
+            namespace.rmdir()
+            try:
+                namespace.symlink_to(outside, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlink unavailable: {error}")
+
+            with self.assertRaises(vault_backup.BackupError):
+                vault_backup.create_bundle(vault, dest)
+
+            self.assertFalse(list(outside.glob("vault-*.bundle")))
+
     def test_prune_keeps_newest_and_ignores_foreign_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -129,6 +160,23 @@ class VaultBackupTests(unittest.TestCase):
                 ],
             )
             self.assertTrue((owned / "vault-20260903-120000-10.bundle").exists())
+
+    def test_clock_rollback_keeps_current_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+
+            future = vault_backup.create_bundle(vault, dest, now=1_900_000_000)
+            current, removed, bundle_size = vault_backup._create_and_prune(
+                vault, dest, keep=1, now=1_600_000_000,
+            )
+
+            self.assertEqual(removed, [future])
+            self.assertFalse(future.exists())
+            self.assertTrue(current.exists())
+            self.assertGreater(bundle_size, 0)
 
     def test_same_second_newer_commit_survives_prune(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -271,6 +319,7 @@ print(vault_backup.create_bundle(Path(sys.argv[2]), Path(sys.argv[3]), now=17580
             _init_repo(vault)
             (vault / "not.md").write_text("değişti", encoding="utf-8")
             (vault / "yeni.md").write_text("izlenmiyor", encoding="utf-8")
+            _git(vault, "config", "status.showUntrackedFiles", "no")
 
             tracked, untracked = vault_backup.working_tree_summary(vault)
 
