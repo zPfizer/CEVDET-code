@@ -97,9 +97,7 @@ def _source_reasons(
     observations: dict[Path, tuple[int, int, int, int, int]] | None = None,
 ) -> list[str]:
     sources = note.frontmatter.get("sources")
-    if isinstance(sources, str):
-        source_values: Sequence[object] = (sources,)
-    elif isinstance(sources, list):
+    if isinstance(sources, list):
         if not sources:
             return ["kaynak alanı yok ya da bozuk"]
         if len(sources) > MAX_SOURCE_FIELDS:
@@ -166,6 +164,21 @@ def _source_reasons(
             continue
         except (OSError, OverflowError, ValueError):
             reasons.append(f"kaynak zamanı okunamadı: {source}")
+            continue
+        try:
+            relative, text = memory.read_source(
+                daily,
+                relative=f"{DAILY_ROOT}/{source}",
+            ) if memory is not None else (None, "")
+        except (OSError, UnicodeError):
+            reasons.append(f"kaynak okunamadı: {source}")
+            continue
+        expected_relative = PurePosixPath(f"{DAILY_ROOT}/{source}")
+        if memory is not None and (
+            PurePosixPath(relative.as_posix()) != expected_relative
+            or text is None
+        ):
+            reasons.append("kaynak güveni doğrulanamadı")
             continue
         if observations is not None:
             observations.setdefault(

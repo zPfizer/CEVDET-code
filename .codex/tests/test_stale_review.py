@@ -131,6 +131,60 @@ class StaleReviewTests(unittest.TestCase):
             findings[0].reasons, ("kaynak alanı yok ya da bozuk",)
         )
 
+    def test_scalar_source_field_is_reported_as_unverifiable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            daily = _daily(vault, "2026-01-01.md", mtime=datetime.date(2026, 1, 1))
+            note = _note(
+                vault,
+                "skaler-kaynak",
+                updated="2026-01-02",
+                sources=["2026-01-01.md"],
+            )
+            note.write_text(
+                note.read_text(encoding="utf-8").replace(
+                    "sources:\n  - 2026-01-01.md",
+                    "sources: 2026-01-01.md",
+                ),
+                encoding="utf-8",
+            )
+
+            findings = stale_review.review(
+                vault, days=90, now=datetime.date(2026, 9, 11)
+            )
+
+        self.assertEqual(findings[0].note, "knowledge/concepts/skaler-kaynak.md")
+        self.assertIn("kaynak alanı yok ya da bozuk", findings[0].reasons)
+
+    def test_unreadable_daily_source_is_reported_as_unverifiable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            daily = _daily(vault, "2026-01-01.md", mtime=datetime.date(2026, 1, 1))
+            _note(
+                vault,
+                "okunamayan-kaynak",
+                updated="2026-01-02",
+                sources=["2026-01-01.md"],
+            )
+            real_read = ledger.MemoryRead.read_source
+
+            def deny_daily(memory, path, **kwargs):
+                if path == daily:
+                    raise PermissionError("daily source unreadable")
+                return real_read(memory, path, **kwargs)
+
+            with mock.patch.object(
+                ledger.MemoryRead, "read_source", new=deny_daily
+            ):
+                target, count = stale_review.write_report(
+                    vault, output=vault / "report.md", now=datetime.date(2026, 9, 11)
+                )
+                text = target.read_text(encoding="utf-8")
+
+        self.assertEqual(count, 1)
+        self.assertIn("kaynak okunamadı: 2026-01-01.md", text)
+        self.assertNotIn("Bayat aday yok", text)
+
     def test_daily_source_drift_before_publish_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
