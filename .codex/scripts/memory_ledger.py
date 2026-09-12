@@ -43,13 +43,72 @@ AUTHORIZATION = re.compile(
     r'''(?:"Bearer\s+(?:\\.|[^"\\\r\n])+"|'''
     r"""'Bearer\s+(?:\\.|[^'\\\r\n])+'|Bearer\s+[^\s\r\n]+)"""
 )
-CREDENTIAL_NAME = r'api[_-]?key|password|secret|token'
+_ENV_CREDENTIAL_NAME_BODY = (
+    r'(?:[A-Z][A-Z0-9]*_)*(?:API_KEY|ACCESS_KEY(?:_ID)?|PASSWORD|'
+    r'SECRET(?:_(?:ACCESS_)?KEY)?|(?:ACCESS|API|AUTH|CLIENT|CSRF|GITHUB|'
+    r'MY|OAUTH|REFRESH|SESSION|SERVICE)_TOKEN)'
+)
+_ENV_CREDENTIAL_NAME = rf'(?-i:{_ENV_CREDENTIAL_NAME_BODY})'
+CREDENTIAL_NAME = rf'api[_-]?key|password|secret|token|{_ENV_CREDENTIAL_NAME}'
 CREDENTIAL_NAME_RE = re.compile(rf'(?i)^(?:{CREDENTIAL_NAME})$')
 CREDENTIAL = re.compile(
     r'''(?im)(?P<prefix>(?P<key_quote>["']?)\b(?P<key>''' + CREDENTIAL_NAME + r''')'''
     r'''(?P=key_quote)\s*[:=]\s*)'''
-    r'''(?P<value>[{\[]|"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s\r\n]+)'''
+    r'''(?P<value>[{\[]|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|(?:\\[\s\S]|[^\s\\])+)'''
 )
+BATCH_CREDENTIAL_NAME = rf'(?i:api[_-]?key|password|secret|token|{_ENV_CREDENTIAL_NAME_BODY})'
+_BATCH_IF_CONDITION = (
+    r'if\b[ \t]+(?:/i[ \t]+)?(?:not[ \t]+)?(?:'
+    r'(?:exist|defined|errorlevel|cmdextversion)\b[^\r\n]*?|'
+    r'[^\r\n]*?(?:==|equ\b|neq\b|lss\b|leq\b|gtr\b|geq\b)[^\r\n]*?)'
+    r'[ \t]+'
+)
+_BATCH_FOR_COMMAND = (
+    r'for\b[ \t]+(?=[^\r\n]*%{1,2}[A-Za-z_][A-Za-z0-9_]*\b)'
+    r'[^\r\n]*?\bdo[ \t]+'
+)
+_BATCH_CONTROL_PREFIX = (
+    r'(?:^[ \t]*|(?<=[&|<>()])[ \t]*)@?(?:'
+    + _BATCH_IF_CONDITION
+    + r'|'
+    + _BATCH_FOR_COMMAND
+    + r')@?[ \t]*'
+)
+_BATCH_CALL_PREFIX = r'(?:^[ \t]*|(?<=[&|<>()])[ \t]*)@?call[ \t]+@?[ \t]*'
+_BATCH_ELSE_PREFIX = r'(?<=\))[ \t]*@?else[ \t]+@?[ \t]*'
+_BATCH_COMMAND_PREFIX = (
+    r'(?:^[ \t]*@?[ \t]*|(?<=[&|<>()])[ \t]*@?[ \t]*|'
+    + _BATCH_CALL_PREFIX
+    + r'|'
+    + _BATCH_ELSE_PREFIX
+    + r'|'
+    + _BATCH_CONTROL_PREFIX
+    + r')set[ \t]+'
+)
+BATCH_CREDENTIAL = re.compile(
+    r'''(?im)(?P<prefix>''' + _BATCH_COMMAND_PREFIX + r'''(?P<quote>["']))(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')\s*=\s*'''
+    r'''(?P<value>(?:(?!(?P=quote))[^\r\n])*)(?P=quote)'''
+)
+BATCH_CREDENTIAL_START = re.compile(
+    r'''(?im)''' + _BATCH_COMMAND_PREFIX + r'''(?P<quote>["'])(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')\s*=\s*'''
+)
+BATCH_CREDENTIAL_UNQUOTED = re.compile(
+    r'''(?im)(?P<prefix>''' + _BATCH_COMMAND_PREFIX + r''')(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
+)
+BATCH_ASSIGNMENT_PREFIX = re.compile(
+    r'''(?im)''' + _BATCH_COMMAND_PREFIX + r'''["']?\Z'''
+)
+BATCH_CMD_WRAPPER_CREDENTIAL = re.compile(
+    r'''(?im)(?:^[ \t]*|(?<=[&|<>()])[ \t]*)@?cmd(?:\.exe)?'''
+    r'''(?:[ \t]+/(?:d|s|q|a|u|e:[^\s\r\n]+|f:[^\s\r\n]+|v:[^\s\r\n]+|t:[^\s\r\n]+))*'''
+    r'''[ \t]+/c[ \t]+"?set[ \t]+'''
+    r'''(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
+)
+POWERSHELL_CREDENTIAL = re.compile(
+    r'''(?im)(?P<prefix>\$(?:(?i:env):[ \t]*|\{(?i:env):[ \t]*))'''
+    r'''(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')(?P<closing>\}?)(?P<assignment>[ \t]*(?:\?\?=|[+\-*/%]?=)[ \t]*)'''
+)
+POWERSHELL_ASSIGNMENT_PREFIX = re.compile(r'''(?im)(?:\$(?i:env):|\$\{(?i:env):)[ \t]*\Z''')
 TOKEN_PREFIX = re.compile(r"\b(?:sk(?=[-_])|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
 PERSONAL_CREDENTIAL = re.compile(
     r"(?i)\b(?:api\s+anahtarım|parolam|şifrem|tokenım)\b"
@@ -674,6 +733,185 @@ def _balanced_value_end(text: str, start: int) -> int | None:
         length = min(length * 2, len(text) - start)
 
 
+# ponytail: consume only adjacent shell fragments; a full shell parser adds no
+# sanitizer guarantee and would broaden this bounded input contract.
+def _quoted_credential_value_end(
+    text: str,
+    start: int,
+    *,
+    shell_segments: bool = False,
+) -> int | None:
+    ansi_c = text[start:start + 2] == "$'"
+    if not ansi_c and text[start:start + 1] not in {'"', "'"}:
+        return None
+    cursor = start + 1 if ansi_c else start
+    while cursor < len(text):
+        quote = text[cursor]
+        escaped = False
+        index = cursor + 1
+        while index < len(text):
+            character = text[index]
+            if escaped:
+                escaped = False
+            elif character == '\\':
+                escaped = True
+            elif character == quote:
+                break
+            index += 1
+        if index >= len(text):
+            return None
+        if not shell_segments:
+            return index + 1
+        cursor = index + 1
+        while cursor < len(text):
+            character = text[cursor]
+            if character in {'"', "'"}:
+                break
+            if character == '\\':
+                if cursor + 1 >= len(text):
+                    return None
+                cursor += 2
+                continue
+            if character.isspace() or character in {';', '&', '|', '<', '>', '(', ')'}:
+                return cursor
+            cursor += 1
+    return cursor
+
+
+def _batch_quoted_credential_value_end(text: str, start: int) -> int | None:
+    quote = text[start:start + 1]
+    if quote not in {'"', "'"}:
+        return None
+    for index in range(start + 1, len(text)):
+        character = text[index]
+        if character in {'\r', '\n'}:
+            return None
+        if character == quote:
+            return index + 1
+    return None
+
+
+def _batch_unquoted_credential_value_end(text: str, start: int) -> int | None:
+    """Find a Windows batch value boundary while honoring quote and caret state."""
+    quoted = False
+    index = start
+    while index < len(text):
+        character = text[index]
+        if character in {'\r', '\n'}:
+            if quoted:
+                return None
+            end = index
+            while end > start and text[end - 1] in {' ', '\t'}:
+                end -= 1
+            return end
+        if character == '^':
+            if index + 1 >= len(text) or text[index + 1] in {'\r', '\n'}:
+                return None
+            index += 2
+            continue
+        if character == '"':
+            quoted = not quoted
+            index += 1
+            continue
+        if not quoted and character in {'&', '|', '<', '>', '(', ')'}:
+            end = index
+            while end > start and text[end - 1] in {' ', '\t'}:
+                end -= 1
+            return end
+        index += 1
+    if quoted:
+        return None
+    end = index
+    while end > start and text[end - 1] in {' ', '\t'}:
+        end -= 1
+    return end
+
+
+def _powershell_credential_value_end(text: str, start: int) -> int | None:
+    def statement_end(end: int) -> int | None:
+        cursor = end
+        while cursor < len(text) and text[cursor] in {' ', '\t'}:
+            cursor += 1
+        if cursor == len(text) or text[cursor] in {'\r', '\n', ';', '#'}:
+            return end
+        return None
+
+    if text[start:start + 2] in {"@'", '@"'}:
+        terminator = text[start + 1] + '@'
+        closing = re.compile(rf'(?m)^[ \t]*{re.escape(terminator)}[ \t]*\r?$').search(
+            text, start + 2,
+        )
+        return None if closing is None else statement_end(closing.end())
+    quote = text[start:start + 1]
+    if quote in {'"', "'"}:
+        index = start + 1
+        while index < len(text):
+            character = text[index]
+            if quote == '"' and character == '`':
+                if index + 1 >= len(text):
+                    return None
+                index += 2
+                continue
+            if quote == "'" and character == "'" and text[index:index + 2] == "''":
+                index += 2
+                continue
+            if character == quote:
+                return statement_end(index + 1)
+            index += 1
+        return None
+    index = start
+    while index < len(text):
+        character = text[index]
+        if character in {'\r', '\n'}:
+            return index
+        if character == '`':
+            if index + 1 >= len(text):
+                return None
+            index += 2
+            continue
+        if character.isspace() or character in {';', '&', '|', '<', '>', '(', ')'}:
+            return statement_end(index)
+        index += 1
+    return index
+
+
+def _contains_unsupported_shell_expansion(text: str, start: int) -> bool:
+    quote: str | None = None
+    index = start
+    while index < len(text):
+        character = text[index]
+        if character in {'\r', '\n'}:
+            return False
+        if character == '\\' and quote != "'":
+            if index + 1 >= len(text):
+                return False
+            index += 2
+            continue
+        if character in {'"', "'"}:
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+            index += 1
+            continue
+        if quote != "'" and character == '$' and text[index + 1:index + 2] in {'{', '('}:
+            return True
+        if quote is None:
+            if character.isspace() or character in {';', '&', '|', '<', '>'}:
+                return False
+        index += 1
+    return False
+
+
+def _replace_powershell_credential(match: re.Match[str]) -> str:
+    if match.group('prefix').startswith('${') and not match.group('closing'):
+        raise MemoryPreferenceError('memory-credential-container-unverifiable')
+    return (
+        f'{match.group("prefix")}{match.group("key")}'
+        f'{match.group("closing")}{match.group("assignment")}<REDACTED>'
+    )
+
+
 def _json_regions(text: str) -> Iterator[tuple[int, int]]:
     """Validated JSON containers and complete top-level JSON strings."""
     decoder = json.JSONDecoder()
@@ -884,6 +1122,7 @@ def sanitize_text(
         pattern: re.Pattern[str],
         replacement: str | Callable[[re.Match[str]], str],
         category: str,
+        end_resolver: Callable[[re.Match[str]], int | None] | None = None,
     ) -> None:
         nonlocal text
         spans = [(record[0], record[1]) for record in _json_string_regions(text) if record[2]]
@@ -896,9 +1135,11 @@ def sanitize_text(
                 span_index += 1
             if span_index < len(spans) and spans[span_index][0] <= match.start():
                 continue
-            end = match.end()
+            end = end_resolver(match) if end_resolver is not None else match.end()
+            if end is None or end < match.start():
+                raise MemoryPreferenceError('memory-credential-container-unverifiable')
             opening = re.search(r'[\[{]', match.group())
-            if opening is not None and pattern is not PRIVATE_KEY:
+            if opening is not None and pattern is not PRIVATE_KEY and end_resolver is None:
                 value_end = _balanced_value_end(text, match.start() + opening.start())
                 if value_end is None:
                     raise MemoryPreferenceError('memory-credential-container-unverifiable')
@@ -922,13 +1163,46 @@ def sanitize_text(
             lambda match: (f'{match.group("prefix")}"Bearer <REDACTED>"' if match.group('key_quote')
                            else "Authorization: Bearer <REDACTED>"),
             "authorization")
+    for match in BATCH_CREDENTIAL_START.finditer(text):
+        if _batch_quoted_credential_value_end(text, match.start('quote')) is None:
+            raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+    replace_outside_json_values(
+        BATCH_CMD_WRAPPER_CREDENTIAL,
+        '',
+        'credential',
+        lambda _match: None,
+    )
+    replace_outside_json_values(
+        BATCH_CREDENTIAL,
+        lambda match: f'{match.group("prefix")}{match.group("key")}=<REDACTED>{match.group("quote")}',
+        "credential",
+    )
+    replace_outside_json_values(
+        BATCH_CREDENTIAL_UNQUOTED,
+        lambda match: f'{match.group("prefix")}{match.group("key")}=<REDACTED>',
+        "credential",
+        lambda match: _batch_unquoted_credential_value_end(text, match.end()),
+    )
+    replace_outside_json_values(
+        POWERSHELL_CREDENTIAL,
+        _replace_powershell_credential,
+        "credential",
+        lambda match: _powershell_credential_value_end(text, match.end()),
+    )
     regions = _json_regions(text)
     json_strings = _json_string_regions(text)
     region: tuple[int, int] | None = None
     json_string: tuple[int, int, bool, str, int | None, int | None] | None = None
     pieces: list[str] = []
     cursor = 0
-    while match := CREDENTIAL.search(text, cursor):
+    search_cursor = 0
+    while match := CREDENTIAL.search(text, search_cursor):
+        line_start = text.rfind('\n', 0, match.start()) + 1
+        assignment_prefix = text[line_start:match.start()]
+        if (BATCH_ASSIGNMENT_PREFIX.search(assignment_prefix)
+                or POWERSHELL_ASSIGNMENT_PREFIX.search(assignment_prefix)):
+            search_cursor = match.end()
+            continue
         while json_string is None or json_string[1] <= match.start():
             json_string = next(json_strings, None)
             if json_string is None:
@@ -938,8 +1212,24 @@ def sanitize_text(
                 raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
             pieces.extend((text[cursor:json_string[0]], text[json_string[0]:json_string[1]]))
             cursor = json_string[1]
+            search_cursor = json_string[1]
             continue
         end = match.end()
+        value_start = match.start('value')
+        if (match.group('prefix').rstrip().endswith('=')
+                and _contains_unsupported_shell_expansion(text, value_start)):
+            raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+        if (text[value_start] in {'"', "'"}
+                or (match.group('prefix').rstrip().endswith('=')
+                    and text[value_start:value_start + 2] == "$'")):
+            quoted_end = _quoted_credential_value_end(
+                text,
+                value_start,
+                shell_segments=match.group('prefix').rstrip().endswith('='),
+            )
+            if quoted_end is None:
+                raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+            end = max(end, quoted_end)
         if text[match.start('value')] in '{[':
             quoted_field = False
             try:
@@ -965,6 +1255,7 @@ def sanitize_text(
                        else f"{match.group('key')}=<REDACTED>")
         pieces.extend((text[cursor:match.start()], replacement))
         cursor = end
+        search_cursor = end
     if pieces:
         text = ''.join(pieces) + text[cursor:]
     if pieces and 'credential' not in redactions:
