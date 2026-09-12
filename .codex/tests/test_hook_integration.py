@@ -175,6 +175,44 @@ class HookIntegrationTests(unittest.TestCase):
         self.assertIn("güvenli kapsam kilidini zamanında alamadı", context)
         self.assertIn("Ham notlara veya eski önbelleğe geçme", context)
 
+    def test_session_start_receipt_failure_does_not_emit_second_context_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            deadline = time.monotonic() + 30
+            payload = {"session_id": "receipt-failure", "cwd": str(vault)}
+            output = io.StringIO()
+            with (
+                mock.patch.object(hook, "VAULT_ROOT", vault),
+                mock.patch.object(hook, "STATE_DIR", state),
+                mock.patch.object(hook, "_validate_hook_scope"),
+                mock.patch.object(hook, "_hook_deadline", return_value=deadline),
+                mock.patch.object(hook, "build_session_context", return_value="ctx"),
+                mock.patch.object(flush, "maybe_trigger_compile", return_value=False),
+                mock.patch.object(hook, "inspect_worker_queue", side_effect=[_queue_report(), _queue_report()]),
+                mock.patch.object(
+                    hook,
+                    "record_hook_runtime",
+                    side_effect=hook.LockUnavailable("receipt-busy"),
+                ),
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                mock.patch.object(sys, "stdout", output),
+            ):
+                result = hook.main(["session-start", "--strict"])
+
+        lines = output.getvalue().splitlines()
+        self.assertEqual(result, 1)
+        self.assertEqual(len(lines), 1)
+        emitted = json.loads(lines[0])
+        self.assertEqual(
+            emitted["hookSpecificOutput"]["hookEventName"],
+            "SessionStart",
+        )
+        self.assertEqual(
+            emitted["hookSpecificOutput"]["additionalContext"],
+            "ctx",
+        )
+
     def test_session_start_holds_scope_lock_until_maintenance_admission(self) -> None:
         """A marker completing after the snapshot must wait for SessionStart writes."""
         with tempfile.TemporaryDirectory() as temporary:

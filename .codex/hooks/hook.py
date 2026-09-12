@@ -1204,7 +1204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     hook_deadline = _hook_deadline(args.event)
     scope_validated = False
-    session_start_warning_emitted = False
+    session_start_context_emitted = False
     try:
         payload = _load_payload()
         _validate_hook_scope(payload, deadline=hook_deadline)
@@ -1299,9 +1299,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _emit_context('SessionStart', (emitted_context or '') +
                         '\n[Hafıza Devamlılığı] Bekleyen kayıtların işlenmesi doğrulanamadı. '
                         'Mevcut bağlamı kullan; eksik kayıtları bilgi yokluğu sayma.')
-                    session_start_warning_emitted = True
+                    session_start_context_emitted = True
                     raise
                 _emit_context("SessionStart", emitted_context)
+                session_start_context_emitted = True
         elif args.event == "user-prompt":
             prompt = payload.get("prompt")
             directive = memory_directive(prompt) if isinstance(prompt, str) else None
@@ -1443,10 +1444,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if (
             args.event == "session-start"
             and isinstance(exc, LockUnavailable)
-            and not session_start_warning_emitted
+            and not session_start_context_emitted
         ):
             _emit_context("SessionStart", MEMORY_SCOPE_WARNING)
-            session_start_warning_emitted = True
+            session_start_context_emitted = True
         try:
             write_hook_health(
                 STATE_DIR,
