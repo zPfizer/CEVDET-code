@@ -176,6 +176,18 @@ class ProfileGuardTests(unittest.TestCase):
                 self.assertNotIn('## Diğer', profile_guard.portrait(text))
                 self.assertNotIn("## Vault'ta", profile_guard.portrait(text))
 
+    def test_frontmatter_literal_fences_cannot_hide_profile_headings(self) -> None:
+        for marker in ('```', '~~~', '---\n  ```', '---\n  ~~~'):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                seed_profile(root)
+                text = PROFILE_TEXT.replace(
+                    'updated: 2026-09-05\n',
+                    f'updated: 2026-09-05\nexample: |\n  {marker}\n  ## Oturum Portresi\n',
+                )
+                self.assertEqual(profile_guard.check_profile(root, text), ())
+                self.assertEqual(profile_guard.portrait(text), profile_guard.portrait(PROFILE_TEXT))
+
     def test_real_duplicate_portrait_headings_remain_invalid(self) -> None:
         duplicate = PROFILE_TEXT.replace(
             "Kısa ve doğal bir oturum özeti.",

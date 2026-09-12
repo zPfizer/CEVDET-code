@@ -29,14 +29,14 @@ _ReadSource = Callable[[Path], str | None]
 def _heading(text: str, title: str) -> list[tuple[str, str, int, int]]:
     return [
         match
-        for match in markdown_headings(text)
+        for match in markdown_headings(_markdown_body(text, mask_inline_code=False))
         if match[0] == "##" and match[1] == title
     ]
 
 
 def _section(text: str, match: tuple[str, str, int, int]) -> str:
     start = match[3]
-    masked = _markdown_body(text, mask_frontmatter=False, mask_inline_code=False)
+    masked = _markdown_body(text, mask_inline_code=False)
     boundaries = [
         heading[2]
         for heading in markdown_headings(masked)
@@ -236,7 +236,6 @@ def _check_preference(
             issues.append(error)
         for line in _markdown_body(
             source or '',
-            mask_frontmatter=False,
             mask_inline_code=False,
         ).splitlines():
             parsed = CLAIM_ROW.fullmatch(line)

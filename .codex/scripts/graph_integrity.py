@@ -88,7 +88,7 @@ def _markdown_body(
     if lines and lines[0][3].strip() == "---":
         frontmatter_end = len(lines) - 1
         for index, frontmatter_line in enumerate(lines[1:], start=1):
-            if frontmatter_line[3].strip() == "---":
+            if frontmatter_line[3].rstrip(" \t") == "---":
                 frontmatter_end = index
                 break
         if mask_frontmatter:
