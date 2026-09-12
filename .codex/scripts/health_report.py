@@ -752,7 +752,9 @@ def write_report(
     _validate_runtime_paths(vault)
     target = output if output is not None else _default_report_target(vault)
     _validate_report_target(vault, target)
-    atomic_write_text(target, render(vault, now=now, output=target), overwrite=overwrite)
+    rendered = render(vault, now=now, output=target)
+    _validate_report_target(vault, target)
+    atomic_write_text(target, rendered, overwrite=overwrite)
     return target
 
 

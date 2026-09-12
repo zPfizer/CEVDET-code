@@ -59,6 +59,32 @@ def _pending_record(job_id: str) -> dict[str, object]:
 
 
 class HealthReportTests(unittest.TestCase):
+    def test_report_parent_changed_during_render_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            _seed_state(vault)
+            parent = vault / "reports"
+            parent.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            target = parent / "health.md"
+            canary = outside / target.name
+            canary.write_bytes(b"external file")
+            render = health_report.render
+            def render_and_redirect(*args, **kwargs):
+                result = render(*args, **kwargs)
+                parent.rmdir()
+                try:
+                    parent.symlink_to(outside, target_is_directory=True)
+                except (OSError, NotImplementedError) as exc:
+                    self.skipTest(f"symlink unavailable: {exc}")
+                return result
+            with mock.patch.object(health_report, "render", render_and_redirect):
+                with self.assertRaisesRegex(ValueError, "report-target-invalid"):
+                    health_report.write_report(vault, target, overwrite=True)
+            self.assertEqual(canary.read_bytes(), b"external file")
+
     def test_unknown_hook_references_do_not_become_zero_orphans(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
