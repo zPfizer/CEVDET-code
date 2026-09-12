@@ -1062,6 +1062,7 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "önceden hangi seçeneği uygun görmüştüm?": True,
             "önceden haber ver": False,
             "daha önce bitir": False,
+            "daha önce veri saklama kararı vermiştik, şimdi nasıl değiştirelim?": False,
             "önceki sayfa, güncel hook checklist göster": False,
             "önceki kayıtlar": True,
             "geçmişte önceki sayfa": True,
@@ -1274,6 +1275,46 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                     self.assertTrue(any("güncel uygulama" in hit.excerpt for hit in hits))
                     self.assertTrue(any("geçmiş uygulama" in hit.excerpt for hit in hits))
 
+    def test_past_background_before_current_request_does_not_enable_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current = "🧠 500-Knowledge/veri-saklama-guncel.md"
+            historical = "🎯 100-Command-Center/veri-saklama-eski.md"
+            _write(
+                root,
+                current,
+                """---
+title: Veri Saklama Kararı
+status: active
+type: note
+---
+# Veri Saklama Kararı
+Güncel veri saklama kararı: kısa günlükler.
+""",
+            )
+            _write(
+                root,
+                historical,
+                """---
+title: Geçmiş Veri Saklama Kararı
+status: historical
+type: research-analysis
+---
+# Geçmiş Veri Saklama Kararı
+Geçmiş veri saklama kararı: uzun günlükler.
+""",
+            )
+            query = "Daha önce veri saklama kararı vermiştik, şimdi nasıl değiştirelim?"
+            terms = retrieval._retrieval_terms(query)
+            self.assertFalse(retrieval._is_history_query(terms, query))
+            hits = retrieval.search_vault(
+                retrieval.build_vault_map(root, write_cache=False),
+                query,
+                top_k=2,
+            )
+
+        self.assertEqual([hit.entry.path for hit in hits], [current])
+
     def test_mixed_topicless_retrospective_clause_inherits_current_subject(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1313,7 +1354,7 @@ status: completed
 type: work-packet
 ---
 # Başka Karar {index}
-Başka proje kararı: daha önce bu kararı vermiştik; kayıt {index}.
+Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun görmüştük; kayıt {index}.
 """,
                 )
             entries = retrieval.build_vault_map(root, write_cache=False)
@@ -1323,6 +1364,12 @@ Başka proje kararı: daha önce bu kararı vermiştik; kayıt {index}.
                 ("Güncel veri saklama kararı", "daha önce ne karar vermiştik? veri saklama kararı"),
             )
             hits = retrieval.search_vault(entries, query, top_k=2)
+            scaffold_query = "Güncel veri saklama kararı ve daha önce hangi seçeneği uygun görmüştük?"
+            self.assertEqual(
+                retrieval._split_current_history_query(scaffold_query),
+                ("Güncel veri saklama kararı", "daha önce hangi seçeneği uygun görmüştük? veri saklama kararı"),
+            )
+            scaffold_hits = retrieval.search_vault(entries, scaffold_query, top_k=2)
 
             explicit_topic_query = "Güncel veri saklama kararı ve daha önce TANSU kararı vermiştik?"
             self.assertEqual(
@@ -1332,6 +1379,10 @@ Başka proje kararı: daha önce bu kararı vermiştik; kayıt {index}.
 
         self.assertEqual(
             {hit.entry.path for hit in hits},
+            {current, historical},
+        )
+        self.assertEqual(
+            {hit.entry.path for hit in scaffold_hits},
             {current, historical},
         )
 
