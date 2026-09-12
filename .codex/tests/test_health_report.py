@@ -59,6 +59,64 @@ def _pending_record(job_id: str) -> dict[str, object]:
 
 
 class HealthReportTests(unittest.TestCase):
+    def test_unknown_hook_references_do_not_become_zero_orphans(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            job_id = "a" * 32
+            record = _pending_record(job_id)
+            record["payload"] = {"hook_input": 123}
+            (state / "worker-jobs" / "pending" / f"job-{job_id}.json").write_text(
+                json.dumps(record), encoding="utf-8",
+            )
+            target = vault / "report.md"
+            text = health_report.write_report(vault, target).read_text(encoding="utf-8")
+            self.assertIn("Kurtarılmayı bekleyen hook girdisi: doğrulanamadı", text)
+            self.assertNotIn("Kurtarılmayı bekleyen hook girdisi: 0", text)
+            self.assertNotIn("Taranan kuyruklarda takılı iş saptanmadı.", text)
+
+    def test_compiler_publication_created_during_state_read_is_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            (state / "compile-state.json").write_text(
+                json.dumps({"ingested": {}, "cursor": "", "last_run": "",
+                            "last_status": "ok", "runs": []}), encoding="utf-8",
+            )
+            load = health_report.compile_state.load
+            def load_and_begin_publication(state_dir):
+                result = load(state_dir)
+                (state / "compile-publication.json").write_text(
+                    json.dumps({"schema_version": 1, "status": "pending"}),
+                    encoding="utf-8",
+                )
+                return result
+            with mock.patch.object(health_report.compile_state, "load", load_and_begin_publication):
+                report = health_report.render(vault)
+            self.assertIn("yayın kurtarma bekliyor", report)
+            self.assertNotIn("(durum: ok)", report)
+
+    def test_hardlinked_quarantine_payload_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            state = _seed_state(vault)
+            source = root / "external-payload"
+            source.write_bytes(b"preserve external recovery evidence")
+            job_id = "b" * 32
+            quarantine = state / "worker-jobs" / "quarantined"
+            payload = quarantine / f"job-{job_id}.payload"
+            os.link(source, payload)
+            (quarantine / f"job-{job_id}.json").write_text(json.dumps({
+                "schema_version": worker_supervisor.JOB_SCHEMA_VERSION,
+                "job_id": job_id, "status": "quarantined",
+                "reason_code": "worker-job-json-invalid",
+                "payload_file": payload.name,
+                "payload_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(OSError, "worker-record-invalid"):
+                health_report.render(vault)
+
     def test_custom_report_cannot_create_or_replace_source_and_runtime_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

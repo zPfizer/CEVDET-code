@@ -244,6 +244,7 @@ def _validate_worker_records(
                     if (
                         stat.S_ISLNK(payload_stat.st_mode)
                         or not stat.S_ISREG(payload_stat.st_mode)
+                        or getattr(payload_stat, "st_nlink", 1) != 1
                         or payload_path.is_junction()
                         or not payload_resolved.is_relative_to(path.parent)
                         or hashlib.sha256(payload_path.read_bytes()).hexdigest()
@@ -366,7 +367,7 @@ def dead_letter_rows(state_dir: Path) -> list[dict[str, Any]]:
     return _dead_letter_summary(state_dir)[1]
 
 
-def orphan_hook_input_count(state_dir: Path) -> int:
+def orphan_hook_input_count(state_dir: Path) -> int | None:
     from worker_supervisor import (
         FLUSH_REASON_PRIORITY,
         HOOK_INPUT_SCHEMA_VERSION,
@@ -391,12 +392,14 @@ def orphan_hook_input_count(state_dir: Path) -> int:
                 or not record["event_iso"]
             ):
                 raise OSError("worker-hook-input-invalid")
-        return count_orphan_hook_inputs(state_dir)
+        return count_orphan_hook_inputs(state_dir, strict=True)
     except OSError as exc:
         if str(exc) == "worker-hook-input-invalid":
             raise
         raise OSError("worker-hook-input-unreadable") from exc
     except (RuntimeError, TypeError, ValueError, UnicodeError) as exc:
+        if str(exc) == "worker-hook-input-references-unreadable":
+            return None
         raise OSError("worker-hook-input-unreadable") from exc
 
 
@@ -471,7 +474,7 @@ def compile_summary(state_dir: Path) -> tuple[str, str]:
     try:
         if compile_state.load_publication(state_dir) is not None:
             return "?", "yayın kurtarma bekliyor"
-        compile_state.load_publication_token(state_dir)
+        publication_id = compile_state.load_publication_token(state_dir)
     except compile_state.PolicyError:
         return "?", "yayın kaydı doğrulanamadı"
     path = compile_state.state_file(state_dir)
@@ -504,6 +507,15 @@ def compile_summary(state_dir: Path) -> tuple[str, str]:
             return "?", "bozuk kayıt"
     if _COMPILE_STATUS.fullmatch(last_status) is None:
         return "?", "bozuk kayıt"
+    try:
+        if (
+            compile_state.load_publication(state_dir) is not None
+            or compile_state.load_publication_token(state_dir) != publication_id
+            or compile_state.load_publication(state_dir) is not None
+        ):
+            return "?", "yayın kurtarma bekliyor"
+    except compile_state.PolicyError:
+        return "?", "yayın kaydı doğrulanamadı"
     return last_run or "hiç", last_status
 
 
@@ -701,6 +713,8 @@ def render(
             "Süresi geçmiş çalışan iş var — "
             f"{stale_running} iş yeniden ele alınmayı bekliyor."
         )
+    elif orphan_hook_inputs is None:
+        lines.append("Hook girdilerinin kuyruk referansları doğrulanamadı.")
     elif orphan_hook_inputs:
         lines.append(
             "Worker kurtarma bekliyor — "
@@ -715,7 +729,7 @@ def render(
         f"- Aktif read-only işareti: {markers['read_only']}",
         f"- Aktif session-only işareti: {markers['session_only']}",
         f"- Flush durum dosyası: {flush_state_count(state_dir, now=moment.timestamp())}",
-        f"- Kurtarılmayı bekleyen hook girdisi: {orphan_hook_inputs}",
+        f"- Kurtarılmayı bekleyen hook girdisi: {orphan_hook_inputs if orphan_hook_inputs is not None else 'doğrulanamadı'}",
         f"- Süresi geçmiş çalışan iş: {stale_running}",
         f"- Derleyici son çalışma: {last_run} (durum: {last_status})",
         f"- Sağlık kaydı (health.json): {health_summary(state_dir)}",
