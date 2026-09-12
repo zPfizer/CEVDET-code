@@ -94,6 +94,113 @@ class ProfileGuardTests(unittest.TestCase):
             self.assertEqual(profile_guard.check_profile(root, crlf), ())
             self.assertIn("Kısa ve doğal", profile_guard.portrait(crlf))
 
+    def test_fenced_headings_do_not_hide_or_end_the_portrait(self) -> None:
+        text = PROFILE_TEXT.replace(
+            "Kısa ve doğal bir oturum özeti.\n\n",
+            "Kısa ve doğal bir oturum özeti.\n\n"
+            "```markdown\n"
+            "## Oturum Portresi\n"
+            "örnek başlık\n"
+            "```\n\n"
+            "Portre içinde devam.\n\n",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seed_profile(root)
+
+            self.assertEqual(profile_guard.check_profile(root, text), ())
+
+        self.assertEqual(
+            profile_guard.portrait(text),
+            "## Oturum Portresi\n\n"
+            "Kısa ve doğal bir oturum özeti.\n\n"
+            "```markdown\n"
+            "## Oturum Portresi\n"
+            "örnek başlık\n"
+            "```\n\n"
+            "Portre içinde devam.",
+        )
+
+    def test_fenced_structured_rows_cannot_supply_profile_provenance(self) -> None:
+        fenced_concept = CONCEPT_TEXT.replace(
+            "- `gecerli` `kullanici-dusuncesi` `guncel` 2026-09-04 "
+            "[[daily/2026-09-04|Kaynak]] — Türkçe ve kısa yanıt ver.",
+            '```markdown\n'
+            "## Örnek kayıt\n"
+            "- `gecerli` `kullanici-dusuncesi` `guncel` 2026-09-04 "
+            "[[daily/2026-09-04|Kaynak]] — Türkçe ve kısa yanıt ver.\n"
+            '```',
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seed_profile(root)
+            (root / "knowledge/concepts/tercih-kisa.md").write_text(
+                fenced_concept,
+                encoding="utf-8",
+            )
+
+            self.assertIn("profile-claim-provenance", profile_guard.check_profile(root))
+
+    def test_empty_level_two_and_three_headings_end_style_section(self) -> None:
+        for empty_heading in ("##", "###   "):
+            for newline in ("\n", "\r\n"):
+                with self.subTest(empty_heading=empty_heading, newline=repr(newline)), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    seed_profile(root)
+                    text = PROFILE_TEXT.replace(
+                        "## Vault'ta çalışma ve yanıt tarzı\n\n"
+                        "- Türkçe ve kısa yanıt ver Kaynak: [[knowledge/concepts/tercih-kisa#Kayıtlar|Kısa yanıt]] · kullanıcı tercihi · 2026-09-04.\n",
+                        "## Vault'ta çalışma ve yanıt tarzı\n\n"
+                        f"{empty_heading}\n\n"
+                        "- Türkçe ve kısa yanıt ver Kaynak: [[knowledge/concepts/tercih-kisa#Kayıtlar|Kısa yanıt]] · kullanıcı tercihi · 2026-09-04.\n",
+                    ).replace("\n", newline)
+
+                    self.assertIn("profile-preference-missing", profile_guard.check_profile(root, text))
+
+    def test_section_masking_and_heading_discovery_agree_on_tab_fences(self) -> None:
+        preference = next(line for line in PROFILE_TEXT.splitlines() if line.startswith('- Türkçe'))
+        for opening, closing in ((' ```markdown', '\t```'), ('\t```markdown', ' ```')):
+            with self.subTest(opening=opening, closing=closing), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                seed_profile(root)
+                text = (
+                    '---\nupdated: 2026-09-05\n---\n'
+                    '## Oturum Portresi\n\nKısa portre.\n'
+                    f'{opening}\nÖrnek.\n{closing}\n\n'
+                    "## Vault'ta çalışma ve yanıt tarzı\n\n"
+                    f'## Diğer\n\n{preference}\n'
+                )
+                self.assertIn('profile-preference-missing', profile_guard.check_profile(root, text))
+                self.assertNotIn('## Diğer', profile_guard.portrait(text))
+                self.assertNotIn("## Vault'ta", profile_guard.portrait(text))
+
+    def test_frontmatter_literal_fences_cannot_hide_profile_headings(self) -> None:
+        for marker in ('```', '~~~', '---\n  ```', '---\n  ~~~'):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                seed_profile(root)
+                text = PROFILE_TEXT.replace(
+                    'updated: 2026-09-05\n',
+                    f'updated: 2026-09-05\nexample: |\n  {marker}\n  ## Oturum Portresi\n',
+                )
+                self.assertEqual(profile_guard.check_profile(root, text), ())
+                self.assertEqual(profile_guard.portrait(text), profile_guard.portrait(PROFILE_TEXT))
+
+    def test_real_duplicate_portrait_headings_remain_invalid(self) -> None:
+        duplicate = PROFILE_TEXT.replace(
+            "Kısa ve doğal bir oturum özeti.",
+            "Kısa ve doğal bir oturum özeti.\n\n## Oturum Portresi\n\nİkinci gerçek başlık.",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seed_profile(root)
+
+            self.assertIn("profile-portrait", profile_guard.check_profile(root, duplicate))
+            self.assertEqual(profile_guard.portrait(duplicate), "")
+
     def test_missing_and_overflowing_portrait_are_rejected(self) -> None:
         missing = PROFILE_TEXT.replace(
             "## Oturum Portresi\n\nKısa ve doğal bir oturum özeti.\n\n", ""

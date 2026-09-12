@@ -6,6 +6,7 @@ import re
 from typing import Sequence
 
 from knowledge_schema import (
+    _FENCE_LINE,
     _connects,
     _is_escaped,
     _source_status,
@@ -31,7 +32,6 @@ _DAILY_HEADING = re.compile(r"(?m)^[ \t]{0,3}#[ \t]+Günlük Log:[^\r\n]*\r?$")
 _CONNECTION_HEADING = re.compile(
     r"(?m)^[ \t]{0,3}##[ \t]+Bağlantı[ \t]*(?:#+[ \t]*)?\r?$"
 )
-_FENCE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 
 
 def _blank(chars: list[str], start: int, end: int) -> None:
@@ -67,8 +67,13 @@ def _blank_inline_code(chars: list[str], text: str) -> None:
         index = close + len(delimiter)
 
 
-def _markdown_body(text: str, *, mask_frontmatter: bool = True) -> str:
-    """Mask frontmatter and Markdown code so offsets remain usable for inserts."""
+def _markdown_body(
+    text: str,
+    *,
+    mask_frontmatter: bool = True,
+    mask_inline_code: bool = True,
+) -> str:
+    """Mask frontmatter and Markdown code while preserving source offsets."""
     chars = list(text)
     lines: list[tuple[int, int, int, str]] = []
     offset = 0
@@ -83,7 +88,7 @@ def _markdown_body(text: str, *, mask_frontmatter: bool = True) -> str:
     if lines and lines[0][3].strip() == "---":
         frontmatter_end = len(lines) - 1
         for index, frontmatter_line in enumerate(lines[1:], start=1):
-            if frontmatter_line[3].strip() == "---":
+            if frontmatter_line[3].rstrip(" \t") == "---":
                 frontmatter_end = index
                 break
         if mask_frontmatter:
@@ -95,21 +100,26 @@ def _markdown_body(text: str, *, mask_frontmatter: bool = True) -> str:
     for index, (start, end, _line_end, content) in enumerate(lines):
         if index <= frontmatter_end:
             continue
+        fence = _FENCE_LINE.fullmatch(content)
         if fence_char is not None:
             _blank(chars, start, end)
-            if re.fullmatch(
-                rf"[ ]{{0,3}}{re.escape(fence_char)}{{{fence_length},}}[ \t]*",
-                content,
+            if (
+                fence is not None
+                and fence.group(1)[0] == fence_char
+                and len(fence.group(1)) >= fence_length
+                and not fence.group(2).strip()
             ):
                 fence_char = None
             continue
-        fence = _FENCE.match(content)
         if fence is not None:
+            if fence.group(1)[0] == '`' and '`' in fence.group(2):
+                continue
             fence_char = fence.group(1)[0]
             fence_length = len(fence.group(1))
             _blank(chars, start, end)
             continue
-    _blank_inline_code(chars, "".join(chars))
+    if mask_inline_code:
+        _blank_inline_code(chars, "".join(chars))
     return "".join(chars)
 
 
