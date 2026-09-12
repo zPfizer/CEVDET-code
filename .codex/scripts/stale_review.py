@@ -25,6 +25,7 @@ from memory_ledger import (
     MemoryRead,
     load_suppressed_hashes,
     memory_read,
+    sanitize_text,
     suppression_guard,
 )
 from state_store import atomic_write_text, state_dir_of
@@ -590,9 +591,15 @@ def _review_notes(
 ) -> list[StaleFinding]:
     findings = []
     for note in notes:
+        try:
+            safe_note = sanitize_text(note.key, max_chars=None)[0]
+        except (MemoryPreferenceError, ValueError) as exc:
+            raise MemoryPreferenceError("stale-review-note-unverifiable") from exc
         note_date = _note_date(note)
         if note_date is None:
-            findings.append(StaleFinding(note.key, -1, ("tarih alanı yok ya da bozuk",)))
+            findings.append(
+                StaleFinding(safe_note, -1, ("tarih alanı yok ya da bozuk",))
+            )
             continue
         age = (today - note_date).days
         if age < 0:
@@ -611,7 +618,7 @@ def _review_notes(
         if age >= days:
             reasons.insert(0, f"{age} gündür güncellenmemiş")
         if reasons:
-            findings.append(StaleFinding(note.key, age, tuple(reasons)))
+            findings.append(StaleFinding(safe_note, age, tuple(reasons)))
     findings.sort(key=lambda finding: (-finding.age_days, finding.note))
     return findings
 

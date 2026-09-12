@@ -400,6 +400,28 @@ class StaleReviewTests(unittest.TestCase):
         self.assertNotIn("[[Private.md]]", text)
         self.assertIn(r"`knowledge/concepts/x\]\] !\[\[Private.md.md`", text)
 
+    def test_secret_note_path_is_redacted_before_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _note(
+                vault,
+                "sk-abcdefghijklmnop",
+                updated="2026-01-02",
+                sources=[],
+            )
+
+            findings = stale_review.review(
+                vault, now=datetime.date(2026, 9, 11)
+            )
+            target, _count = stale_review.write_report(
+                vault, now=datetime.date(2026, 9, 11)
+            )
+            text = target.read_text(encoding="utf-8")
+
+        self.assertEqual(findings[0].note, "knowledge/concepts/<REDACTED>.md")
+        self.assertIn("<REDACTED>", text)
+        self.assertNotIn("sk-abcdefghijklmnop", text)
+
     def test_clean_vault_renders_empty_report(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
