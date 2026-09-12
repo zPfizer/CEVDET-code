@@ -38,6 +38,35 @@ def _queue_report(*, pending: int = 0) -> dict[str, object]:
 
 
 class HookIntegrationTests(unittest.TestCase):
+    def test_reflection_conversation_write_shares_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            session_id = "reflection-deadline"
+            conversation = state / f"conversation-{hook.session_key(session_id)}.json"
+            conversation.write_text(
+                json.dumps({"prompt_count": 5, "meaningful_prompt_seen": True}),
+                encoding="utf-8",
+            )
+            deadline = time.monotonic() + 30
+            with (
+                mock.patch.object(hook, "STATE_DIR", state),
+                mock.patch.object(
+                    hook,
+                    "atomic_write_json",
+                    wraps=hook.atomic_write_json,
+                ) as write,
+            ):
+                hook._mark_reflection_if_needed(
+                    {"session_id": session_id}, deadline=deadline
+                )
+
+            record = json.loads(conversation.read_text(encoding="utf-8"))
+
+        write.assert_called_once()
+        self.assertEqual(write.call_args.kwargs["deadline"], deadline)
+        self.assertTrue(record["reflection_checked"])
+        self.assertNotIn("meaningful_prompt_seen", record)
+
     def test_session_start_propagates_one_deadline_to_context_queue_and_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

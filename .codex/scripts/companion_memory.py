@@ -145,7 +145,7 @@ def request_reflection(
                 'schema': 1,
                 'session_key': session_scope(session_id),
                 'request_id': uuid.uuid4().hex,
-            })
+            }, deadline=deadline)
 
 
 def has_pending_reflection(state: Path) -> bool:

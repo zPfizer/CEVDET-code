@@ -942,7 +942,7 @@ def _mark_reflection_if_needed(
             )
         record.pop("meaningful_prompt_seen", None)
         record["reflection_checked"] = True
-        atomic_write_json(conversation, record)
+        atomic_write_json(conversation, record, deadline=deadline)
 
 
 def enqueue_flush(
