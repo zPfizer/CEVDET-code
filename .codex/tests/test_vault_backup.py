@@ -87,7 +87,12 @@ class VaultBackupTests(unittest.TestCase):
 
             with mock.patch.dict(
                 os.environ,
-                {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(vault)},
+                {
+                    "GIT_DIR": str(other / ".git"),
+                    "GIT_WORK_TREE": str(vault),
+                    "GIT_OBJECT_DIRECTORY": str(other / ".git" / "objects"),
+                    "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(other / ".git" / "objects"),
+                },
                 clear=False,
             ):
                 bundle = vault_backup.create_bundle(vault, dest)
@@ -268,6 +273,30 @@ class VaultBackupTests(unittest.TestCase):
             self.assertEqual(removed, [])
             self.assertTrue(bundle.exists())
             self.assertTrue(directory.is_dir())
+
+    def test_prune_rejects_bundle_named_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            outside = root / "outside.bundle"
+            _init_repo(vault)
+            owned = _owned_dest(vault, dest)
+            real_bundle = owned / "vault-20200101-000000.bundle"
+            real_bundle.write_bytes(b"bundle")
+            outside.write_bytes(b"outside")
+            link = owned / "vault-20990101-000000-999.bundle"
+            try:
+                link.symlink_to(outside)
+            except OSError as error:
+                self.skipTest(f"file symlink unavailable: {error}")
+
+            with self.assertRaises(vault_backup.BackupError):
+                vault_backup.prune_bundles(dest, keep=1, vault=vault)
+
+            self.assertTrue(real_bundle.exists())
+            self.assertTrue(link.is_symlink())
+            self.assertTrue(outside.exists())
 
     def test_clock_rollback_keeps_current_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -564,6 +593,37 @@ class VaultBackupTests(unittest.TestCase):
                     "-c", "user.name=test",
                     "-c", "user.email=test@example.invalid",
                     "commit", "-q", "-m", "snapshot sonrası",
+                )
+
+            with mock.patch.object(
+                vault_backup,
+                "_validate_bundle_artifact",
+                side_effect=validate_then_commit,
+            ):
+                with self.assertRaises(vault_backup.BackupError):
+                    vault_backup.create_bundle(vault, dest)
+
+            self.assertFalse(list(dest.rglob("vault-*.bundle")))
+
+    def test_detached_head_change_before_publish_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            head = _git(vault, "rev-parse", "HEAD").stdout.strip()
+            _git(vault, "checkout", "-q", head)
+            real_validate = vault_backup._validate_bundle_artifact
+
+            def validate_then_commit(source: Path, bundle: Path) -> None:
+                real_validate(source, bundle)
+                (source / "not.md").write_text("detached sonrası", encoding="utf-8")
+                _git(source, "add", "not.md")
+                _git(
+                    source,
+                    "-c", "user.name=test",
+                    "-c", "user.email=test@example.invalid",
+                    "commit", "-q", "-m", "detached sonrası",
                 )
 
             with mock.patch.object(

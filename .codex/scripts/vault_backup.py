@@ -25,7 +25,11 @@ BUNDLE_NAME = re.compile(r"vault-(\d{8}-\d{6})(?:-(\d+))?\.bundle$")
 DEFAULT_KEEP = 14
 GIT_TIMEOUT_SECONDS = 600
 GIT_REPOSITORY_ENV = (
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT", "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_COMMON_DIR",
 )
 
 
@@ -112,6 +116,7 @@ def _ref_snapshot(repo: Path) -> dict[str, str]:
     for line in lines:
         ref, object_name = line.split(maxsplit=1)
         snapshot[ref] = object_name
+    snapshot["HEAD"] = _git(repo, "rev-parse", "--verify", "HEAD").stdout.strip()
     return snapshot
 
 
@@ -121,8 +126,7 @@ def _bundle_ref_snapshot(repo: Path, bundle: Path) -> dict[str, str]:
     try:
         for line in lines:
             object_name, ref = line.split(maxsplit=1)
-            if ref != "HEAD":
-                snapshot[ref] = object_name
+            snapshot[ref] = object_name
     except ValueError as error:
         raise BackupError(f"bundle ref'leri okunamadı: {bundle}") from error
     return snapshot
@@ -172,6 +176,18 @@ def _namespace_is_link(path: Path) -> bool:
     return path.is_symlink() or (callable(junction_check) and junction_check())
 
 
+def _bundle_files(dest: Path) -> list[Path]:
+    files: list[Path] = []
+    for path in Path(dest).glob("vault-*.bundle"):
+        if not BUNDLE_NAME.fullmatch(path.name):
+            continue
+        if _namespace_is_link(path):
+            raise BackupError(f"bundle adayı link olamaz: {path}")
+        if path.is_file():
+            files.append(path)
+    return files
+
+
 def _validate_owned_destination(dest: Path, owned_dest: Path) -> None:
     try:
         if _namespace_is_link(owned_dest):
@@ -203,10 +219,7 @@ def _prepare_dest(vault: Path, dest: Path) -> tuple[Path, Path]:
 
 
 def _unique_bundle_path(dest: Path, stamp: str) -> Path:
-    bundles = [
-        path for path in dest.glob("vault-*.bundle")
-        if BUNDLE_NAME.fullmatch(path.name)
-    ]
+    bundles = _bundle_files(dest)
     if not bundles:
         return dest / f"vault-{stamp}.bundle"
     suffix = max(_bundle_sort_key(path)[0] for path in bundles) + 1
@@ -260,14 +273,7 @@ def _prune_bundles_locked(
     dest: Path, keep: int, *, preserve: Path | None = None,
 ) -> list[Path]:
     _validate_keep(keep)
-    bundles = sorted(
-        (
-            path for path in Path(dest).glob("vault-*.bundle")
-            if path.is_file() and BUNDLE_NAME.fullmatch(path.name)
-        ),
-        key=_bundle_sort_key,
-        reverse=True,
-    )
+    bundles = sorted(_bundle_files(dest), key=_bundle_sort_key, reverse=True)
     if preserve is None:
         retained = set(bundles[:keep])
     else:
