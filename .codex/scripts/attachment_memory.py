@@ -54,6 +54,17 @@ def _attachment_digest(value: str) -> str:
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
 
 
+def _source_signature(file_stat: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_mode,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+    )
+
+
 def _mapping_path(state_dir: Path, attachment_id: str, envelope_digest: str | None = None) -> Path:
     if not ATTACHMENT_ID.fullmatch(attachment_id):
         raise ValueError('attachment-id-invalid')
@@ -146,16 +157,28 @@ def _validate_destination_parent(vault_root: Path, destination: Path) -> None:
 
 def _read_source(source: Path, attachment_root: Path, hashes: frozenset[str]) -> dict[str, Any]:
     _regular_path(source, attachment_root)
-    with source.open('rb') as handle:
-        data = handle.read(MAX_SOURCE_BYTES + 1)
+    before = source.lstat()
+    try:
+        with source.open('rb') as handle:
+            data = handle.read(MAX_SOURCE_BYTES + 1)
+    except FileNotFoundError as exc:
+        raise ValueError('attachment-content-changed') from exc
     if len(data) > MAX_SOURCE_BYTES:
         raise ValueError('attachment-byte-budget-exceeded')
+    try:
+        after = source.lstat()
+    except FileNotFoundError as exc:
+        raise ValueError('attachment-content-changed') from exc
+    if _source_signature(before) != _source_signature(after):
+        raise ValueError('attachment-content-changed')
     original = data.decode('utf-8-sig')
     if len(original) > MAX_SOURCE_CHARS:
         raise ValueError('attachment-char-budget-exceeded')
     sanitized, redactions = sanitize_text(original, max_chars=MAX_SOURCE_CHARS)
     return {
         'visible': filter_suppressed_text(sanitized, hashes),
+        'source_bytes_sha256': hashlib.sha256(data).hexdigest(),
+        'source_identity': _source_signature(after),
         'source_sanitized_sha256': _attachment_digest(sanitized),
         'redactions': redactions,
     }
@@ -358,6 +381,33 @@ def _capture_one_core(
             raise ValueError('attachment-mapping-scope-invalid')
         source_record = preloaded_source
 
+        def mark_source_changed() -> None:
+            nonlocal mapping
+            if mapping is None or mapping.get('source_changed'):
+                return
+            updated = dict(mapping)
+            updated['source_changed'] = True
+            with _publication_scope(state_dir, session_id):
+                with suppression_guard(vault_root / '.codex/private-memory', hashes):
+                    _write_mapping(mapping_path, updated)
+            mapping = updated
+
+        def verify_source_snapshot() -> None:
+            if source_record is None:
+                return
+            try:
+                current = _read_source(source, attachment_root, hashes)
+            except (FileNotFoundError, OSError, UnicodeError, ValueError) as exc:
+                mark_source_changed()
+                raise ValueError('attachment-content-changed') from exc
+            if (
+                current['source_identity'] != source_record['source_identity']
+                or current['source_bytes_sha256'] != source_record['source_bytes_sha256']
+                or current['source_sanitized_sha256'] != source_record['source_sanitized_sha256']
+            ):
+                mark_source_changed()
+                raise ValueError('attachment-content-changed')
+
         if source_record is not None:
             raw_digest = source_record['source_sanitized_sha256']
             visible = source_record['visible']
@@ -425,6 +475,7 @@ def _capture_one_core(
                 )
 
         def retain_empty_result() -> None:
+            verify_source_snapshot()
             with _publication_scope(state_dir, session_id):
                 with suppression_guard(vault_root / '.codex/private-memory', hashes):
                     if (
@@ -524,6 +575,7 @@ def _capture_one_core(
                         return destination.relative_to(vault_root).with_suffix('').as_posix(), legacy_summary
 
         generated_summary = _summary_from_model(summarize, visible)
+        verify_source_snapshot()
         if generated_summary is None:
             retain_empty_result()
             return None
@@ -542,6 +594,7 @@ def _capture_one_core(
             source_digest, redactions, note_date,
         )
         note_digest = _attachment_digest(rendered)
+        verify_source_snapshot()
         if (
             mapping is not None
             and mapping['status'] == 'prepared'
