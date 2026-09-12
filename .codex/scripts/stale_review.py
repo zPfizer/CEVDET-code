@@ -76,17 +76,16 @@ class StaleFinding:
 
 
 def _note_date(note: NoteIndex) -> datetime.date | None:
-    for field in ("updated", "created"):
-        value = note.frontmatter.get(field)
-        if isinstance(value, str):
-            value = value.strip()
-            if DATE.fullmatch(value) is None:
-                return None
-            try:
-                return datetime.date.fromisoformat(value)
-            except ValueError:
-                return None
-    return None
+    value = note.frontmatter.get("updated")
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if DATE.fullmatch(value) is None:
+        return None
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _source_reasons(
@@ -246,6 +245,30 @@ def _validate_vault(vault: Path) -> None:
             raise ValueError("knowledge-root-invalid")
     except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
         raise MemoryPreferenceError("stale-review-knowledge-root-invalid") from exc
+
+
+def _validate_runtime_paths(vault: Path) -> None:
+    for parts in ((".codex", "scripts", ".state"), (".codex", "private-memory")):
+        current = vault
+        for part in parts:
+            current /= part
+            try:
+                current_stat = current.lstat()
+            except FileNotFoundError:
+                continue
+            except (OSError, RuntimeError) as exc:
+                raise MemoryPreferenceError("stale-review-runtime-path-invalid") from exc
+            try:
+                resolved = current.resolve(strict=False)
+                if (
+                    stat.S_ISLNK(current_stat.st_mode)
+                    or not stat.S_ISDIR(current_stat.st_mode)
+                    or current.is_junction()
+                    or not resolved.is_relative_to(vault)
+                ):
+                    raise ValueError("runtime-path-invalid")
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise MemoryPreferenceError("stale-review-runtime-path-invalid") from exc
 
 
 def _validate_note_observations(
@@ -443,12 +466,18 @@ def _review_notes(
             findings.append(StaleFinding(note.key, -1, ("tarih alanı yok ya da bozuk",)))
             continue
         age = (today - note_date).days
-        reasons = _source_reasons(
-            vault,
-            note,
-            note_date,
-            memory=memory,
-            observations=observations,
+        if age < 0:
+            reasons = ["tarih gelecekte"]
+        else:
+            reasons = []
+        reasons.extend(
+            _source_reasons(
+                vault,
+                note,
+                note_date,
+                memory=memory,
+                observations=observations,
+            )
         )
         if age >= days:
             reasons.insert(0, f"{age} gündür güncellenmemiş")
@@ -466,6 +495,7 @@ def review(
 ) -> list[StaleFinding]:
     vault = Path(vault).resolve()
     _validate_vault(vault)
+    _validate_runtime_paths(vault)
     today = now or datetime.date.today()
     with memory_read(vault) as memory:
         findings = _review_notes(
@@ -545,6 +575,7 @@ def write_report(
 ) -> tuple[Path, int]:
     vault = Path(vault).resolve()
     _validate_vault(vault)
+    _validate_runtime_paths(vault)
     today = now or datetime.date.today()
     state_dir = state_dir_of(vault)
     private_root = vault / ".codex/private-memory"
@@ -555,9 +586,10 @@ def write_report(
             with memory_read(vault) as memory:
                 observations: dict[Path, tuple[int, int, int, int, int]] = {}
                 note_observations: dict[Path, tuple[int, int, int, int, int]] = {}
+                notes = _snapshot_notes(vault, memory, note_observations)
                 findings = _review_notes(
                     vault,
-                    _snapshot_notes(vault, memory, note_observations),
+                    notes,
                     days=days,
                     today=today,
                     memory=memory,
