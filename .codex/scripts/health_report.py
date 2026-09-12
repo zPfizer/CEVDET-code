@@ -581,6 +581,13 @@ def health_summary(state_dir: Path) -> str:
         return "okunamadı"
     if loaded.get("schema_version") != HEALTH_SCHEMA_VERSION:
         return "okunamadı"
+    generation = loaded.get("generation", 0)
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+    ):
+        return "okunamadı"
     components = loaded.get("components")
     if not isinstance(components, dict):
         return "okunamadı"
