@@ -249,19 +249,29 @@ class StaleReviewTests(unittest.TestCase):
             finally:
                 parent.unlink(missing_ok=True)
 
-    def test_linked_knowledge_root_fails_closed_before_output(self) -> None:
-        for relative in (Path("knowledge"), Path("knowledge") / "concepts"):
+    def test_linked_knowledge_entries_fail_closed_before_output(self) -> None:
+        for relative in (
+            Path("knowledge"),
+            Path("knowledge") / "concepts",
+            Path("knowledge") / "concepts" / "linked.md",
+            Path("knowledge") / "connections" / "nested",
+        ):
             with self.subTest(relative=relative):
                 with tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
                     vault = root / "vault"
                     outside = root / "outside"
                     vault.mkdir()
-                    outside.mkdir()
+                    if relative.suffix == ".md":
+                        outside.write_text("dışarı", encoding="utf-8")
+                    else:
+                        outside.mkdir()
                     link = vault / relative
                     link.parent.mkdir(parents=True, exist_ok=True)
                     try:
-                        link.symlink_to(outside, target_is_directory=True)
+                        link.symlink_to(
+                            outside, target_is_directory=relative.suffix != ".md"
+                        )
                     except (OSError, NotImplementedError) as exc:
                         self.skipTest(f"symlink unavailable: {exc}")
 
@@ -381,6 +391,7 @@ class StaleReviewTests(unittest.TestCase):
             text = target.read_text(encoding="utf-8")
 
         self.assertNotIn("2026-01-02.md", text)
+        self.assertIn("kaynak güveni doğrulanamadı", text)
 
     def test_malformed_suppression_controls_fail_closed_before_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

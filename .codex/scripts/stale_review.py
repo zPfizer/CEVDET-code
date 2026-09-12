@@ -11,11 +11,12 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime
+import os
 from pathlib import Path
 from pathlib import PurePosixPath
 import re
 import stat
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from file_lock import locked
 from knowledge_schema import DAILY_SOURCE, DATE, parse_frontmatter
@@ -27,7 +28,12 @@ from memory_ledger import (
     suppression_guard,
 )
 from state_store import atomic_write_text, state_dir_of
-from vault_corpus import DAILY_ROOT, KNOWLEDGE_ROOT, NoteIndex, markdown_paths
+from vault_corpus import (
+    DAILY_ROOT,
+    EXCLUDED_DIRS,
+    KNOWLEDGE_ROOT,
+    NoteIndex,
+)
 
 REPORT_RELATIVE = Path("🎯 100-Command-Center") / "Cevo Bayat İnceleme.md"
 DEFAULT_DAYS = 90
@@ -124,6 +130,7 @@ def _source_reasons(
             memory.excludes(source)
             or memory.excludes(f"{DAILY_ROOT}/{source}")
         ):
+            reasons.append("kaynak güveni doğrulanamadı")
             continue
         if (
             not source
@@ -258,7 +265,7 @@ def _eligible_note_paths(vault: Path) -> tuple[Path, ...]:
                 raise ValueError("derived-root-invalid")
         except (OSError, RuntimeError, ValueError) as exc:
             raise MemoryPreferenceError("stale-review-knowledge-root-invalid") from exc
-        for path in markdown_paths(derived):
+        for path in _checked_markdown_paths(derived):
             try:
                 relative = path.relative_to(root)
             except ValueError:
@@ -267,6 +274,63 @@ def _eligible_note_paths(vault: Path) -> tuple[Path, ...]:
             if len(parts) >= 3 and parts[0] == KNOWLEDGE_ROOT and parts[1] in DERIVED_SUBDIRS:
                 paths.append(path)
     return tuple(sorted(paths))
+
+
+def _checked_markdown_paths(root: Path) -> Iterator[Path]:
+    def read_error(error: OSError) -> None:
+        raise error
+
+    try:
+        walker = os.walk(
+            root,
+            topdown=True,
+            followlinks=False,
+            onerror=read_error,
+        )
+        for current, directories, files in walker:
+            current_path = Path(current)
+            kept_directories = []
+            for name in directories:
+                if name.casefold() in EXCLUDED_DIRS:
+                    continue
+                path = current_path / name
+                try:
+                    path_stat = path.lstat()
+                    if (
+                        stat.S_ISLNK(path_stat.st_mode)
+                        or path.is_junction()
+                        or not stat.S_ISDIR(path_stat.st_mode)
+                    ):
+                        raise ValueError("linked-directory")
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise MemoryPreferenceError(
+                        "stale-review-knowledge-root-invalid"
+                    ) from exc
+                kept_directories.append(name)
+            directories[:] = kept_directories
+            for name in files:
+                if Path(name).suffix.casefold() != ".md":
+                    continue
+                path = current_path / name
+                try:
+                    path_stat = path.lstat()
+                    if (
+                        stat.S_ISLNK(path_stat.st_mode)
+                        or path.is_junction()
+                        or not stat.S_ISREG(path_stat.st_mode)
+                    ):
+                        raise ValueError("linked-file")
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise MemoryPreferenceError(
+                        "stale-review-knowledge-root-invalid"
+                    ) from exc
+                yield path
+    except MemoryPreferenceError:
+        raise
+    except OSError as exc:
+        raise MemoryPreferenceError(
+            "stale-review-knowledge-root-unreadable"
+        ) from exc
 
 
 def _snapshot_notes(vault: Path, memory: MemoryRead) -> tuple[NoteIndex, ...]:
