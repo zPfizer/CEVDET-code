@@ -223,6 +223,8 @@ def _validate_owned_destination(dest: Path, owned_dest: Path) -> None:
 
 
 def _validate_locked_source(vault: Path, owned_dest: Path) -> None:
+    # ponytail: bounded path rechecks; directory handles if external reparse
+    # races become a supported requirement.
     current_owned = _owned_destination(owned_dest.parent, vault)
     if current_owned != owned_dest:
         raise BackupError("vault kimliği lock edinildikten sonra değişti")
@@ -250,9 +252,11 @@ def _unique_bundle_path(dest: Path, stamp: str) -> Path:
 
 
 def _create_bundle_locked(vault: Path, dest: Path, *, now: float | None = None) -> Path:
+    _validate_locked_source(vault, dest)
     _ensure_full_history(vault)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
     final = _unique_bundle_path(dest, stamp)
+    _validate_locked_source(vault, dest)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{final.name}-", suffix=".tmp", dir=dest,
     )
@@ -268,6 +272,7 @@ def _create_bundle_locked(vault: Path, dest: Path, *, now: float | None = None) 
         # a later writer belongs to a subsequent point-in-time backup.
         if bundle_refs != source_refs:
             raise BackupError("Vault ref'leri bundle snapshot'ı sırasında değişti")
+        _validate_locked_source(vault, dest)
         os.replace(partial, final)
     finally:
         partial.unlink(missing_ok=True)
@@ -305,8 +310,10 @@ def _prune_bundles_locked(
     vault: Path, dest: Path, keep: int, *, preserve: Path | None = None,
 ) -> list[Path]:
     _validate_keep(keep)
+    _validate_locked_source(vault, dest)
     bundles = sorted(_bundle_files(dest), key=_bundle_sort_key, reverse=True)
     for bundle in bundles:
+        _validate_locked_source(vault, dest)
         _verify_bundle(vault, bundle)
     if preserve is None:
         retained = set(bundles[:keep])
@@ -322,6 +329,7 @@ def _prune_bundles_locked(
         if stale in retained:
             continue
         try:
+            _validate_locked_source(vault, dest)
             stale.unlink()
         except OSError as error:
             raise _PruneError(removed, error) from error

@@ -721,6 +721,62 @@ class VaultBackupTests(unittest.TestCase):
 
             self.assertFalse(list(dest.rglob("vault-*.bundle")))
 
+    def test_source_identity_is_rechecked_before_bundle_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            real_validate = vault_backup._validate_locked_source
+            calls = 0
+
+            def validate_then_replace(source: Path, owned: Path) -> None:
+                nonlocal calls
+                real_validate(source, owned)
+                calls += 1
+                if calls == 1:
+                    vault.rename(root / "old-vault")
+                    _init_repo(vault)
+
+            with mock.patch.object(
+                vault_backup,
+                "_validate_locked_source",
+                side_effect=validate_then_replace,
+            ):
+                with self.assertRaises(vault_backup.BackupError):
+                    vault_backup.create_bundle(vault, dest)
+
+            self.assertFalse(list(dest.rglob("vault-*.bundle")))
+
+    def test_namespace_replacement_is_rejected_before_temp_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            outside = root / "outside"
+            outside.mkdir()
+            _init_repo(vault)
+            real_unique = vault_backup._unique_bundle_path
+
+            def unique_then_replace(namespace: Path, stamp: str) -> Path:
+                result = real_unique(namespace, stamp)
+                namespace.rmdir()
+                try:
+                    namespace.symlink_to(outside, target_is_directory=True)
+                except OSError as error:
+                    self.skipTest(f"directory symlink unavailable: {error}")
+                return result
+
+            with mock.patch.object(
+                vault_backup,
+                "_unique_bundle_path",
+                side_effect=unique_then_replace,
+            ):
+                with self.assertRaises(vault_backup.BackupError):
+                    vault_backup.create_bundle(vault, dest)
+
+            self.assertFalse(list(outside.glob("vault-*.bundle")))
+
     def test_main_reports_ignored_files_outside_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
