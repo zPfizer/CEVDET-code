@@ -1,19 +1,22 @@
-"""Model çağrılarının deterministik muhasebesi: amaç, boyut, süre, sonuç.
+"""Kaydedilebilen model çağrıları: amaç, boyut, süre, sonuç.
 
-'Token nereye gidiyor?' sorusu ölçüm olmadan cevaplanamaz. Her `codex exec`
-çağrısı amaç etiketiyle günlük JSONL dosyasına düşer; özet CLI'dan okunur.
+'Token nereye gidiyor?' sorusu ölçüm olmadan cevaplanamaz. `codex exec`
+çağrıları amaç etiketiyle günlük JSONL dosyasına kaydedilmeye çalışılır.
+Özet CLI'dan okunur; eksik okumada toplamın eksik olduğu belirtilir.
 Kayıt katmanı asıl çağrının kaderini belirlemez: yazma hatasını çağıran yutar.
 """
 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator
 import datetime
 import json
 import os
 from pathlib import Path
 import re
 import stat
+import sys
 from typing import Any, BinaryIO, Sequence
 
 from file_lock import LockUnavailable, locked
@@ -214,28 +217,52 @@ def _iter_records(
     state_dir: Path,
     since: datetime.date,
     until: datetime.date | None = None,
-) -> list[dict[str, Any]]:
-    records = []
-    for path in sorted(Path(state_dir).glob("model-usage-*.jsonl")):
-        if _unsafe_usage_target(path):
-            continue
+) -> Iterator[dict[str, Any] | None]:
+    """Yield usable records; None marks an unreadable/invalid selected input."""
+    try:
+        paths = tuple(Path(state_dir).iterdir())
+    except FileNotFoundError:
+        return
+    except OSError:
+        yield None
+        return
+    for path in paths:
         day = _file_day(path)
         if day is None or day < since or (until is not None and day > until):
             continue
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeError):
-            continue
-        for line in lines:
-            if len(line) > MAX_RECORD_BYTES:
+            if _unsafe_usage_target(path):
+                yield None
                 continue
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict) and value.get("schema") == SCHEMA_VERSION:
-                records.append(value)
-    return records
+            with path.open("rb") as handle:
+                if not _usage_handle_matches(path, handle):
+                    yield None
+                    continue
+                discarding = False
+                while raw := handle.readline(MAX_RECORD_BYTES + 2):
+                    line = raw.removesuffix(b"\n").removesuffix(b"\r")
+                    if discarding or len(line) > MAX_RECORD_BYTES:
+                        if not discarding:
+                            yield None
+                        discarding = not raw.endswith(b"\n")
+                        continue
+                    try:
+                        value = json.loads(line.decode("utf-8"))
+                    except (UnicodeError, ValueError):
+                        yield None
+                        continue
+                    if (
+                        isinstance(value, dict)
+                        and type(value.get("schema")) is int
+                        and value["schema"] == SCHEMA_VERSION
+                    ):
+                        yield value
+                    else:
+                        yield None
+                if not _usage_handle_matches(path, handle):
+                    yield None
+        except OSError:
+            yield None
 
 
 def usage_summary(
@@ -243,25 +270,34 @@ def usage_summary(
     *,
     days: int = DEFAULT_SUMMARY_DAYS,
     now: datetime.datetime | None = None,
-) -> dict[str, dict[str, int]]:
-    """Amaç başına: çağrı, başarı, hata, toplam prompt karakteri, ortalama süre."""
+) -> tuple[dict[str, dict[str, int]], bool]:
+    """Return purpose totals and whether selected ledger reads were incomplete.
+
+    A complete read still covers recorded calls only: recording is best-effort.
+    """
     if days < 1 or days > KEEP_DAYS:
         raise ValueError("summary-window-out-of-retention")
     if _unsafe_usage_directory(Path(state_dir)):
-        return {}
+        return {}, True
     moment = now or datetime.datetime.now()
     since = moment.date() - datetime.timedelta(days=days - 1)
     summary: dict[str, dict[str, int]] = {}
+    incomplete = False
     for entry in _iter_records(state_dir, since, until=moment.date()):
+        if entry is None:
+            incomplete = True
+            continue
         try:
             prompt_chars = int(entry.get("prompt_chars", 0) or 0)
             duration_ms = int(entry.get("duration_ms", 0) or 0)
         except (TypeError, ValueError, OverflowError):
+            incomplete = True
             continue
         if not (
             0 <= prompt_chars <= MAX_METRIC_VALUE
             and 0 <= duration_ms <= MAX_METRIC_VALUE
         ):
+            incomplete = True
             continue
         purpose = str(entry.get("purpose", "unknown"))
         bucket = summary.setdefault(
@@ -275,7 +311,7 @@ def usage_summary(
             bucket["failed"] += 1
         bucket["prompt_chars"] += prompt_chars
         bucket["duration_ms"] += duration_ms
-    return summary
+    return summary, incomplete
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -285,13 +321,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--days", type=int, default=DEFAULT_SUMMARY_DAYS)
     args = parser.parse_args(argv)
     try:
-        summary = usage_summary(args.state_dir, days=args.days)
+        summary, incomplete = usage_summary(args.state_dir, days=args.days)
     except ValueError as exc:
         parser.error(str(exc))
+    if incomplete:
+        print("Uyarı: Kullanım raporu eksik; bazı kayıtlar okunamadı veya geçersiz.",
+              file=sys.stderr)
+    if not summary and incomplete:
+        print(f"Son {args.days} günün kayıtlı çağrı toplamı doğrulanamadı.")
+        return 1
     if not summary:
         print(f"Son {args.days} günde kayıtlı model çağrısı yok.")
         return 0
-    print(f"Son {args.days} gün — amaç başına model çağrıları:")
+    qualifier = "okunabilen kayıtlar (eksik)" if incomplete else "kayıtlı model çağrıları"
+    print(f"Son {args.days} gün — amaç başına {qualifier}:")
     print("| Amaç | Çağrı | Başarılı | Hatalı | Prompt (kchar) | Ort. süre (sn) |")
     print("| --- | --- | --- | --- | --- | --- |")
     for purpose in sorted(summary):
@@ -301,7 +344,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"| {purpose} | {bucket['calls']} | {bucket['ok']} | {bucket['failed']} "
             f"| {bucket['prompt_chars'] / 1000:.1f} | {average_s:.1f} |"
         )
-    return 0
+    return 1 if incomplete else 0
 
 
 if __name__ == "__main__":
