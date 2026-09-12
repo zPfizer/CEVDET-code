@@ -79,6 +79,10 @@ FLUSH_CONTINUATION_FIELDS = (
     "coverage_digest",
 )
 TREE_CLEANUP_FENCE_NAME = 'worker-tree-cleanup-unverified.json'
+REDRIVE_CONFLICT_REASONS = {
+    "redrive-conflict",
+    "redrive-identity-conflict",
+}
 
 
 def has_unverified_process_tree(state_dir: Path) -> bool:
@@ -1262,6 +1266,12 @@ def _has_redrive_marker(job: dict[str, Any]) -> bool:
     return isinstance(marker, int) and not isinstance(marker, bool)
 
 
+def _same_redrive_identity(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return left.get("kind") == right.get("kind") and left.get("payload") == right.get(
+        "payload"
+    )
+
+
 def _has_pending_redrive(state_dir: Path, *, job_id: str | None = None) -> bool:
     with locked(state_dir / "worker-queue"):
         for path in sorted((_job_root(state_dir) / "pending").glob("*.json")):
@@ -1586,7 +1596,7 @@ def redrive_dead_letter(
     redriven: list[str] = []
     skipped: list[tuple[str, str]] = []
     with locked(state_dir / "worker-queue"):
-        seen_redriven: set[str] = set()
+        seen_redriven: dict[str, dict[str, Any]] = {}
         for state in ("pending", "claimed", "running", "succeeded"):
             for path in sorted((_job_root(state_dir) / state).glob("*.json")):
                 try:
@@ -1598,7 +1608,7 @@ def redrive_dead_letter(
                     and (job_id is None or job["job_id"] == job_id)
                     and job["job_id"] not in seen_redriven
                 ):
-                    seen_redriven.add(job["job_id"])
+                    seen_redriven[job["job_id"]] = job
                     redriven.append(job["job_id"])
         for path in sorted((_job_root(state_dir) / "dead-letter").glob("*.json")):
             if job_id is not None and _job_id_from_path(path) != job_id:
@@ -1611,14 +1621,21 @@ def redrive_dead_letter(
             if job_id is not None and job["job_id"] != job_id:
                 continue
             if (
-                job.get("terminal_reason") == "redrive-conflict"
+                job.get("terminal_reason") in REDRIVE_CONFLICT_REASONS
                 and job.get("retryable") is False
             ):
                 skipped.append((job["job_id"], "redrive çakışması"))
                 continue
-            if job["job_id"] in seen_redriven:
+            active = seen_redriven.get(job["job_id"])
+            if active is not None:
                 # Persist the conflict so a later receipt prune cannot reopen it.
-                job["terminal_reason"] = "redrive-conflict"
+                # The ID may be reused for a different logical job; retain both
+                # records as an explicit unresolved identity conflict.
+                job["terminal_reason"] = (
+                    "redrive-conflict"
+                    if _same_redrive_identity(active, job)
+                    else "redrive-identity-conflict"
+                )
                 job["retryable"] = False
                 atomic_write_json(path, job)
                 skipped.append((job["job_id"], "redrive çakışması"))

@@ -432,49 +432,67 @@ class RedriveDeadLetterTests(unittest.TestCase):
 
     def test_redrive_does_not_duplicate_marked_active_job(self) -> None:
         for status in ("running", "succeeded"):
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
-                state = Path(temporary)
-                job_id = "a" * 32
-                if status == "running":
-                    _active_job(state, job_id, status)
-                else:
-                    _succeeded_job(
-                        state,
-                        job_id,
-                        payload={"reason": "active"},
-                        redriven_ts=1757500000,
+            for same_identity in (True, False):
+                with self.subTest(
+                    status=status, same_identity=same_identity
+                ), tempfile.TemporaryDirectory() as temporary:
+                    state = Path(temporary)
+                    job_id = "a" * 32
+                    active_payload = {"reason": "active"}
+                    dead_payload = (
+                        active_payload
+                        if same_identity
+                        else {"reason": "stale-copy"}
                     )
-                dead_letter = _dead_letter_job(
-                    state, job_id, payload={"reason": "stale-copy"}
-                )
+                    if status == "running":
+                        _active_job(
+                            state, job_id, status, payload=active_payload
+                        )
+                    else:
+                        _succeeded_job(
+                            state,
+                            job_id,
+                            payload=active_payload,
+                            redriven_ts=1757500000,
+                        )
+                    dead_letter = _dead_letter_job(
+                        state, job_id, payload=dead_payload
+                    )
 
-                redriven, skipped = workers.redrive_dead_letter(
-                    state, job_id=job_id
-                )
-
-                pending = state / "worker-jobs" / "pending" / dead_letter.name
-                saved = workers._load_job(dead_letter)
-                duplicate_pending = pending.exists()
-                dead_letter_stayed = dead_letter.is_file()
-
-                if status == "succeeded":
-                    (state / "worker-jobs" / "succeeded" / dead_letter.name).unlink()
-                    retried, retry_skipped = workers.redrive_dead_letter(
+                    redriven, skipped = workers.redrive_dead_letter(
                         state, job_id=job_id
                     )
-                    conflict_still_there = dead_letter.is_file()
 
-            self.assertEqual(redriven, [job_id])
-            self.assertEqual(skipped, [(job_id, "redrive çakışması")])
-            self.assertEqual(saved["terminal_reason"], "redrive-conflict")
-            self.assertFalse(duplicate_pending)
-            self.assertTrue(dead_letter_stayed)
-            if status == "succeeded":
-                self.assertEqual(retried, [])
-                self.assertEqual(
-                    retry_skipped, [(job_id, "redrive çakışması")]
+                    pending = state / "worker-jobs" / "pending" / dead_letter.name
+                    saved = workers._load_job(dead_letter)
+                    duplicate_pending = pending.exists()
+                    dead_letter_stayed = dead_letter.is_file()
+
+                    if status == "succeeded":
+                        (
+                            state / "worker-jobs" / "succeeded" / dead_letter.name
+                        ).unlink()
+                        retried, retry_skipped = workers.redrive_dead_letter(
+                            state, job_id=job_id
+                        )
+                        conflict_still_there = dead_letter.is_file()
+
+                self.assertEqual(redriven, [job_id])
+                self.assertEqual(skipped, [(job_id, "redrive çakışması")])
+                expected_reason = (
+                    "redrive-conflict"
+                    if same_identity
+                    else "redrive-identity-conflict"
                 )
-                self.assertTrue(conflict_still_there)
+                self.assertEqual(saved["terminal_reason"], expected_reason)
+                self.assertFalse(duplicate_pending)
+                self.assertTrue(dead_letter_stayed)
+                if status == "succeeded":
+                    self.assertEqual(retried, [])
+                    self.assertEqual(
+                        retry_skipped, [(job_id, "redrive çakışması")]
+                    )
+                    self.assertTrue(conflict_still_there)
 
     def test_cli_targeted_missing_job_returns_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
