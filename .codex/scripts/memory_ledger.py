@@ -75,9 +75,12 @@ _BATCH_CONTROL_PREFIX = (
     + r')@?[ \t]*'
 )
 _BATCH_CALL_PREFIX = r'(?:^[ \t]*|(?<=[&|<>()])[ \t]*)@?call[ \t]+@?[ \t]*'
+_BATCH_ELSE_PREFIX = r'(?<=\))[ \t]*@?else[ \t]+@?[ \t]*'
 _BATCH_COMMAND_PREFIX = (
     r'(?:^[ \t]*@?[ \t]*|(?<=[&|<>()])[ \t]*@?[ \t]*|'
     + _BATCH_CALL_PREFIX
+    + r'|'
+    + _BATCH_ELSE_PREFIX
     + r'|'
     + _BATCH_CONTROL_PREFIX
     + r')set[ \t]+'
@@ -870,6 +873,33 @@ def _powershell_credential_value_end(text: str, start: int) -> int | None:
     return index
 
 
+def _contains_unsupported_shell_expansion(text: str, start: int) -> bool:
+    quote: str | None = None
+    index = start
+    while index < len(text):
+        character = text[index]
+        if character in {'\r', '\n'}:
+            return False
+        if character == '\\' and quote != "'":
+            if index + 1 >= len(text):
+                return False
+            index += 2
+            continue
+        if character in {'"', "'"}:
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+            index += 1
+            continue
+        if quote != "'" and character == '$' and text[index + 1:index + 2] in {'{', '('}:
+            return True
+        if quote is None and character in {';', '&', '|', '<', '>'}:
+            return False
+        index += 1
+    return False
+
+
 def _replace_powershell_credential(match: re.Match[str]) -> str:
     if match.group('prefix').startswith('${') and not match.group('closing'):
         raise MemoryPreferenceError('memory-credential-container-unverifiable')
@@ -1184,7 +1214,7 @@ def sanitize_text(
         end = match.end()
         value_start = match.start('value')
         if (match.group('prefix').rstrip().endswith('=')
-                and text[value_start:value_start + 2] in {'${', '$('}):
+                and _contains_unsupported_shell_expansion(text, value_start)):
             raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
         if (text[value_start] in {'"', "'"}
                 or (match.group('prefix').rstrip().endswith('=')

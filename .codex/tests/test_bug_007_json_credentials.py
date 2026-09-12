@@ -633,6 +633,14 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 'DATABASE_PASSWORD=${UNSET:-FIRST_SECRET SECOND_SECRET}',
                 max_chars=None,
             )
+        with self.assertRaisesRegex(
+            ledger.MemoryPreferenceError,
+            '^memory-credential-container-unverifiable$',
+        ):
+            ledger.sanitize_text(
+                'DATABASE_PASSWORD=prefix${UNSET:-FIRST_SECRET SECOND_SECRET}',
+                max_chars=None,
+            )
 
     def test_batch_assignment_only_matches_command_positions(self) -> None:
         text = 'Please set DATABASE_PASSWORD=FIRST_SECRET then keep this decision'
@@ -711,6 +719,19 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         self.assertEqual(redactions, ('credential',))
         self.assertNotIn('FIRST_SECRET', sanitized)
         self.assertIn('keep this decision', sanitized)
+
+    def test_batch_else_assignment_is_bounded(self) -> None:
+        text = 'if 1==2 (echo no) else set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET'
+
+        sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+
+        self.assertEqual(
+            sanitized,
+            'if 1==2 (echo no) else set DATABASE_PASSWORD=<REDACTED>',
+        )
+        self.assertEqual(redactions, ('credential',))
+        self.assertNotIn('FIRST_SECRET', sanitized)
+        self.assertNotIn('SECOND_SECRET', sanitized)
 
     def test_unterminated_windows_batch_quote_does_not_use_later_line_quote(self) -> None:
         text = 'set "DATABASE_PASSWORD=FIRST_SECRET\nkeep this decision "quoted" tail'
