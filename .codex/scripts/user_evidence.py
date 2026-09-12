@@ -9,6 +9,8 @@ import json
 import re
 from typing import TypedDict
 
+from quote_grammar import QUOTED_CONTENT
+
 
 SOURCE = re.compile(r'<!-- user-source:\s*(\{[^\n]*\})\s*-->')
 EVIDENCE = re.compile(r'<!-- user-evidence:\s*(\{[^\n]*\})\s*-->')
@@ -117,8 +119,7 @@ def _evidence_record(value: Mapping[str, object]) -> EvidenceRecord | None:
 
 
 def _authored_quote(message: str, quote: str) -> bool:
-    # Reuse the privacy classifier's quote grammar after module initialization.
-    from memory_ledger import QUOTED_CONTENT
+    # Shares the privacy classifier's quote grammar via the quote_grammar leaf module.
     spans = list(QUOTED_CONTENT.finditer(message)) + list(re.finditer(
         r'<(untrusted_text|quoted_text|message_from_agent|tool_result|assistant)\b[^>]*>[\s\S]*?</\1>'
         r"|(?<!\w)'[^'\n]*'(?!\w)", message, re.I))
