@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import heapq
 import json
 import math
@@ -231,8 +232,16 @@ def _validate_worker_records(
                 ):
                     raise ValueError("worker-legacy-state-invalid")
             else:
-                _validate_job(path, record)
-        except (TypeError, ValueError):
+                validated = _validate_job(path, record)
+                if stage == "quarantined":
+                    payload_path = path.with_name(str(validated.get("payload_file", "")))
+                    if (
+                        not payload_path.is_file()
+                        or hashlib.sha256(payload_path.read_bytes()).hexdigest()
+                        != validated["payload_sha256"]
+                    ):
+                        raise ValueError("worker-quarantine-payload-invalid")
+        except (OSError, TypeError, UnicodeError, ValueError):
             raise OSError("worker-record-invalid") from None
 
 
