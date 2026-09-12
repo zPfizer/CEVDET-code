@@ -618,6 +618,44 @@ class StaleReviewTests(unittest.TestCase):
             finally:
                 link.unlink(missing_ok=True)
 
+    def test_hard_linked_runtime_locks_fail_closed_before_acquisition(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            vault.mkdir()
+            (vault / "knowledge" / "concepts").mkdir(parents=True)
+            target = vault / "report.md"
+            controls = vault / ".codex" / "private-memory" / "controls"
+            state_dir = vault / ".codex" / "scripts" / ".state"
+            controls.mkdir(parents=True)
+            state_dir.mkdir(parents=True)
+
+            for relative, outside_name in (
+                (Path(".codex/scripts/.state/compile.lock"), "outside-compile.lock"),
+                (
+                    Path(".codex/private-memory/controls/suppressions.lock"),
+                    "outside-suppressions.lock",
+                ),
+            ):
+                with self.subTest(relative=relative):
+                    outside = root / outside_name
+                    outside.write_bytes(b"")
+                    link = vault / relative
+                    try:
+                        os.link(outside, link)
+                    except (OSError, NotImplementedError) as exc:
+                        self.skipTest(f"hard link unavailable: {exc}")
+                    try:
+                        with self.assertRaisesRegex(
+                            ledger.MemoryPreferenceError,
+                            "stale-review-runtime-path-invalid",
+                        ):
+                            stale_review.write_report(vault, output=target)
+                        self.assertFalse(target.exists())
+                        self.assertEqual(outside.read_bytes(), b"")
+                    finally:
+                        link.unlink(missing_ok=True)
+
     def test_custom_report_target_rejects_linked_parent_inside_vault(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
