@@ -357,7 +357,11 @@ def source_link_details(text: str) -> str:
 
 def _source_links(text: str) -> set[str]:
     body = _markdown_body(text)
-    return {f"{match.group(1)}.md" for match in SOURCE_LINK.finditer(body)}
+    return {
+        f"{source.group(1)}.md"
+        for match in _wikilinks(body)
+        if (source := SOURCE_LINK.fullmatch(match.group(0))) is not None
+    }
 
 
 def _connects(text: str) -> list[str] | None:

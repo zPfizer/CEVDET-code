@@ -250,7 +250,10 @@ def bind_evidence(
             if record:
                 records[record['id']] = record
                 lines.append(f'- {claim} [[daily/{day}#user-{record["id"]}|Kullanıcı dayanağı; kapsam: {record["scope"]}]]')
-            elif (retained := prior.get(normalize(claim))) is not None:
+            elif (
+                visible_line.strip()
+                and (retained := prior.get(normalize(claim))) is not None
+            ):
                 # Only an unchanged claim with a freshly verified source may survive
                 # transcript compaction. Model-supplied evidence identities stay ignored.
                 records[retained['id']] = retained
