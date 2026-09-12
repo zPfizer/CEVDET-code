@@ -227,6 +227,27 @@ class VaultBackupTests(unittest.TestCase):
             self.assertTrue(current.exists())
             self.assertGreater(bundle_size, 0)
 
+    def test_clock_rollback_retains_latest_created_bundles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+
+            first = vault_backup.create_bundle(vault, dest, now=1_900_000_000)
+            second, removed_second, _ = vault_backup._create_and_prune(
+                vault, dest, keep=2, now=1_600_000_000,
+            )
+            third, removed_third, _ = vault_backup._create_and_prune(
+                vault, dest, keep=2, now=1_600_000_001,
+            )
+
+            self.assertEqual(removed_second, [])
+            self.assertEqual(removed_third, [first])
+            self.assertFalse(first.exists())
+            self.assertTrue(second.exists())
+            self.assertTrue(third.exists())
+
     def test_same_second_newer_commit_survives_prune(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -443,6 +464,29 @@ class VaultBackupTests(unittest.TestCase):
             self.assertIn("Yedek alındı:", output.getvalue())
             self.assertIn("çalışma ağacı özeti alınamadı", output.getvalue())
             self.assertNotIn("YEDEK BAŞARISIZ", output.getvalue())
+
+    def test_prune_failure_after_publish_is_reported_as_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            output = StringIO()
+
+            with mock.patch.object(
+                vault_backup,
+                "_prune_bundles_locked",
+                side_effect=PermissionError("yedek kilitli"),
+            ), redirect_stdout(output):
+                exit_code = vault_backup.main(
+                    ["--vault", str(vault), "--dest", str(dest), "--keep", "1"],
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("Yedek alındı:", output.getvalue())
+            self.assertIn("budaması tamamlanamadı", output.getvalue())
+            self.assertNotIn("YEDEK BAŞARISIZ", output.getvalue())
+            self.assertTrue(list(dest.rglob("vault-*.bundle")))
 
     def test_main_reports_ignored_files_outside_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

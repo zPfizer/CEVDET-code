@@ -30,6 +30,23 @@ class BackupError(RuntimeError):
     """Yedek üretilemedi; mesaj kullanıcıya gösterilebilir."""
 
 
+class _PruneError(BackupError):
+    def __init__(self, removed: list[Path], cause: OSError) -> None:
+        super().__init__(f"eski yedek silinemedi: {cause}")
+        self.removed = removed
+
+
+class _CompletedBackupWarning(RuntimeError):
+    def __init__(
+        self, bundle: Path, removed: list[Path], bundle_size: int, cause: BaseException,
+    ) -> None:
+        super().__init__(f"bundle yayımlandı ancak budama başarısız: {cause}")
+        self.bundle = bundle
+        self.removed = removed
+        self.bundle_size = bundle_size
+        self.cause = cause
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     command = ["git", "-C", str(repo), *args]
     try:
@@ -146,14 +163,13 @@ def _prepare_dest(vault: Path, dest: Path) -> tuple[Path, Path]:
 
 
 def _unique_bundle_path(dest: Path, stamp: str) -> Path:
-    matching = [
-        path for path in dest.glob(f"vault-{stamp}*.bundle")
-        if (match := BUNDLE_NAME.fullmatch(path.name)) is not None
-        and match.group(1) == stamp
+    bundles = [
+        path for path in dest.glob("vault-*.bundle")
+        if BUNDLE_NAME.fullmatch(path.name)
     ]
-    if not matching:
+    if not bundles:
         return dest / f"vault-{stamp}.bundle"
-    suffix = max(_bundle_sort_key(path)[1] for path in matching) + 1
+    suffix = max(_bundle_sort_key(path)[0] for path in bundles) + 1
     return dest / f"vault-{stamp}-{suffix}.bundle"
 
 
@@ -184,11 +200,11 @@ def create_bundle(vault: Path, dest: Path, *, now: float | None = None) -> Path:
         return _create_bundle_locked(vault, owned_dest, now=now)
 
 
-def _bundle_sort_key(path: Path) -> tuple[str, int]:
+def _bundle_sort_key(path: Path) -> tuple[int, str]:
     match = BUNDLE_NAME.fullmatch(path.name)
     if match is None:
         raise ValueError(f"geçersiz bundle adı: {path.name}")
-    return match.group(1), int(match.group(2) or "0")
+    return int(match.group(2) or "0"), match.group(1)
 
 
 def _validate_keep(keep: int) -> None:
@@ -221,7 +237,10 @@ def _prune_bundles_locked(
     for stale in bundles:
         if stale in retained:
             continue
-        stale.unlink()
+        try:
+            stale.unlink()
+        except OSError as error:
+            raise _PruneError(removed, error) from error
         removed.append(stale)
     return removed
 
@@ -242,7 +261,16 @@ def _create_and_prune(
     with locked(_lock_target(owned_dest)):
         _validate_owned_destination(owned_dest.parent, owned_dest)
         bundle = _create_bundle_locked(vault, owned_dest, now=now)
-        removed = _prune_bundles_locked(owned_dest, keep, preserve=bundle)
+        try:
+            removed = _prune_bundles_locked(owned_dest, keep, preserve=bundle)
+        except _PruneError as error:
+            raise _CompletedBackupWarning(
+                bundle, error.removed, bundle.stat().st_size, error,
+            ) from error
+        except OSError as error:
+            raise _CompletedBackupWarning(
+                bundle, [], bundle.stat().st_size, error,
+            ) from error
         bundle_size = bundle.stat().st_size
     return bundle, removed, bundle_size
 
@@ -285,8 +313,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     vault = Path(args.vault).resolve()
     dest = args.dest if args.dest is not None else vault.parent / f"{vault.name}-yedek"
+    prune_warning: _CompletedBackupWarning | None = None
     try:
         bundle, removed, bundle_size = _create_and_prune(vault, dest, args.keep)
+    except _CompletedBackupWarning as warning:
+        bundle, removed, bundle_size = (
+            warning.bundle, warning.removed, warning.bundle_size,
+        )
+        prune_warning = warning
     except BackupError as error:
         print(f"YEDEK BAŞARISIZ: {error}")
         return 1
@@ -303,6 +337,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Yedek alındı: {bundle} ({size_mb:.1f} MB)")
     if removed:
         print(f"Budanan eski yedek: {len(removed)}")
+    if prune_warning is not None:
+        print(f"UYARI: eski yedek budaması tamamlanamadı — {prune_warning.cause}")
     if status_error is not None:
         print(f"UYARI: çalışma ağacı özeti alınamadı — {status_error}")
     elif tracked or untracked or ignored:
