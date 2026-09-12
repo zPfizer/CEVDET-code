@@ -218,6 +218,30 @@ class StaleReviewTests(unittest.TestCase):
                     )
             self.assertFalse(target.exists())
 
+    def test_review_revalidates_derived_note_before_return(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            note = _note(vault, "degisen-not", updated="2026-01-02", sources=[])
+            real_review = stale_review._review_notes
+
+            def review_then_mutate(*args: object, **kwargs: object) -> list[stale_review.StaleFinding]:
+                findings = real_review(*args, **kwargs)
+                note.write_text(
+                    note.read_text(encoding="utf-8") + "\nsonradan düzenlendi\n",
+                    encoding="utf-8",
+                )
+                return findings
+
+            with mock.patch.object(
+                stale_review,
+                "_review_notes",
+                new=review_then_mutate,
+            ):
+                with self.assertRaisesRegex(
+                    ledger.MemoryPreferenceError, "stale-review-note-changed"
+                ):
+                    stale_review.review(vault, now=datetime.date(2026, 9, 11))
+
     def test_derived_note_drift_before_publish_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

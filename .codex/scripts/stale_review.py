@@ -511,14 +511,20 @@ def review(
     _validate_runtime_paths(vault)
     today = now or datetime.date.today()
     with memory_read(vault) as memory:
+        observations: dict[Path, tuple[int, int, int, int, int]] = {}
+        note_observations: dict[Path, tuple[int, int, int, int, int]] = {}
+        notes = _snapshot_notes(vault, memory, note_observations)
         findings = _review_notes(
             vault,
-            _snapshot_notes(vault, memory),
+            notes,
             days=days,
             today=today,
             memory=memory,
+            observations=observations,
         )
         memory.check_knowledge_snapshot()
+        _validate_note_observations(vault, note_observations)
+        _validate_source_observations(vault, observations)
         return findings
 
 
