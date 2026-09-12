@@ -314,6 +314,38 @@ class HealthReportTests(unittest.TestCase):
             self.assertFalse(vault.exists())
             self.assertFalse(target.exists())
 
+    def test_missing_runtime_state_is_rejected_before_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary) / "unrelated-directory"
+            vault.mkdir()
+            target = vault / "report.md"
+
+            with self.assertRaisesRegex(ValueError, "vault-runtime-invalid"):
+                health_report.write_report(vault, target)
+
+            self.assertFalse(target.exists())
+
+    def test_linked_runtime_state_ancestor_is_rejected_before_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            outside = root / "outside-runtime"
+            vault.mkdir()
+            outside.mkdir()
+            link = vault / ".codex"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            target = vault / "report.md"
+            try:
+                with self.assertRaisesRegex(ValueError, "vault-runtime-invalid"):
+                    health_report.write_report(vault, target)
+                self.assertFalse(target.exists())
+            finally:
+                link.unlink(missing_ok=True)
+
     def test_orphan_hook_input_prevents_clean_queue_claim(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

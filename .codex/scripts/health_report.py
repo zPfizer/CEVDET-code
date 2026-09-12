@@ -95,6 +95,24 @@ def _validate_vault(vault: Path) -> None:
         raise ValueError("vault-invalid")
 
 
+def _validate_runtime_paths(vault: Path) -> None:
+    current = vault
+    for part in (".codex", "scripts", ".state"):
+        current /= part
+        try:
+            current_stat = current.lstat()
+            resolved = current.resolve(strict=False)
+        except (FileNotFoundError, OSError, RuntimeError) as exc:
+            raise ValueError("vault-runtime-invalid") from exc
+        if (
+            stat.S_ISLNK(current_stat.st_mode)
+            or not stat.S_ISDIR(current_stat.st_mode)
+            or current.is_junction()
+            or not resolved.is_relative_to(vault)
+        ):
+            raise ValueError("vault-runtime-invalid")
+
+
 def _bounded_json(path: Path) -> dict[str, Any] | None:
     try:
         if path.stat().st_size > MAX_RECORD_BYTES:
@@ -476,6 +494,10 @@ def render(
     now: datetime.datetime | None = None,
     output: Path | None = None,
 ) -> str:
+    vault = Path(vault)
+    _validate_vault(vault)
+    vault = vault.resolve()
+    _validate_runtime_paths(vault)
     state_dir = state_dir_of(vault)
     moment = now or datetime.datetime.now()
     today = moment.strftime("%Y-%m-%d")
@@ -567,6 +589,7 @@ def write_report(
     vault = Path(vault)
     _validate_vault(vault)
     vault = vault.resolve()
+    _validate_runtime_paths(vault)
     target = output if output is not None else _default_report_target(vault)
     atomic_write_text(target, render(vault, now=now, output=target), overwrite=overwrite)
     return target
