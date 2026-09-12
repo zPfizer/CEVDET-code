@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import heapq
 import json
 import math
 from pathlib import Path
@@ -134,15 +135,18 @@ def _dead_letter_row(path: Path) -> dict[str, Any]:
     }
 
 
-def worker_counts(state_dir: Path) -> dict[str, int]:
+def worker_counts(
+    state_dir: Path, *, include_dead_letter: bool = True
+) -> dict[str, int]:
     jobs_roots = _worker_job_roots(state_dir)
     counts = {stage: 0 for stage in WORKER_STAGES}
     for jobs in jobs_roots:
         for stage in WORKER_STAGES:
             counts[stage] += len(_json_files(jobs / stage))
-    counts["dead-letter"] = len(
-        _all_dead_letter_rows(state_dir, jobs=jobs_roots)
-    )
+    if include_dead_letter and jobs_roots:
+        counts["dead-letter"] = _dead_letter_summary(
+            state_dir, jobs=jobs_roots
+        )[0]
     return counts
 
 
@@ -224,19 +228,38 @@ def _json_files(
 def _all_dead_letter_rows(
     state_dir: Path, *, jobs: Sequence[Path] | None = None
 ) -> list[dict[str, Any]]:
+    return _dead_letter_summary(state_dir, jobs=jobs)[1]
+
+
+def _dead_letter_summary(
+    state_dir: Path,
+    *,
+    jobs: Sequence[Path] | None = None,
+) -> tuple[int, list[dict[str, Any]]]:
     jobs = _worker_job_roots(state_dir) if jobs is None else jobs
-    rows = []
+    count = 0
+    sequence = 0
+    newest: list[tuple[tuple[bool, float, int], dict[str, Any]]] = []
     for jobs_root in jobs:
         for path in _json_files(jobs_root / "dead-letter"):
             row = _dead_letter_row(path)
-            if not row.get("recovered", False):
-                rows.append(row)
+            if row.get("recovered", False):
+                continue
+            count += 1
+            sequence += 1
+            rank = (*_timestamp_sort_key(row["finished_ts"]), sequence)
+            item = (rank, row)
+            if len(newest) < DEAD_LETTER_LIMIT:
+                heapq.heappush(newest, item)
+            elif rank > newest[0][0]:
+                heapq.heapreplace(newest, item)
+    rows = [item[1] for item in newest]
     rows.sort(key=lambda row: _timestamp_sort_key(row["finished_ts"]), reverse=True)
-    return rows
+    return count, rows
 
 
 def dead_letter_rows(state_dir: Path) -> list[dict[str, Any]]:
-    return _all_dead_letter_rows(state_dir)[:DEAD_LETTER_LIMIT]
+    return _dead_letter_summary(state_dir)[1]
 
 
 def worker_fences(state_dir: Path) -> tuple[str, ...]:
@@ -420,10 +443,11 @@ def render(
     selected_output = output if output is not None else vault / PANEL_RELATIVE
     created = _previous_created(selected_output, today)
 
-    counts = worker_counts(state_dir)
+    counts = worker_counts(state_dir, include_dead_letter=False)
     markers = marker_counts(state_dir)
     last_run, last_status = compile_summary(state_dir)
-    dead_rows = dead_letter_rows(state_dir)
+    dead_count, dead_rows = _dead_letter_summary(state_dir)
+    counts["dead-letter"] = dead_count
     fences = worker_fences(state_dir)
 
     lines = [
@@ -497,7 +521,7 @@ def write_report(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vault", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--vault", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument(
         "--overwrite",
