@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 from pathlib import Path
 import re
 from typing import Any, Sequence
@@ -29,6 +30,9 @@ WORKER_STAGES = (
 )
 DEAD_LETTER_LIMIT = 10
 MAX_RECORD_BYTES = 131072
+_MAX_TIMESTAMP = datetime.datetime.max.replace(
+    tzinfo=datetime.timezone.utc,
+).timestamp()
 _CREATED = re.compile(r"(?m)^created: (?P<value>.+)$")
 
 
@@ -59,7 +63,7 @@ def dead_letter_rows(state_dir: Path) -> list[dict[str, Any]]:
                 "finished_ts": record.get("finished_ts", 0),
             }
         )
-    rows.sort(key=lambda row: row["finished_ts"], reverse=True)
+    rows.sort(key=lambda row: _timestamp_sort_key(row["finished_ts"]), reverse=True)
     return rows[:DEAD_LETTER_LIMIT]
 
 
@@ -110,14 +114,34 @@ def flush_state_count(state_dir: Path) -> int:
     )
 
 
-def _format_ts(value: Any) -> str:
+def _timestamp_value(value: Any) -> float | None:
     try:
         stamp = float(value)
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if (
+        isinstance(value, bool)
+        or not math.isfinite(stamp)
+        or stamp <= 0
+        or stamp > _MAX_TIMESTAMP
+    ):
+        return None
+    return stamp
+
+
+def _timestamp_sort_key(value: Any) -> tuple[bool, float]:
+    stamp = _timestamp_value(value)
+    return stamp is not None, stamp or 0.0
+
+
+def _format_ts(value: Any) -> str:
+    stamp = _timestamp_value(value)
+    if stamp is None:
         return "?"
-    if stamp <= 0:
+    try:
+        return datetime.datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
         return "?"
-    return datetime.datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M")
 
 
 def _previous_created(output: Path, fallback: str) -> str:

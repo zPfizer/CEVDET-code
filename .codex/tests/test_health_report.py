@@ -74,6 +74,37 @@ class HealthReportTests(unittest.TestCase):
         self.assertIn("kayıt yok (temiz)", text)
         self.assertIn("Derleyici son çalışma: hiç", text)
 
+    def test_malformed_dead_letter_timestamps_sort_and_render_as_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            dead_letter = state / "worker-jobs" / "dead-letter"
+            records = (
+                ("old-job", 1),
+                ("new-job", "1757500000"),
+                ("null-job", None),
+                ("nan-job", float("nan")),
+                ("inf-job", float("inf")),
+                ("huge-job", 10**1000),
+            )
+            for job_id, finished_ts in records:
+                (dead_letter / f"{job_id}.json").write_text(
+                    json.dumps({"job_id": job_id, "finished_ts": finished_ts}),
+                    encoding="utf-8",
+                )
+
+            rows = health_report.dead_letter_rows(state)
+            text = health_report.render(vault, now=datetime.datetime(2026, 9, 11))
+
+        self.assertEqual([row["job_id"] for row in rows[:2]], ["new-job", "old-job"])
+        self.assertEqual(health_report._format_ts(None), "?")
+        self.assertEqual(health_report._format_ts(float("nan")), "?")
+        self.assertEqual(health_report._format_ts(10**1000), "?")
+        self.assertIn("| null-job | ? | ? |", text)
+        self.assertIn("| nan-job | ? | ? |", text)
+        self.assertIn("| inf-job | ? | ? |", text)
+        self.assertIn("| huge-job | ? | ? |", text)
+
     def test_rewrite_preserves_created_date(self) -> None:
         # `created` alanı notun kimliğidir; panel her üretimde bugüne
         # kaymamalı, ilk üretim tarihinde sabit kalmalı.
