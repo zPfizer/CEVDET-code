@@ -14,6 +14,21 @@ from test_second_brain_acceptance import _deterministic_compiler, _seed_vault
 
 
 class CompileModelBudgetTests(unittest.TestCase):
+    def test_run_codex_uses_explicit_active_usage_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            active_state = root / 'active'
+            stage = active_state / 'compile-stage-test'
+            stage.mkdir(parents=True)
+            fallback_state = root / 'fallback'
+
+            with patch.object(compiler, 'STATE_DIR', fallback_state), \
+                    patch.object(compiler.codex_runner, '_bounded_exec', return_value=(None, None)):
+                self.assertIsNone(compiler._run_codex('prompt', stage, state_dir=active_state))
+
+            self.assertTrue(list(active_state.glob('model-usage-*.jsonl')))
+            self.assertEqual(list(fallback_state.glob('model-usage-*.jsonl')), [])
+
     def test_run_codex_accounts_for_file_backed_prompt(self):
         with tempfile.TemporaryDirectory() as temporary:
             stage = Path(temporary)
@@ -47,7 +62,7 @@ class CompileModelBudgetTests(unittest.TestCase):
             state_dir = vault / '.codex/scripts/.state'
             calls = []
 
-            def invalid_generation(_prompt, stage):
+            def invalid_generation(_prompt, stage, **_kwargs):
                 calls.append('model')
                 (stage / 'knowledge/index.md').write_text('broken-index\n', encoding='utf-8')
 
@@ -75,7 +90,7 @@ class CompileModelBudgetTests(unittest.TestCase):
             _seed_vault(vault)
             state_dir = vault / '.codex/scripts/.state'
 
-            def invalid_generation(_prompt, stage):
+            def invalid_generation(_prompt, stage, **_kwargs):
                 (stage / 'knowledge/index.md').write_text('broken-index\n', encoding='utf-8')
 
             with patch.object(compiler, 'VAULT_ROOT', vault), \
@@ -95,7 +110,7 @@ class CompileModelBudgetTests(unittest.TestCase):
             state_dir = vault / '.codex/scripts/.state'
             calls = []
 
-            def valid_generation(prompt, stage):
+            def valid_generation(prompt, stage, **_kwargs):
                 calls.append(prompt)
                 return _deterministic_compiler(prompt, stage)
 
@@ -123,7 +138,7 @@ class CompileModelBudgetTests(unittest.TestCase):
             state_dir = vault / '.codex/scripts/.state'
             calls = []
 
-            def valid_generation(prompt, stage):
+            def valid_generation(prompt, stage, **_kwargs):
                 calls.append(prompt)
                 return _deterministic_compiler(prompt, stage)
 

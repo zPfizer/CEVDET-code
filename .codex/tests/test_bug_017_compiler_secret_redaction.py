@@ -25,7 +25,7 @@ class CompilerSecretRedactionTests(unittest.TestCase):
             (vault / "daily/2026-09-04.md").unlink()
             state_dir = vault / ".codex/scripts/.state"
 
-            def unexpected_model(_prompt, _stage):
+            def unexpected_model(_prompt, _stage, **_kwargs):
                 raise AssertionError("secret path reached model")
 
             with patch.object(memory_compile, "VAULT_ROOT", vault), \
@@ -40,7 +40,11 @@ class CompilerSecretRedactionTests(unittest.TestCase):
 
             with patch.object(memory_compile, "VAULT_ROOT", vault), \
                     patch.object(memory_compile, "STATE_DIR", state_dir), \
-                    patch.object(memory_compile, "_run_codex", side_effect=_deterministic_compiler), \
+                    patch.object(
+                        memory_compile,
+                        "_run_codex",
+                        side_effect=lambda prompt, stage, **_kwargs: _deterministic_compiler(prompt, stage),
+                    ), \
                     patch.object(memory_compile, "_checkpoint_machine_outputs", return_value=("clean", "")):
                 result = memory_compile.main(["--strict", "--max-calls", "1"])
 
@@ -77,7 +81,7 @@ class CompilerSecretRedactionTests(unittest.TestCase):
                 original_source = (vault / "daily/2026-09-03.md").read_bytes()
                 calls = []
 
-                def unexpected_model(_prompt, _stage):
+                def unexpected_model(_prompt, _stage, **_kwargs):
                     calls.append("model")
                     raise AssertionError("unsafe legacy state reached model")
 
@@ -149,7 +153,7 @@ class CompilerSecretRedactionTests(unittest.TestCase):
                 state_dir = vault / ".codex/scripts/.state"
                 calls = []
 
-                def unexpected_model(_prompt, _stage):
+                def unexpected_model(_prompt, _stage, **_kwargs):
                     calls.append("model")
                     raise AssertionError("secret path reached model")
 
@@ -182,7 +186,7 @@ class CompilerSecretRedactionTests(unittest.TestCase):
             original = unsafe.read_bytes()
             calls = []
 
-            def unexpected_model(_prompt, _stage):
+            def unexpected_model(_prompt, _stage, **_kwargs):
                 calls.append("model")
                 raise AssertionError("secret path reached model")
 

@@ -1487,7 +1487,12 @@ def _promote_changes(
     compile_state.save_publication(state_dir, journal)
 
 
-def _run_codex(prompt: str, stage: Path) -> str | None:
+def _run_codex(
+    prompt: str,
+    stage: Path,
+    *,
+    state_dir: Path | None = None,
+) -> str | None:
     """Rewrite the staging tree in place; only the failure reason comes back.
 
     The prompt travels as a file inside the stage so the argv stays short; the
@@ -1505,7 +1510,7 @@ def _run_codex(prompt: str, stage: Path) -> str | None:
             timeout=900,
             stage=stage,
             propagate_cleanup_error=True,
-            usage_state_dir=STATE_DIR,
+            usage_state_dir=state_dir or STATE_DIR,
             usage_prompt_chars=len(prompt),
             usage_output_optional=True,
             purpose=(
@@ -1552,6 +1557,11 @@ def _compile_one(
     runner: Runner | None = None,
     memory_root: Path | None = None,
 ) -> tuple[str | None, str]:
+    def run_model(prompt: str, stage: Path) -> str | None:
+        if runner is not None:
+            return runner(prompt, stage)
+        return _run_codex(prompt, stage, state_dir=state_dir)
+
     stage: Path | None = None
     phase = "prepare"
     try:
@@ -1615,7 +1625,7 @@ def _compile_one(
             sorted(taxonomy.canonical),
         )
         phase = "run-codex"
-        error = (runner or _run_codex)(prompt, stage)
+        error = run_model(prompt, stage)
         if error is not None:
             return error, error
         if load_suppressed_hashes(private_root) != hashes:
@@ -1629,7 +1639,7 @@ def _compile_one(
             vault_root / ".codex" / "tag-taxonomy.json",
             before,
             previous_texts,
-            runner=runner,
+            runner=run_model,
         )
         if repair_error is not None:
             return "schema-repair", repair_error
@@ -2251,7 +2261,7 @@ def _run_locked(
         if model_calls_used >= max_calls:
             return "model-call-budget-exhausted"
         model_calls_used += 1
-        return _run_codex(prompt, stage)
+        return _run_codex(prompt, stage, state_dir=state_dir)
 
     selected = changed[:max_calls]
     if dry_run:

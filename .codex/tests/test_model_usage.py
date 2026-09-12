@@ -266,6 +266,15 @@ class ModelUsageTests(unittest.TestCase):
             root = Path(temporary)
             outside = root / "outside"
             outside.mkdir()
+            outside_ledger = outside / "model-usage-20260911.jsonl"
+            outside_ledger.write_text(json.dumps({
+                "schema": 1,
+                "purpose": "outside",
+                "prompt_chars": 999,
+                "duration_ms": 1,
+                "outcome": "ok",
+            }) + "\n", encoding="utf-8")
+            before = outside_ledger.read_text(encoding="utf-8")
             state = root / "state"
             try:
                 state.symlink_to(outside, target_is_directory=True)
@@ -281,7 +290,11 @@ class ModelUsageTests(unittest.TestCase):
                 now=datetime.datetime(2026, 9, 11, 12, 0),
             )
 
-            self.assertEqual(list(outside.iterdir()), [])
+            summary = model_usage.usage_summary(
+                state, days=7, now=datetime.datetime(2026, 9, 11, 12, 0)
+            )
+            self.assertEqual(summary, {})
+            self.assertEqual(outside_ledger.read_text(encoding="utf-8"), before)
 
     def test_summary_skips_records_with_invalid_numeric_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

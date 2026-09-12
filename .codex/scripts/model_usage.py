@@ -180,6 +180,8 @@ def usage_summary(
     """Amaç başına: çağrı, başarı, hata, toplam prompt karakteri, ortalama süre."""
     if days < 1 or days > KEEP_DAYS:
         raise ValueError("summary-window-out-of-retention")
+    if _unsafe_usage_directory(Path(state_dir)):
+        return {}
     moment = now or datetime.datetime.now()
     since = moment.date() - datetime.timedelta(days=days - 1)
     summary: dict[str, dict[str, int]] = {}
