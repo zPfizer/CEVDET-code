@@ -1275,6 +1275,7 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                 "Önceden veri saklama seçeneğini uygun görmüş müydüm?",
                 "Daha önce veri saklama seçeneğinin sorunlu olduğunu görmüş müydük",
                 "Daha önce veri saklama konusunda hangi mantığı benimsemiştik",
+                '“Daha önce ne karar vermiştik?” örneği bir yana; daha önce veri saklama konusunda ne karar vermiştik?',
                 "Daha önce veri saklama için hangi seçeneği uygun görmüştük?",
                 "Önceden veri saklama için hangi seçeneği uygun görmüştüm?",
                 "Güncel veri saklama kararı ve daha önce veri saklama konusunda ne karar vermiştik?",
@@ -1327,6 +1328,11 @@ Geçmiş veri saklama kararı: uzun günlükler.
                 "Güncel veri saklama seçeneğini öner; daha önce ne seçtiğimizi unutmuştuk",
                 "Güncel veri saklama seçeneğini öner; daha önce ne seçeceğimizi unutmuştuk",
                 "Güncel veri saklama seçeneğini öner; daha önce hangi seçeneğin iyi olduğunu düşünerek karar vermiştik",
+                '“Daha önce veri saklama konusunda ne karar vermiştik?” cümlesini çevir',
+                '"Daha önce veri saklama konusunda ne karar vermiştik?" cümlesini çevir',
+                '`Daha önce veri saklama konusunda ne karar vermiştik?` cümlesini çevir',
+                '```text\nDaha önce veri saklama konusunda ne karar vermiştik?\n```\nBu cümleyi çevir',
+                '> Daha önce veri saklama konusunda ne karar vermiştik?\nBu cümleyi çevir',
             ):
                 with self.subTest(query=query):
                     terms = retrieval._retrieval_terms(query)

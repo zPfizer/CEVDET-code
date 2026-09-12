@@ -30,6 +30,7 @@ from memory_ledger import (
 )
 from knowledge_schema import CLAIM_ROW, parse_frontmatter
 from profile_guard import PROFILE_RELATIVE
+from quote_grammar import QUOTED_CONTENT
 from state_store import atomic_write_text
 from vault_corpus import ARCHIVE_ROOT, TEMPLATES_ROOT, COMPANION_ROOT, DAILY_ROOT, RETRIEVAL_CONTENT_ROOTS, markdown_paths
 
@@ -1568,15 +1569,19 @@ def _retrospective_question_terms(normalized: str) -> frozenset[str]:
 
 
 def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
+    quoted_spans = tuple((match.start(), match.end()) for match in QUOTED_CONTENT.finditer(normalized))
     return [
         match for match in HISTORY_TURKISH_RETROSPECTIVE_QUERY.finditer(normalized)
-        if normalized[match.end():].lstrip().startswith("?")
-        or re.search(rf"\b(?:{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY}|neydi)$", match.group())
-        or (
-            (decision := HISTORY_TURKISH_DECISION_PAST.search(match.group()))
-            # Direct wh + optional object + decision predicate. Remote wh-words
-            # inside a background explanation are not question evidence.
-            and _retrospective_question_terms(" ".join(match.group()[:decision.start()].split()[-2:]))
+        if not any(start <= match.start() < end for start, end in quoted_spans)
+        and (
+            normalized[match.end():].lstrip().startswith("?")
+            or re.search(rf"\b(?:{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY}|neydi)$", match.group())
+            or (
+                (decision := HISTORY_TURKISH_DECISION_PAST.search(match.group()))
+                # Direct wh + optional object + decision predicate. Remote wh-words
+                # inside a background explanation are not question evidence.
+                and _retrospective_question_terms(" ".join(match.group()[:decision.start()].split()[-2:]))
+            )
         )
     ]
 
