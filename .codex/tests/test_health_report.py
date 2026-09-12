@@ -371,6 +371,46 @@ class HealthReportTests(unittest.TestCase):
         self.assertIn("Worker kurtarma bekliyor", text)
         self.assertNotIn("Boş — takılı iş yok.", text)
 
+    def test_malformed_hook_input_aborts_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            (state / "hookin-broken.json").write_text("{", encoding="utf-8")
+            target = vault / "report.md"
+
+            with self.assertRaisesRegex(OSError, "worker-hook-input-invalid"):
+                health_report.write_report(vault, target)
+            self.assertFalse(target.exists())
+
+    def test_stale_running_job_prevents_clean_queue_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            job_id = "d" * 32
+            record = _pending_record(job_id)
+            record.update(
+                {
+                    "status": "running",
+                    "attempt": 1,
+                    "claim_token": "e" * 32,
+                    "owner_pid": 999_999_999,
+                    "lease_until": 1,
+                    "claimed_ts": 1,
+                    "running_ts": 1,
+                }
+            )
+            (state / "worker-jobs" / "running" / f"job-{job_id}.json").write_text(
+                json.dumps(record), encoding="utf-8"
+            )
+
+            text = health_report.render(
+                vault, now=datetime.datetime(2026, 9, 11)
+            )
+
+        self.assertIn("Süresi geçmiş çalışan iş: 1", text)
+        self.assertIn("Süresi geçmiş çalışan iş var", text)
+        self.assertNotIn("Boş — takılı iş yok.", text)
+
     def test_flush_support_artifacts_are_not_counted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

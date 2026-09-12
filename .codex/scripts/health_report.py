@@ -308,12 +308,66 @@ def dead_letter_rows(state_dir: Path) -> list[dict[str, Any]]:
 
 
 def orphan_hook_input_count(state_dir: Path) -> int:
-    from worker_supervisor import count_orphan_hook_inputs
+    from worker_supervisor import (
+        FLUSH_REASON_PRIORITY,
+        HOOK_INPUT_SCHEMA_VERSION,
+        count_orphan_hook_inputs,
+    )
 
     try:
+        for path in _directory_entries(state_dir, error_prefix="state"):
+            if not path.name.startswith("hookin-") or path.suffix != ".json":
+                continue
+            path_stat = path.lstat()
+            record = _bounded_json(path)
+            if (
+                not stat.S_ISREG(path_stat.st_mode)
+                or record is None
+                or record.get("delivery_schema_version")
+                != HOOK_INPUT_SCHEMA_VERSION
+                or not isinstance(record.get("session_id"), str)
+                or not record["session_id"]
+                or record.get("reason") not in FLUSH_REASON_PRIORITY
+                or not isinstance(record.get("event_iso"), str)
+                or not record["event_iso"]
+            ):
+                raise OSError("worker-hook-input-invalid")
         return count_orphan_hook_inputs(state_dir)
-    except (OSError, RuntimeError, TypeError, ValueError, UnicodeError) as exc:
+    except OSError as exc:
+        if str(exc) == "worker-hook-input-invalid":
+            raise
         raise OSError("worker-hook-input-unreadable") from exc
+    except (RuntimeError, TypeError, ValueError, UnicodeError) as exc:
+        raise OSError("worker-hook-input-unreadable") from exc
+
+
+def stale_running_count(
+    state_dir: Path,
+    *,
+    jobs: Sequence[Path] | None = None,
+    now: float,
+) -> int:
+    from worker_supervisor import pid_is_alive
+
+    total = 0
+    for jobs_root in _worker_job_roots(state_dir) if jobs is None else jobs:
+        for path in _json_files(jobs_root / "running"):
+            record = _bounded_json(path)
+            if not isinstance(record, dict):
+                raise OSError("worker-record-invalid")
+            lease_until = _timestamp_value(record.get("lease_until"))
+            owner_pid = record.get("owner_pid")
+            if lease_until is None:
+                raise OSError("worker-record-invalid")
+            try:
+                owner_alive = isinstance(owner_pid, int) and not isinstance(
+                    owner_pid, bool
+                ) and pid_is_alive(owner_pid)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise OSError("worker-owner-unreadable") from exc
+            if lease_until <= now and not owner_alive:
+                total += 1
+    return total
 
 
 def worker_fences(state_dir: Path) -> tuple[str, ...]:
@@ -510,6 +564,10 @@ def render(
     dead_count, dead_rows = _dead_letter_summary(state_dir)
     counts["dead-letter"] = dead_count
     orphan_hook_inputs = orphan_hook_input_count(state_dir)
+    stale_running = stale_running_count(
+        state_dir,
+        now=moment.timestamp(),
+    )
     fences = worker_fences(state_dir)
 
     lines = [
@@ -556,6 +614,11 @@ def render(
             "Quarantine'da çözülemeyen iş var — "
             f"{counts['quarantined']} kayıt incelenmeyi bekliyor."
         )
+    elif stale_running:
+        lines.append(
+            "Süresi geçmiş çalışan iş var — "
+            f"{stale_running} iş yeniden ele alınmayı bekliyor."
+        )
     elif orphan_hook_inputs:
         lines.append(
             "Worker kurtarma bekliyor — "
@@ -571,6 +634,7 @@ def render(
         f"- Aktif session-only işareti: {markers['session_only']}",
         f"- Flush durum dosyası: {flush_state_count(state_dir)}",
         f"- Kurtarılmayı bekleyen hook girdisi: {orphan_hook_inputs}",
+        f"- Süresi geçmiş çalışan iş: {stale_running}",
         f"- Derleyici son çalışma: {last_run} (durum: {last_status})",
         f"- Sağlık kaydı (health.json): {health_summary(state_dir)}",
         f"- Worker temizleme fence'i: {', '.join(fences) if fences else 'yok'}",
