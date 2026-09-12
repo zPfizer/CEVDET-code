@@ -74,8 +74,11 @@ _BATCH_CONTROL_PREFIX = (
     + _BATCH_FOR_COMMAND
     + r')@?[ \t]*'
 )
+_BATCH_CALL_PREFIX = r'(?:^[ \t]*|(?<=[&|<>()])[ \t]*)@?call[ \t]+@?[ \t]*'
 _BATCH_COMMAND_PREFIX = (
     r'(?:^[ \t]*@?[ \t]*|(?<=[&|<>()])[ \t]*@?[ \t]*|'
+    + _BATCH_CALL_PREFIX
+    + r'|'
     + _BATCH_CONTROL_PREFIX
     + r')set[ \t]+'
 )
@@ -91,6 +94,10 @@ BATCH_CREDENTIAL_UNQUOTED = re.compile(
 )
 BATCH_ASSIGNMENT_PREFIX = re.compile(
     r'''(?im)''' + _BATCH_COMMAND_PREFIX + r'''["']?\Z'''
+)
+BATCH_CMD_WRAPPER_CREDENTIAL = re.compile(
+    r'''(?im)(?:^[ \t]*|(?<=[&|<>()])[ \t]*)@?cmd[ \t]+/c[ \t]+"set[ \t]+'''
+    r'''(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
 )
 POWERSHELL_CREDENTIAL = re.compile(
     r'''(?im)(?P<prefix>\$(?:(?i:env):[ \t]*|\{(?i:env):[ \t]*))'''
@@ -1126,6 +1133,12 @@ def sanitize_text(
     for match in BATCH_CREDENTIAL_START.finditer(text):
         if _batch_quoted_credential_value_end(text, match.start('quote')) is None:
             raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
+    replace_outside_json_values(
+        BATCH_CMD_WRAPPER_CREDENTIAL,
+        '',
+        'credential',
+        lambda _match: None,
+    )
     replace_outside_json_values(
         BATCH_CREDENTIAL,
         lambda match: f'{match.group("prefix")}{match.group("key")}=<REDACTED>{match.group("quote")}',

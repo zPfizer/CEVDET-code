@@ -657,6 +657,28 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 self.assertNotIn('FIRST_SECRET', sanitized)
                 self.assertNotIn('SECOND_SECRET', sanitized)
 
+    def test_batch_call_wrapper_is_bounded_and_cmd_wrapper_fails_closed(self) -> None:
+        sanitized, redactions = ledger.sanitize_text(
+            'call set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET',
+            max_chars=None,
+        )
+        self.assertEqual(
+            sanitized,
+            'call set DATABASE_PASSWORD=<REDACTED>',
+        )
+        self.assertEqual(redactions, ('credential',))
+        self.assertNotIn('FIRST_SECRET', sanitized)
+        self.assertNotIn('SECOND_SECRET', sanitized)
+
+        with self.assertRaisesRegex(
+            ledger.MemoryPreferenceError,
+            '^memory-credential-container-unverifiable$',
+        ):
+            ledger.sanitize_text(
+                'cmd /c "set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET"',
+                max_chars=None,
+            )
+
     def test_batch_if_prose_does_not_consume_safe_context(self) -> None:
         text = 'If you set DATABASE_PASSWORD=FIRST_SECRET then keep this decision'
 
