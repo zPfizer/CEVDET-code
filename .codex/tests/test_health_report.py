@@ -271,6 +271,25 @@ class HealthReportTests(unittest.TestCase):
                 health_report.write_report(vault, target)
             self.assertFalse(target.exists())
 
+    def test_legacy_failed_record_waits_for_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            job_id = "e" * 32
+            record = _pending_record(job_id)
+            record["status"] = "failed"
+            (state / "worker-jobs" / "failed" / f"job-{job_id}.json").write_text(
+                json.dumps(record), encoding="utf-8"
+            )
+
+            text = health_report.render(
+                vault, now=datetime.datetime(2026, 9, 11)
+            )
+
+        self.assertIn("| failed | 1 |", text)
+        self.assertIn("Başarısız iş göçü bekliyor", text)
+        self.assertNotIn("Boş — takılı iş yok.", text)
+
     def test_quarantined_queue_record_is_not_reported_as_clean(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -437,6 +456,73 @@ class HealthReportTests(unittest.TestCase):
                 worker_supervisor,
                 "_process_owner_classification",
                 return_value="mismatched",
+            ):
+                text = health_report.render(
+                    vault, now=datetime.datetime(2026, 9, 11)
+                )
+
+        self.assertIn("Süresi geçmiş çalışan iş: 1", text)
+        self.assertNotIn("Boş — takılı iş yok.", text)
+
+    def test_unreadable_running_process_identity_prevents_clean_queue_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            job_id = "1" * 32
+            record = _pending_record(job_id)
+            record.update(
+                {
+                    "status": "running",
+                    "attempt": 1,
+                    "claim_token": "2" * 32,
+                    "owner_pid": 1234,
+                    "owner_identity": "process",
+                    "lease_until": 1,
+                    "claimed_ts": 1,
+                    "running_ts": 1,
+                }
+            )
+            (state / "worker-jobs" / "running" / f"job-{job_id}.json").write_text(
+                json.dumps(record), encoding="utf-8"
+            )
+
+            with mock.patch.object(
+                worker_supervisor,
+                "_process_owner_classification",
+                return_value="unreadable",
+            ):
+                text = health_report.render(
+                    vault, now=datetime.datetime(2026, 9, 11)
+                )
+
+        self.assertIn("Süresi geçmiş çalışan iş: 1", text)
+        self.assertNotIn("Boş — takılı iş yok.", text)
+
+    def test_expired_claimed_job_prevents_clean_queue_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            job_id = "2" * 32
+            record = _pending_record(job_id)
+            record.update(
+                {
+                    "status": "claimed",
+                    "attempt": 1,
+                    "claim_token": "3" * 32,
+                    "owner_pid": 1234,
+                    "owner_identity": "old-process",
+                    "lease_until": 1,
+                    "claimed_ts": 1,
+                }
+            )
+            (state / "worker-jobs" / "claimed" / f"job-{job_id}.json").write_text(
+                json.dumps(record), encoding="utf-8"
+            )
+
+            with mock.patch.object(
+                worker_supervisor,
+                "_process_owner_classification",
+                return_value="inactive",
             ):
                 text = health_report.render(
                     vault, now=datetime.datetime(2026, 9, 11)

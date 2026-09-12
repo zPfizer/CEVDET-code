@@ -201,7 +201,7 @@ def worker_counts(
         for stage in WORKER_STAGES:
             paths = _json_files(jobs / stage)
             if stage != "dead-letter":
-                _validate_worker_records(paths)
+                _validate_worker_records(paths, stage=stage)
             counts[stage] += len(paths)
     if include_dead_letter and jobs_roots:
         counts["dead-letter"] = _dead_letter_summary(
@@ -210,13 +210,28 @@ def worker_counts(
     return counts
 
 
-def _validate_worker_records(paths: Sequence[Path]) -> None:
-    from worker_supervisor import _validate_job
+def _validate_worker_records(
+    paths: Sequence[Path], *, stage: str | None = None
+) -> None:
+    from worker_supervisor import JOB_KINDS, _job_id_from_path, _validate_job
 
     for path in paths:
         record = _bounded_json(path)
         try:
-            _validate_job(path, record)
+            if stage == "failed":
+                job_id = _job_id_from_path(path)
+                if (
+                    not isinstance(record, dict)
+                    or job_id is None
+                    or record.get("job_id") != job_id
+                    or record.get("status") != "failed"
+                    or not isinstance(record.get("kind"), str)
+                    or record["kind"] not in JOB_KINDS
+                    or not isinstance(record.get("payload"), dict)
+                ):
+                    raise ValueError("worker-legacy-state-invalid")
+            else:
+                _validate_job(path, record)
         except (TypeError, ValueError):
             raise OSError("worker-record-invalid") from None
 
@@ -377,19 +392,24 @@ def stale_running_count(
 
     total = 0
     for jobs_root in _worker_job_roots(state_dir) if jobs is None else jobs:
-        for path in _json_files(jobs_root / "running"):
-            record = _bounded_json(path)
-            if not isinstance(record, dict):
-                raise OSError("worker-record-invalid")
-            lease_until = _timestamp_value(record.get("lease_until"))
-            if lease_until is None:
-                raise OSError("worker-record-invalid")
-            try:
-                owner_status = _process_owner_classification(record)
-            except (OSError, RuntimeError, ValueError) as exc:
-                raise OSError("worker-owner-unreadable") from exc
-            if lease_until <= now and owner_status in {"inactive", "mismatched"}:
-                total += 1
+        for stage in ("claimed", "running"):
+            for path in _json_files(jobs_root / stage):
+                record = _bounded_json(path)
+                if not isinstance(record, dict):
+                    raise OSError("worker-record-invalid")
+                lease_until = _timestamp_value(record.get("lease_until"))
+                if lease_until is None:
+                    raise OSError("worker-record-invalid")
+                try:
+                    owner_status = _process_owner_classification(record)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise OSError("worker-owner-unreadable") from exc
+                if lease_until <= now and owner_status in {
+                    "inactive",
+                    "mismatched",
+                    "unreadable",
+                }:
+                    total += 1
     return total
 
 
@@ -636,6 +656,11 @@ def render(
         lines.append(
             "Quarantine'da çözülemeyen iş var — "
             f"{counts['quarantined']} kayıt incelenmeyi bekliyor."
+        )
+    elif counts["failed"]:
+        lines.append(
+            "Başarısız iş göçü bekliyor — "
+            f"{counts['failed']} eski kayıt taşınmayı bekliyor."
         )
     elif stale_running:
         lines.append(
