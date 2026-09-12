@@ -472,6 +472,62 @@ class StaleReviewTests(unittest.TestCase):
             finally:
                 controls.unlink(missing_ok=True)
 
+    def test_linked_suppression_file_fails_closed_before_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            outside = root / "outside-suppressions.jsonl"
+            vault.mkdir()
+            outside.write_text("external\n", encoding="utf-8")
+            (vault / "knowledge" / "concepts").mkdir(parents=True)
+            controls = vault / ".codex" / "private-memory" / "controls"
+            controls.mkdir(parents=True)
+            link = controls / "suppressions.jsonl"
+            try:
+                link.symlink_to(outside)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            target = vault / "report.md"
+            try:
+                with self.assertRaisesRegex(
+                    ledger.MemoryPreferenceError,
+                    "stale-review-runtime-path-invalid",
+                ):
+                    stale_review.write_report(vault, output=target)
+                self.assertFalse(target.exists())
+                self.assertEqual(outside.read_text(encoding="utf-8"), "external\n")
+            finally:
+                link.unlink(missing_ok=True)
+
+    def test_linked_compile_lock_fails_closed_before_acquisition(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            outside = root / "outside-compile.lock"
+            vault.mkdir()
+            outside.write_bytes(b"sentinel")
+            (vault / "knowledge" / "concepts").mkdir(parents=True)
+            state_dir = vault / ".codex" / "scripts" / ".state"
+            state_dir.mkdir(parents=True)
+            link = state_dir / "compile.lock"
+            try:
+                link.symlink_to(outside)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            target = vault / "report.md"
+            try:
+                with self.assertRaisesRegex(
+                    ledger.MemoryPreferenceError,
+                    "stale-review-runtime-path-invalid",
+                ):
+                    stale_review.write_report(vault, output=target)
+                self.assertFalse(target.exists())
+                self.assertEqual(outside.read_bytes(), b"sentinel")
+            finally:
+                link.unlink(missing_ok=True)
+
     def test_custom_report_target_rejects_linked_parent_inside_vault(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

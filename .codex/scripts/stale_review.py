@@ -326,6 +326,27 @@ def _validate_runtime_paths(vault: Path) -> None:
                     raise ValueError("runtime-path-invalid")
             except (OSError, RuntimeError, ValueError) as exc:
                 raise MemoryPreferenceError("stale-review-runtime-path-invalid") from exc
+    for parts in (
+        (".codex", "scripts", ".state", "compile.lock"),
+        (".codex", "private-memory", "controls", "suppressions.jsonl"),
+    ):
+        current = vault.joinpath(*parts)
+        try:
+            current_stat = current.lstat()
+        except FileNotFoundError:
+            continue
+        except (OSError, RuntimeError) as exc:
+            raise MemoryPreferenceError("stale-review-runtime-path-invalid") from exc
+        try:
+            resolved = current.resolve(strict=False)
+            if (
+                stat.S_ISLNK(current_stat.st_mode)
+                or not stat.S_ISREG(current_stat.st_mode)
+                or not resolved.is_relative_to(vault)
+            ):
+                raise ValueError("runtime-file-invalid")
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise MemoryPreferenceError("stale-review-runtime-path-invalid") from exc
 
 
 def _validate_note_observations(
