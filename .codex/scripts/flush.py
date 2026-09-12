@@ -24,7 +24,13 @@ import time
 from file_lock import locked
 from jsonl_tail import IncompleteRecord, iter_records, seek_tail
 from knowledge_schema import markdown_headings
-from memory_ledger import is_session_only, sanitize_text, load_suppressed_hashes, session_only_path
+from memory_ledger import (
+    is_session_only,
+    load_suppressed_hashes,
+    memory_read,
+    sanitize_text,
+    session_only_path,
+)
 from memory_ledger import is_read_only_turn, memory_write_guard, MemoryReadOnlyError
 from process_control import ProcessTreeCleanupError
 from worker_supervisor import load_hook_input, resolve_hook_input
@@ -1466,6 +1472,7 @@ def flush_once(
             summary = SessionSummary(bind_evidence(
                 SessionSummary.parse(summary).sections, evidence_turns, event_time.isoformat(),
                 previous_summary=previous_summary, vault_root=vault_root,
+                memory_reader=memory_read,
             )).render()
             summary_digest = hashlib.sha256(summary.encode("utf-8")).hexdigest()
             idempotency_key = _flush_idempotency_key(

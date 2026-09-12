@@ -176,16 +176,23 @@ def _record(
 def bind_evidence(
     sections: dict[str, str], turns: Sequence[tuple[str, str]], captured_at: str,
     *, previous_summary: str = '', vault_root: Path | None = None,
+    memory_reader: Callable[[Path], object] | None = None,
 ) -> dict[str, str]:
-    """Only code creates evidence. Unbacked decisions remain explicitly uncertain synthesis."""
+    """Only code creates evidence. Unbacked decisions remain explicitly uncertain synthesis.
+
+    Önceki özet doğrulanacaksa okuyucu dışarıdan verilir (memory_ledger'ın
+    memory_read'i); bu modül ledger'ı import etmez, bağımlılık oku tek yönde
+    kalır (ledger → evidence).
+    """
     day = datetime.fromisoformat(captured_at).date().isoformat()
     result: dict[str, str] = {}
     records: dict[str, EvidenceRecord] = {}
     uncertain: list[str] = []
     prior: dict[str, EvidenceRecord] = {}
     if previous_summary and vault_root is not None:
-        from memory_ledger import memory_read
-        with memory_read(vault_root) as memory:
+        if memory_reader is None:
+            raise ValueError('user-evidence-memory-reader-required')
+        with memory_reader(vault_root) as memory:
             for line in previous_summary.splitlines():
                 proof = proof_for_link(vault_root, line, reader=lambda path: memory.read_source(path)[1])
                 if proof:
