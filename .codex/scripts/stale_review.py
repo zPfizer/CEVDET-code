@@ -114,6 +114,16 @@ def _note_date(note: NoteIndex) -> datetime.date | None:
         return None
 
 
+def _valid_daily_source(source: str) -> bool:
+    if DAILY_SOURCE.fullmatch(source) is None:
+        return False
+    try:
+        datetime.date.fromisoformat(source[:-3])
+    except ValueError:
+        return False
+    return True
+
+
 def _source_reasons(
     vault: Path,
     note: NoteIndex,
@@ -159,9 +169,12 @@ def _source_reasons(
         if (
             not source
             or len(source) > MAX_SOURCE_CHARS
-            or not DAILY_SOURCE.fullmatch(source)
+            or not _valid_daily_source(source)
         ):
-            if _SAFE_SOURCE_LABEL.fullmatch(source):
+            if (
+                _SAFE_SOURCE_LABEL.fullmatch(source)
+                and DAILY_SOURCE.fullmatch(source) is None
+            ):
                 reasons.append(f"kaynağı yok: {source}")
             else:
                 reasons.append("kaynak yolu geçersiz")
