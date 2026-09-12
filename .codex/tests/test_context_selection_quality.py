@@ -1054,6 +1054,12 @@ Changed files için deployment hook checklist ortak çalışma kaydı.
             "show previous revision of hook": True,
             "show previous revisions of hook": True,
             "previous decisions": True,
+            "daha önce ne karar vermiştik?": True,
+            "önceden ne karar vermiştik?": True,
+            "daha önce ne karar vermiştim?": True,
+            "önceden kararımız neydi?": True,
+            "önceden haber ver": False,
+            "daha önce bitir": False,
             "önceki sayfa, güncel hook checklist göster": False,
             "önceki kayıtlar": True,
             "geçmişte önceki sayfa": True,
@@ -1215,6 +1221,54 @@ title: Hook Protokolü
                     self.assertIn(packet, paths)
                     historical = next(hit for hit in hits if hit.entry.path == concept)
                     self.assertIn("Eski hook sözleşmesi", historical.excerpt)
+
+    def test_turkish_retrospective_decision_questions_include_current_and_historical_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current = "🧠 500-Knowledge/veri-saklama-guncel.md"
+            historical = "🎯 100-Command-Center/veri-saklama-eski.md"
+            _write(
+                root,
+                current,
+                """---
+title: Veri Saklama Kararı
+status: active
+type: note
+---
+# Veri Saklama Kararı
+Karar: kısa günlükler. Veri saklama kararı güncel uygulamadır.
+""",
+            )
+            _write(
+                root,
+                historical,
+                """---
+title: Veri Saklama Kararı
+status: completed
+type: work-packet
+---
+# Veri Saklama Kararı
+Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
+""",
+            )
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            for query in (
+                "Daha önce veri saklama konusunda ne karar vermiştik?",
+                "Önceden veri saklama konusunda ne karar vermiştik?",
+                "Daha önce veri saklama konusunda ne karar vermiştim?",
+                "Önceden veri saklama kararımız neydi?",
+                "Güncel veri saklama kararı ve daha önce veri saklama konusunda ne karar vermiştik?",
+            ):
+                with self.subTest(query=query):
+                    terms = retrieval._retrieval_terms(query)
+                    self.assertTrue(retrieval._is_history_query(terms, query))
+                    hits = retrieval.search_vault(entries, query, top_k=2)
+                    self.assertEqual(
+                        {hit.entry.path for hit in hits},
+                        {current, historical},
+                    )
+                    self.assertTrue(any("güncel uygulama" in hit.excerpt for hit in hits))
+                    self.assertTrue(any("geçmiş uygulama" in hit.excerpt for hit in hits))
 
     def test_identical_copies_do_not_fill_top_three_when_an_independent_source_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

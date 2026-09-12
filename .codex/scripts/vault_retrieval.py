@@ -199,6 +199,16 @@ HISTORY_TURKISH_NOMINAL_CHANGE_QUERY = re.compile(
     r"(?:\W+\w+){0,2}\W+"
     rf"\b(?:{HISTORY_CHANGE_NOUN_PATTERN})\b"
 )
+# A bounded first-person past form or decision question makes
+# `daha önce`/`önceden` retrospective; imperative forms such as
+# `daha önce bitir` stay current.
+HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
+    r"(?ix)(?:"
+    r"\b(?:daha\s+once|onceden)\b(?:\W+\w+){0,8}\W+\w+misti[mk]\b"
+    r"|\b(?:daha\s+once|onceden)\b(?:\W+\w+){0,3}\W+karar\w*"
+    r"(?:\W+\w+){0,2}\W+neydi\b"
+    r")"
+)
 HISTORY_CHANGE_TAIL = (
     rf"(?:\s*(?:[?!.,;:]|$)|\s+{HISTORY_CHANGE_TEMPORAL}\b"
     r"|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
@@ -1555,12 +1565,16 @@ def _has_history_query_cues(query_terms: frozenset[str], query: str = "") -> boo
     has_turkish_nominal_change = bool(
         query and HISTORY_TURKISH_NOMINAL_CHANGE_QUERY.search(_normalize(query))
     )
+    has_turkish_retrospective = bool(
+        query and HISTORY_TURKISH_RETROSPECTIVE_QUERY.search(_normalize(query))
+    )
     unambiguous_history_terms = history_terms - {"before", "past", "previous", "onceki", "tarih"}
     if (
         has_inflected_history
         or has_retrospective_change
         or has_nominal_change
         or has_turkish_nominal_change
+        or has_turkish_retrospective
         or unambiguous_history_terms
     ):
         return True
@@ -1858,6 +1872,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
         HISTORY_CHANGE_QUERY,
         HISTORY_NOMINAL_CHANGE_QUERY,
         HISTORY_TURKISH_NOMINAL_CHANGE_QUERY,
+        HISTORY_TURKISH_RETROSPECTIVE_QUERY,
     ):
         history_spans.update((match.start(), match.end()) for match in pattern.finditer(normalized))
     date_history_spans = {
