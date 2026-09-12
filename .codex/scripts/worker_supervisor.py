@@ -1961,6 +1961,8 @@ def recover_stale_jobs(
                     if destination.exists():
                         raise ValueError('worker-transition-target-exists')
                     os.replace(path, destination)
+                    if target == 'pending':
+                        recovered += 1
                 except (OSError, UnicodeError, ValueError):
                     # The normal loader preserves malformed records in quarantine.
                     continue
