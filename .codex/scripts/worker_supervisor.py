@@ -1230,6 +1230,33 @@ def migrate_legacy_failed_jobs(
                     active, original
                 ):
                     raise ValueError("worker-legacy-state-conflict")
+                if not _has_redrive_marker(active):
+                    # Without an explicit redrive marker, the active copy's
+                    # chronology is ambiguous. Preserve the legacy failure as
+                    # a terminal conflict instead of discarding either copy.
+                    destination = _job_root(state_dir) / "dead-letter" / source.name
+                    if destination.exists():
+                        try:
+                            existing = _load_job(destination)
+                        except ValueError as exc:
+                            raise ValueError("worker-legacy-state-conflict") from exc
+                        if not _same_redrive_identity(existing, original):
+                            raise ValueError("worker-legacy-state-conflict")
+                        _mark_redrive_conflict(existing, active, now=observed_now)
+                        atomic_write_json(destination, existing, sort_keys=True)
+                    else:
+                        conflict = dict(original)
+                        _mark_redrive_conflict(
+                            conflict, active, now=observed_now
+                        )
+                        conflict.pop("claim_token", None)
+                        conflict.pop("owner_pid", None)
+                        conflict.pop("owner_identity", None)
+                        conflict["lease_until"] = 0
+                        atomic_write_json(destination, conflict, sort_keys=True)
+                    source.unlink()
+                    migrated += 1
+                    continue
                 # A newer queue record is already the canonical identity.  Do
                 # not recreate a dead-letter copy from the legacy source.
                 source.unlink()
@@ -1483,6 +1510,8 @@ def _redrive_supervisor_state(state_dir: Path, *, now: float | None = None) -> s
             receipt.get("status") == "running"
             and _process_owner_is_active(receipt)
         ):
+            if _process_owner_classification(receipt) in {"invalid", "unreadable"}:
+                return "uncertain"
             return "active"
         lease_until = receipt.get("lease_until")
         if (

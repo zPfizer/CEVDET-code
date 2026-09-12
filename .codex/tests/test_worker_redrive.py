@@ -301,6 +301,63 @@ class RedriveDeadLetterTests(unittest.TestCase):
         self.assertTrue(pending_exists)
         self.assertFalse(dead_letter_exists)
 
+    def test_legacy_migration_preserves_ambiguous_identity_as_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            job_id = "c" * 32
+            source = _legacy_failed_job(
+                state,
+                job_id,
+                payload={"reason": "ambiguous"},
+                last_error="legacy-failure",
+                finished_ts=1757400200,
+            )
+            active = _pending_job(
+                state,
+                job_id,
+                payload={"reason": "ambiguous"},
+            )
+
+            migrated = workers.migrate_legacy_failed_jobs(state, now=1757500001)
+            conflict = state / "worker-jobs" / "dead-letter" / source.name
+            conflict_record = workers._load_job(conflict)
+            source_exists = source.exists()
+            active_exists = active.exists()
+
+            redriven, skipped = workers.redrive_dead_letter(
+                state, job_id=job_id
+            )
+            pending_exists = active.exists()
+            conflict_after_redrive = workers._load_job(conflict)
+
+            active.unlink()
+            retried, retry_skipped = workers.redrive_dead_letter(
+                state, job_id=job_id
+            )
+            conflict_after_prune = workers._load_job(conflict)
+            duplicate_pending = (
+                state / "worker-jobs" / "pending" / source.name
+            ).exists()
+
+        self.assertEqual(migrated, 1)
+        self.assertFalse(source_exists)
+        self.assertTrue(active_exists)
+        self.assertEqual(conflict_record["status"], "dead-letter")
+        self.assertEqual(conflict_record["terminal_reason"], "redrive-conflict")
+        self.assertEqual(conflict_record["last_error"], "legacy-failure")
+        self.assertEqual(redriven, [])
+        self.assertEqual(skipped, [(job_id, "redrive çakışması")])
+        self.assertTrue(pending_exists)
+        self.assertEqual(
+            conflict_after_redrive["terminal_reason"], "redrive-conflict"
+        )
+        self.assertEqual(retried, [])
+        self.assertEqual(retry_skipped, [(job_id, "redrive çakışması")])
+        self.assertEqual(
+            conflict_after_prune["terminal_reason"], "redrive-conflict"
+        )
+        self.assertFalse(duplicate_pending)
+
     def test_redrive_revives_job_as_valid_pending(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -701,6 +758,56 @@ class RedriveDeadLetterTests(unittest.TestCase):
         wake.assert_called_once_with(state, vault_root=vault)
         self.assertIn("pending'e döndü", output.getvalue())
         self.assertNotIn("belirsiz", output.getvalue())
+
+    def test_cli_redrive_reports_uncertain_owner_identity(self) -> None:
+        for classification in ("invalid", "unreadable"):
+            with self.subTest(classification=classification), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                state = root / "state"
+                vault = root / "vault"
+                vault.mkdir()
+                job_id = "a" * 32
+                _dead_letter_job(state, job_id, payload={"reason": "uncertain"})
+                (state / "worker-supervisor.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "status": "running",
+                            "generation": 1,
+                            "launch_token": "c" * 32,
+                            "owner_pid": 123,
+                            "owner_identity": "recorded-owner",
+                            "lease_until": int(workers.time.time()) + workers.SUPERVISOR_LEASE_SECONDS,
+                            "updated_ts": int(workers.time.time()),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                argv = [
+                    "worker_supervisor.py",
+                    "--vault",
+                    str(vault),
+                    "--state-dir",
+                    str(state),
+                    "--redrive",
+                    job_id,
+                ]
+                output = io.StringIO()
+                with (
+                    mock.patch.object(workers.sys, "argv", argv),
+                    mock.patch.object(workers, "ensure_supervisor", return_value=False),
+                    mock.patch.object(workers, "_process_owner_is_active", return_value=True),
+                    mock.patch.object(
+                        workers,
+                        "_process_owner_classification",
+                        return_value=classification,
+                    ),
+                    redirect_stdout(output),
+                ):
+                    result = workers.main()
+
+            self.assertEqual(result, 1)
+            self.assertIn("supervisor doğrulanamadı", output.getvalue())
 
     def test_cli_redrive_retry_recognizes_jobs_after_pending(self) -> None:
         for status in ("claimed", "running", "succeeded"):
