@@ -57,9 +57,27 @@ CREDENTIAL = re.compile(
     r'''(?P<value>[{\[]|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|(?:\\[\s\S]|[^\s\\])+)'''
 )
 BATCH_CREDENTIAL_NAME = rf'(?i:api[_-]?key|password|secret|token|{_ENV_CREDENTIAL_NAME_BODY})'
+_BATCH_IF_CONDITION = (
+    r'if\b[ \t]+(?:/i[ \t]+)?(?:not[ \t]+)?(?:'
+    r'(?:exist|defined|errorlevel|cmdextversion)\b[^\r\n]*?|'
+    r'[^\r\n]*?(?:==|equ\b|neq\b|lss\b|leq\b|gtr\b|geq\b)[^\r\n]*?)'
+    r'[ \t]+'
+)
+_BATCH_FOR_COMMAND = (
+    r'for\b[ \t]+(?=[^\r\n]*%{1,2}[A-Za-z_][A-Za-z0-9_]*\b)'
+    r'[^\r\n]*?\bdo[ \t]+'
+)
+_BATCH_CONTROL_PREFIX = (
+    r'(?:^[ \t]*|(?<=[&|<>()])[ \t]*)@?(?:'
+    + _BATCH_IF_CONDITION
+    + r'|'
+    + _BATCH_FOR_COMMAND
+    + r')@?[ \t]*'
+)
 _BATCH_COMMAND_PREFIX = (
     r'(?:^[ \t]*@?[ \t]*|(?<=[&|<>()])[ \t]*@?[ \t]*|'
-    r'^[ \t]*@?(?:if\b[^\r\n]*?[ \t]|for\b[^\r\n]*?\bdo[ \t]+)@?[ \t]*)set[ \t]+'
+    + _BATCH_CONTROL_PREFIX
+    + r')set[ \t]+'
 )
 BATCH_CREDENTIAL = re.compile(
     r'''(?im)(?P<prefix>''' + _BATCH_COMMAND_PREFIX + r'''(?P<quote>["']))(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')\s*=\s*'''
@@ -1152,6 +1170,9 @@ def sanitize_text(
             continue
         end = match.end()
         value_start = match.start('value')
+        if (match.group('prefix').rstrip().endswith('=')
+                and text[value_start:value_start + 2] in {'${', '$('}):
+            raise MemoryPreferenceError('memory-credential-container-unverifiable') from None
         if (text[value_start] in {'"', "'"}
                 or (match.group('prefix').rstrip().endswith('=')
                     and text[value_start:value_start + 2] == "$'")):
