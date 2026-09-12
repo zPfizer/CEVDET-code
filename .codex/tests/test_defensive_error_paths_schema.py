@@ -363,6 +363,31 @@ class KnowledgeSchemaEdges(unittest.TestCase):
         self.assertIn(":title", joined)
         self.assertIn(":created-format", joined)
 
+    def test_validate_concept_checks_calendar_dates(self) -> None:
+        cases = (
+            ("2026-02-31", "2026-09-02", ":created-format"),
+            ("2026-09-02", "2026-13-01", ":updated-format"),
+            ("2024-02-29", "2024-02-29", None),
+        )
+        for created, updated, expected in cases:
+            with self.subTest(created=created, updated=updated):
+                with tempfile.TemporaryDirectory() as temporary:
+                    path = Path(temporary) / "kavram.md"
+                    path.write_text(
+                        f"---\ntitle: Kavram\naliases: []\ntags: [test]\n"
+                        f"sources: [2024-02-29.md]\ncreated: {created}\n"
+                        f"updated: {updated}\n---\ngövde\n",
+                        encoding="utf-8",
+                    )
+                    issues: list[str] = []
+                    knowledge_schema._validate_concept(path, issues)
+                joined = "\n".join(issues)
+                if expected is None:
+                    self.assertNotIn(":created-format", joined)
+                    self.assertNotIn(":updated-format", joined)
+                else:
+                    self.assertIn(expected, joined)
+
     def test_validate_concept_tolerates_unclosed_frontmatter(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "kavram.md"
@@ -438,6 +463,25 @@ class KnowledgeSchemaEdges(unittest.TestCase):
                 issues: list[str] = []
                 knowledge_schema._validate_derived_connection(path, text, None, issues)
                 self.assertIn(expected, "\n".join(issues))
+
+    def test_validate_derived_connection_checks_calendar_dates(self) -> None:
+        cases = (("2026-02-31", "2026-02-01", True), ("2024-02-29", "2024-02-01", False))
+        for updated, source, invalid in cases:
+            with self.subTest(updated=updated):
+                text = (
+                    "---\nschema: knowledge-v2\nconnects:\n  - bir\n  - iki\n"
+                    f"sources:\n  - {source}.md\nupdated: {updated}\n---\n"
+                    "\n## Kaynaklar\n"
+                    f"- [[daily/{source}|Kaynak]]\n"
+                )
+                issues: list[str] = []
+                knowledge_schema._validate_derived_connection(
+                    Path("baglanti.md"), text, None, issues
+                )
+                if invalid:
+                    self.assertIn(":updated", "\n".join(issues))
+                else:
+                    self.assertNotIn(":updated", "\n".join(issues))
 
     def test_unreadable_concept_makes_tree_report_unreadable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
