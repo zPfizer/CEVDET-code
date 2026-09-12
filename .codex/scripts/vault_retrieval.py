@@ -893,12 +893,19 @@ def _entry_payload(entry: VaultEntry) -> dict[str, object]:
 def _entry_from_payload(payload: object) -> VaultEntry:
     if not isinstance(payload, dict):
         raise ValueError("cache-entry-not-object")
-    body_terms = payload.get("body_terms")
-    if not isinstance(body_terms, dict):
-        raise ValueError("cache-body-terms")
-    historical_body_terms = payload.get("historical_body_terms", {})
-    if not isinstance(historical_body_terms, dict):
-        raise ValueError("cache-historical-body-terms")
+
+    def counter(key: str, value: object) -> Counter[str]:
+        if not isinstance(value, dict) or not all(
+            isinstance(term, str) and isinstance(count, int) and count >= 0
+            for term, count in value.items()
+        ):
+            raise ValueError(f"cache-{key}")
+        return Counter({term: int(count) for term, count in value.items()})
+
+    body_terms = counter("body-terms", payload.get("body_terms"))
+    historical_body_terms = counter(
+        "historical-body-terms", payload.get("historical_body_terms", {})
+    )
     historical_lines = payload.get("historical_lines", [])
     if not isinstance(historical_lines, list) or not all(
         isinstance(line, str) for line in historical_lines
@@ -945,23 +952,11 @@ def _entry_from_payload(payload: object) -> VaultEntry:
         data_source_terms=strings("data_source_terms"),
         workflow_terms=strings("workflow_terms"),
         heading_terms=strings("heading_terms"),
-        body_terms=Counter(
-            {
-                str(term): int(count)
-                for term, count in body_terms.items()
-                if isinstance(term, str) and isinstance(count, int) and count >= 0
-            }
-        ),
+        body_terms=body_terms,
         safe_lines=tuple(safe_lines),
         record_type=record_type,
         schema=schema,
-        historical_body_terms=Counter(
-            {
-                str(term): int(count)
-                for term, count in historical_body_terms.items()
-                if isinstance(term, str) and isinstance(count, int) and count >= 0
-            }
-        ),
+        historical_body_terms=historical_body_terms,
         content_key=content_key,
         historical_lines=tuple(historical_lines),
     )
