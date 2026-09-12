@@ -57,17 +57,25 @@ CREDENTIAL = re.compile(
     r'''(?P<value>[{\[]|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|(?:\\[\s\S]|[^\s\\])+)'''
 )
 BATCH_CREDENTIAL_NAME = rf'(?i:api[_-]?key|password|secret|token|{_ENV_CREDENTIAL_NAME_BODY})'
+_BATCH_COMMAND_PREFIX = r'(?:^[ \t]*@?[ \t]*|(?<=[&|<>()])[ \t]*@?[ \t]*)set[ \t]+'
 BATCH_CREDENTIAL = re.compile(
-    r'''(?im)(?P<prefix>\bset\s+(?P<quote>["']))(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')\s*=\s*'''
+    r'''(?im)(?P<prefix>''' + _BATCH_COMMAND_PREFIX + r'''(?P<quote>["']))(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')\s*=\s*'''
     r'''(?P<value>(?:(?!(?P=quote))[^\r\n])*)(?P=quote)'''
 )
 BATCH_CREDENTIAL_START = re.compile(
-    r'''(?im)\bset\s+(?P<quote>["'])(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')\s*=\s*'''
+    r'''(?im)''' + _BATCH_COMMAND_PREFIX + r'''(?P<quote>["'])(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')\s*=\s*'''
 )
 BATCH_CREDENTIAL_UNQUOTED = re.compile(
-    r'''(?im)(?P<prefix>\bset[ \t]+)(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
+    r'''(?im)(?P<prefix>''' + _BATCH_COMMAND_PREFIX + r''')(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
 )
-BATCH_ASSIGNMENT_PREFIX = re.compile(r'''(?im)\bset\s+["']?\Z''')
+BATCH_ASSIGNMENT_PREFIX = re.compile(
+    r'''(?im)(?:^[ \t]*@?[ \t]*|(?<=[&|<>()])[ \t]*@?[ \t]*)set[ \t]+["']?\Z'''
+)
+POWERSHELL_CREDENTIAL = re.compile(
+    r'''(?im)(?P<prefix>\$(?i:env):[ \t]*)(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')'''
+    r'''(?P<assignment>[ \t]*=[ \t]*)'''
+)
+POWERSHELL_ASSIGNMENT_PREFIX = re.compile(r'''(?im)\$(?i:env):[ \t]*\Z''')
 TOKEN_PREFIX = re.compile(r"\b(?:sk(?=[-_])|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
 PERSONAL_CREDENTIAL = re.compile(
     r"(?i)\b(?:api\s+anahtarım|parolam|şifrem|tokenım)\b"
@@ -785,6 +793,54 @@ def _batch_unquoted_credential_value_end(text: str, start: int) -> int | None:
     return end
 
 
+def _powershell_credential_value_end(text: str, start: int) -> int | None:
+    def statement_end(end: int) -> int | None:
+        cursor = end
+        while cursor < len(text) and text[cursor] in {' ', '\t'}:
+            cursor += 1
+        if cursor == len(text) or text[cursor] in {'\r', '\n', ';'}:
+            return end
+        return None
+
+    if text[start:start + 2] in {"@'", '@"'}:
+        terminator = text[start + 1] + '@'
+        closing = re.compile(rf'(?m)^[ \t]*{re.escape(terminator)}[ \t]*\r?$').search(
+            text, start + 2,
+        )
+        return None if closing is None else statement_end(closing.end())
+    quote = text[start:start + 1]
+    if quote in {'"', "'"}:
+        index = start + 1
+        while index < len(text):
+            character = text[index]
+            if quote == '"' and character == '`':
+                if index + 1 >= len(text):
+                    return None
+                index += 2
+                continue
+            if quote == "'" and character == "'" and text[index:index + 2] == "''":
+                index += 2
+                continue
+            if character == quote:
+                return statement_end(index + 1)
+            index += 1
+        return None
+    index = start
+    while index < len(text):
+        character = text[index]
+        if character in {'\r', '\n'}:
+            return index
+        if character == '`':
+            if index + 1 >= len(text):
+                return None
+            index += 2
+            continue
+        if character.isspace() or character in {';', '&', '|', '<', '>', '(', ')'}:
+            return statement_end(index)
+        index += 1
+    return index
+
+
 def _json_regions(text: str) -> Iterator[tuple[int, int]]:
     """Validated JSON containers and complete top-level JSON strings."""
     decoder = json.JSONDecoder()
@@ -1050,6 +1106,15 @@ def sanitize_text(
         "credential",
         lambda match: _batch_unquoted_credential_value_end(text, match.end()),
     )
+    replace_outside_json_values(
+        POWERSHELL_CREDENTIAL,
+        lambda match: (
+            f'{match.group("prefix")}{match.group("key")}'
+            f'{match.group("assignment")}<REDACTED>'
+        ),
+        "credential",
+        lambda match: _powershell_credential_value_end(text, match.end()),
+    )
     regions = _json_regions(text)
     json_strings = _json_string_regions(text)
     region: tuple[int, int] | None = None
@@ -1059,7 +1124,9 @@ def sanitize_text(
     search_cursor = 0
     while match := CREDENTIAL.search(text, search_cursor):
         line_start = text.rfind('\n', 0, match.start()) + 1
-        if BATCH_ASSIGNMENT_PREFIX.search(text[line_start:match.start()]):
+        assignment_prefix = text[line_start:match.start()]
+        if (BATCH_ASSIGNMENT_PREFIX.search(assignment_prefix)
+                or POWERSHELL_ASSIGNMENT_PREFIX.search(assignment_prefix)):
             search_cursor = match.end()
             continue
         while json_string is None or json_string[1] <= match.start():
