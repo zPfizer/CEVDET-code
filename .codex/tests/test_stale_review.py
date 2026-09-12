@@ -434,6 +434,16 @@ class StaleReviewTests(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertIn("Taranan tarih ve kaynak ölçütleriyle bayat aday saptanmadı.", text)
 
+    def test_days_must_be_nonnegative_int_before_vault_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            for days in (-1, True, 1.5):
+                with self.subTest(days=days):
+                    with self.assertRaisesRegex(ValueError, "days-invalid"):
+                        stale_review.review(vault, days=days)
+                    with self.assertRaisesRegex(ValueError, "days-invalid"):
+                        stale_review.write_report(vault, days=days)
+
     def test_default_report_write_does_not_clobber_existing_user_text(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -659,6 +669,74 @@ class StaleReviewTests(unittest.TestCase):
                         self.assertEqual(outside.read_bytes(), b"")
                     finally:
                         link.unlink(missing_ok=True)
+
+    def test_hard_linked_derived_note_fails_closed_before_memory_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            vault.mkdir()
+            (vault / "knowledge" / "concepts").mkdir(parents=True)
+            outside = root / "outside-note.md"
+            outside.write_text("external note", encoding="utf-8")
+            note = vault / "knowledge" / "concepts" / "not.md"
+            try:
+                os.link(outside, note)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"hard link unavailable: {exc}")
+
+            target = vault / "report.md"
+            try:
+                with self.assertRaisesRegex(
+                    ledger.MemoryPreferenceError,
+                    "stale-review-knowledge-root-invalid",
+                ):
+                    stale_review.write_report(vault, output=target)
+                self.assertFalse(target.exists())
+                self.assertEqual(outside.read_text(encoding="utf-8"), "external note")
+            finally:
+                note.unlink(missing_ok=True)
+
+    def test_hard_linked_daily_source_is_not_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            vault.mkdir()
+            outside = root / "outside-daily.md"
+            outside.write_text("external daily", encoding="utf-8")
+            daily = vault / "daily" / "2026-01-01.md"
+            daily.parent.mkdir(parents=True)
+            _note(
+                vault,
+                "hard-linked-source",
+                updated="2026-01-02",
+                sources=["2026-01-01.md"],
+            )
+            try:
+                os.link(outside, daily)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"hard link unavailable: {exc}")
+
+            real_read = ledger.MemoryRead.read_source
+
+            def deny_daily(memory, path, **kwargs):
+                if path == daily:
+                    raise AssertionError("hard-linked source was read")
+                return real_read(memory, path, **kwargs)
+
+            try:
+                with mock.patch.object(
+                    ledger.MemoryRead,
+                    "read_source",
+                    new=deny_daily,
+                ):
+                    findings = stale_review.review(
+                        vault,
+                        now=datetime.date(2026, 9, 11),
+                    )
+                self.assertEqual(findings[0].reasons[-1], "kaynak yolu güvensiz")
+                self.assertEqual(outside.read_text(encoding="utf-8"), "external daily")
+            finally:
+                daily.unlink(missing_ok=True)
 
     def test_custom_report_target_rejects_linked_parent_inside_vault(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

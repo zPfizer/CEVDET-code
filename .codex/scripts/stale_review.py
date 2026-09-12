@@ -45,6 +45,12 @@ _SAFE_SOURCE_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
 _NOTE_LINK_UNSAFE = frozenset("[]|#^\\`\r\n")
 
 
+def _validate_days(days: int) -> int:
+    if isinstance(days, bool) or not isinstance(days, int) or days < 0:
+        raise ValueError("days-invalid")
+    return days
+
+
 def _path_component_key(value: str) -> str:
     normalized = os.path.normcase(value).casefold()
     return normalized.rstrip(" .") if os.name == "nt" else normalized
@@ -230,6 +236,7 @@ def _source_reasons(
             if (
                 stat.S_ISLNK(source_stat.st_mode)
                 or not stat.S_ISREG(source_stat.st_mode)
+                or source_stat.st_nlink != 1
                 or not resolved.is_relative_to(vault)
                 or not resolved.is_relative_to(daily_root.resolve(strict=False))
             ):
@@ -307,6 +314,7 @@ def _validate_source_observations(
             if (
                 stat.S_ISLNK(source_stat.st_mode)
                 or not stat.S_ISREG(source_stat.st_mode)
+                or source_stat.st_nlink != 1
                 or not resolved.is_relative_to(vault)
                 or not resolved.is_relative_to(daily_resolved)
             ):
@@ -413,6 +421,7 @@ def _validate_note_observations(
             if (
                 stat.S_ISLNK(path_stat.st_mode)
                 or not stat.S_ISREG(path_stat.st_mode)
+                or path_stat.st_nlink != 1
                 or not resolved.is_relative_to(vault / KNOWLEDGE_ROOT)
                 or not resolved.is_relative_to(
                     vault / KNOWLEDGE_ROOT / path.relative_to(vault).parts[1]
@@ -525,6 +534,7 @@ def _checked_markdown_paths(root: Path) -> Iterator[Path]:
                         stat.S_ISLNK(path_stat.st_mode)
                         or path.is_junction()
                         or not stat.S_ISREG(path_stat.st_mode)
+                        or path_stat.st_nlink != 1
                     ):
                         raise ValueError("linked-file")
                 except (OSError, RuntimeError, ValueError) as exc:
@@ -549,7 +559,11 @@ def _snapshot_notes(
     for path in _eligible_note_paths(vault):
         try:
             path_stat = path.lstat()
-            if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+            if (
+                stat.S_ISLNK(path_stat.st_mode)
+                or not stat.S_ISREG(path_stat.st_mode)
+                or path_stat.st_nlink != 1
+            ):
                 raise ValueError("knowledge-note-invalid")
             if observations is not None:
                 observations.setdefault(
@@ -630,6 +644,7 @@ def review(
     days: int = DEFAULT_DAYS,
     now: datetime.date | None = None,
 ) -> list[StaleFinding]:
+    days = _validate_days(days)
     vault = Path(vault).resolve()
     _validate_vault(vault)
     _validate_runtime_paths(vault)
@@ -719,6 +734,7 @@ def write_report(
     now: datetime.date | None = None,
     overwrite: bool = False,
 ) -> tuple[Path, int]:
+    days = _validate_days(days)
     vault = Path(vault).resolve()
     _validate_vault(vault)
     _validate_runtime_paths(vault)
