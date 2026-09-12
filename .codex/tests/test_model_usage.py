@@ -1,4 +1,6 @@
 import datetime
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -15,6 +17,81 @@ import process_control
 
 
 class ModelUsageTests(unittest.TestCase):
+    def test_cli_distinguishes_empty_complete_and_incomplete_ledgers(self) -> None:
+        valid = json.dumps({"schema": 1, "purpose": "probe", "prompt_chars": 10,
+                            "duration_ms": 5, "outcome": "ok"}).encode() + b"\n"
+        for name, content, code, calls in (
+            ("no-file", None, 0, 0),
+            ("empty-file", b"", 0, 0),
+            ("valid", valid, 0, 1),
+            ("valid-crlf", valid[:-1] + b"\r\n", 0, 1),
+            ("missing-newline", valid[:-1], 1, 1),
+            ("missing-lf", valid[:-1] + b"\r", 1, 1),
+            ("corrupt", b"{private-invalid-record\n", 1, 0),
+            ("invalid-encoding", b"\xff\n", 1, 0),
+            ("wrong-schema", b'{"schema": 2}\n', 1, 0),
+            ("partial", valid + b"{private-invalid-record\n", 1, 1),
+        ):
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                ledger = state / f"model-usage-{datetime.datetime.now():%Y%m%d}.jsonl"
+                if content is not None:
+                    ledger.write_bytes(content)
+                output, errors = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    result = model_usage.main(["--state-dir", str(state), "--days", "1"])
+                self.assertEqual(result, code)
+                if code:
+                    self.assertIn("raporu eksik", errors.getvalue())
+                    self.assertNotIn("kayıtlı model çağrısı yok", output.getvalue())
+                    if calls:
+                        self.assertIn("okunabilen kayıtlar (eksik)", output.getvalue())
+                    else:
+                        self.assertIn("doğrulanamadı", output.getvalue())
+                else:
+                    self.assertEqual(errors.getvalue(), "")
+                    if not calls:
+                        self.assertIn("kayıtlı model çağrısı yok", output.getvalue())
+                if calls:
+                    self.assertIn("| probe | 1 | 1 | 0 |", output.getvalue())
+                self.assertNotIn("private-invalid", output.getvalue() + errors.getvalue())
+                if content is not None:
+                    self.assertEqual(ledger.read_bytes(), content)
+
+    def test_cli_reports_file_and_directory_read_failures(self) -> None:
+        for operation in ("open", "iterdir"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                ledger = state / f"model-usage-{datetime.datetime.now():%Y%m%d}.jsonl"
+                ledger.write_bytes(b"{}\n")
+                original = getattr(Path, operation)
+                def fail_selected(path, *args, **kwargs):
+                    if path == (ledger if operation == "open" else state):
+                        raise PermissionError("private access failure")
+                    return original(path, *args, **kwargs)
+                output, errors = io.StringIO(), io.StringIO()
+                with mock.patch.object(Path, operation, fail_selected), \
+                     contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    code = model_usage.main(["--state-dir", str(state), "--days", "1"])
+                self.assertEqual(code, 1)
+                self.assertIn("doğrulanamadı", output.getvalue())
+                self.assertIn("raporu eksik", errors.getvalue())
+                self.assertNotIn("private access", output.getvalue() + errors.getvalue())
+
+    def test_oversized_line_is_skipped_as_one_record_before_valid_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            valid = json.dumps({"schema": 1, "purpose": "probe", "prompt_chars": 10,
+                                "duration_ms": 5, "outcome": "ok"}).encode() + b"\n"
+            (state / "model-usage-20260911.jsonl").write_bytes(
+                b"x" * (model_usage.MAX_RECORD_BYTES + 2) + valid + valid
+            )
+            summary, incomplete = model_usage.usage_summary(
+                state, days=1, now=datetime.datetime(2026, 9, 11, 12, 0),
+            )
+        self.assertTrue(incomplete)
+        self.assertEqual(summary["probe"]["calls"], 1)
+
     def test_record_appends_daily_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -76,13 +153,14 @@ class ModelUsageTests(unittest.TestCase):
                                duration_ms=9, outcome="ok",
                                now=now - datetime.timedelta(days=10))
 
-            summary = model_usage.usage_summary(state, days=7, now=now)
+            summary, incomplete = model_usage.usage_summary(state, days=7, now=now)
 
         self.assertEqual(summary["flush"]["calls"], 2)
         self.assertEqual(summary["flush"]["ok"], 1)
         self.assertEqual(summary["flush"]["failed"], 1)
         self.assertEqual(summary["flush"]["prompt_chars"], 400)
         self.assertEqual(summary["compile"]["calls"], 1)
+        self.assertFalse(incomplete)
 
     def test_summary_excludes_future_dated_ledgers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -97,9 +175,10 @@ class ModelUsageTests(unittest.TestCase):
                 now=now + datetime.timedelta(days=10),
             )
 
-            summary = model_usage.usage_summary(state, days=7, now=now)
+            summary, incomplete = model_usage.usage_summary(state, days=7, now=now)
 
         self.assertEqual(summary, {})
+        self.assertFalse(incomplete)
 
     def test_summary_rejects_window_beyond_retention(self) -> None:
         with self.assertRaisesRegex(ValueError, "summary-window-out-of-retention"):
@@ -123,12 +202,13 @@ class ModelUsageTests(unittest.TestCase):
                 now=datetime.datetime(2026, 9, 11, 12, 0),
             )
             lines = ledger.read_bytes().splitlines()
-            summary = model_usage.usage_summary(
+            summary, incomplete = model_usage.usage_summary(
                 state, days=7, now=datetime.datetime(2026, 9, 11, 12, 0)
             )
 
         self.assertEqual(len(lines), 2)
         self.assertEqual(summary["compile"]["calls"], 1)
+        self.assertTrue(incomplete)
 
     def test_run_exec_records_failure_outcome_with_purpose(self) -> None:
         # Muhasebe boru hattı uçtan uca: geçersiz CLI yolu bile amaçla kayda düşer.
@@ -220,10 +300,11 @@ class ModelUsageTests(unittest.TestCase):
                 outcome="ok",
                 now=datetime.datetime(2026, 9, 11, 12, 0),
             )
-            summary = model_usage.usage_summary(
+            summary, incomplete = model_usage.usage_summary(
                 state, days=7, now=datetime.datetime(2026, 9, 11, 12, 0)
             )
             self.assertEqual(summary, {})
+            self.assertTrue(incomplete)
             self.assertEqual(
                 outside.read_text(encoding="utf-8"),
                 json.dumps({
@@ -257,11 +338,12 @@ class ModelUsageTests(unittest.TestCase):
                 outcome="ok",
                 now=datetime.datetime(2026, 9, 11, 12, 0),
             )
-            summary = model_usage.usage_summary(
+            summary, incomplete = model_usage.usage_summary(
                 state, days=7, now=datetime.datetime(2026, 9, 11, 12, 0)
             )
             self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel\n")
             self.assertEqual(summary, {})
+            self.assertTrue(incomplete)
 
     def test_record_drops_daily_ledger_swapped_before_open(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -345,10 +427,11 @@ class ModelUsageTests(unittest.TestCase):
                 now=datetime.datetime(2026, 9, 11, 12, 0),
             )
 
-            summary = model_usage.usage_summary(
+            summary, incomplete = model_usage.usage_summary(
                 state, days=7, now=datetime.datetime(2026, 9, 11, 12, 0)
             )
             self.assertEqual(summary, {})
+            self.assertTrue(incomplete)
             self.assertEqual(outside_ledger.read_text(encoding="utf-8"), before)
 
     def test_summary_skips_records_with_invalid_numeric_fields(self) -> None:
@@ -374,13 +457,14 @@ class ModelUsageTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            summary = model_usage.usage_summary(
+            summary, incomplete = model_usage.usage_summary(
                 state, days=7, now=datetime.datetime(2026, 9, 11, 12, 0)
             )
 
         self.assertEqual(summary["compile"]["calls"], 1)
         self.assertEqual(summary["compile"]["prompt_chars"], 10)
         self.assertEqual(summary["compile"]["duration_ms"], 5)
+        self.assertTrue(incomplete)
 
     def test_run_exec_keeps_result_when_usage_lock_is_contended(self) -> None:
         cases = (
