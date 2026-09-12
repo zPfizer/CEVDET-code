@@ -10,6 +10,7 @@ gerçek modeli veya App oturumunu doğrulamaz.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 import datetime
 import hashlib
 import json
@@ -403,10 +404,24 @@ class JourneyE2ETests(unittest.TestCase):
                 records.append(value)
         return records
 
-    def _cleanup_managed_workers(self, registry: Path) -> None:
+    def _cleanup_managed_workers(self, registry: Path, state: Path) -> None:
         records = self._managed_worker_records(
             {"CEVO_JOURNEY_WORKER_REGISTRY": str(registry)},
         )
+        # Flush children may launch maintenance themselves. Its real receipt
+        # belongs to this temporary fixture and preserves native birth identity.
+        for lane in (state, state / "maintenance"):
+            try:
+                receipt = json.loads(
+                    (lane / "worker-supervisor.json").read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                continue
+            if isinstance(receipt, dict):
+                records.append({
+                    "pid": receipt.get("owner_pid"),
+                    "identity": receipt.get("owner_identity"),
+                })
         for record in records:
             pid = record.get("pid")
             identity = record.get("identity")
@@ -618,7 +633,10 @@ class JourneyE2ETests(unittest.TestCase):
                     self.assertFalse(output.exists())
 
     def test_full_memory_journey_survives_process_boundaries(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="cevo-journey-", ignore_cleanup_errors=True) as temporary:
+        with (
+            tempfile.TemporaryDirectory(prefix="cevo-journey-") as temporary,
+            ExitStack() as workers_cleanup,
+        ):
             root = Path(temporary)
             vault = root / "vault"
             codex = _copy_runtime(vault)
@@ -626,9 +644,10 @@ class JourneyE2ETests(unittest.TestCase):
             state = codex / "scripts" / ".state"
             stub = _write_stub_codex(root)
             environment = self._environment(stub, root / "codex-home")
-            self.addCleanup(
+            workers_cleanup.callback(
                 self._cleanup_managed_workers,
                 Path(environment["CEVO_JOURNEY_WORKER_REGISTRY"]),
+                state,
             )
             session_id = str(uuid.uuid4())
             transcript = _write_transcript(root, session_id)
@@ -776,7 +795,10 @@ class JourneyE2ETests(unittest.TestCase):
             self._assert_managed_workers_stopped(environment)
 
     def test_read_only_turn_blocks_the_whole_write_chain(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="cevo-journey-ro-", ignore_cleanup_errors=True) as temporary:
+        with (
+            tempfile.TemporaryDirectory(prefix="cevo-journey-ro-") as temporary,
+            ExitStack() as workers_cleanup,
+        ):
             root = Path(temporary)
             vault = root / "vault"
             codex = _copy_runtime(vault)
@@ -784,9 +806,10 @@ class JourneyE2ETests(unittest.TestCase):
             state = codex / "scripts" / ".state"
             stub = _write_stub_codex(root)
             environment = self._environment(stub, root / "codex-home")
-            self.addCleanup(
+            workers_cleanup.callback(
                 self._cleanup_managed_workers,
                 Path(environment["CEVO_JOURNEY_WORKER_REGISTRY"]),
+                state,
             )
             session_id = str(uuid.uuid4())
             transcript = _write_transcript(root, session_id)
