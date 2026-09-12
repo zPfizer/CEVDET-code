@@ -59,6 +59,31 @@ def _pending_record(job_id: str) -> dict[str, object]:
 
 
 class HealthReportTests(unittest.TestCase):
+    def test_new_transport_after_orphan_scan_aborts_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            transport = state / "hookin-concurrent.json"
+            scan = health_report.orphan_hook_input_count
+
+            def scan_then_enqueue(directory):
+                count = scan(directory)
+                transport.write_text(json.dumps({
+                    "delivery_schema_version": 1,
+                    "session_id": "concurrent",
+                    "transcript_path": str(state / "source.jsonl"),
+                    "reason": "turnend",
+                    "event_iso": "2026-09-09T12:00:00+03:00",
+                }), encoding="utf-8")
+                return count
+
+            target = vault / "report.md"
+            with mock.patch.object(health_report, "orphan_hook_input_count", scan_then_enqueue):
+                with self.assertRaisesRegex(OSError, "worker-state-changed"):
+                    health_report.write_report(vault, target)
+            self.assertTrue(transport.exists())
+            self.assertFalse(target.exists())
+
     def test_ready_pending_with_failed_supervisor_is_visible(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

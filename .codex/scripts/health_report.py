@@ -455,18 +455,22 @@ def worker_fences(state_dir: Path) -> tuple[str, ...]:
 def _worker_observation(state_dir: Path) -> dict[Path, tuple[int, ...]]:
     """Detect ordinary atomic queue moves/writes across a report scan."""
     observation = {}
+    paths = []
     for jobs in _worker_job_roots(state_dir):
-        paths = [path for stage in WORKER_STAGES for path in _json_files(jobs / stage)]
+        paths.extend(path for stage in WORKER_STAGES for path in _json_files(jobs / stage))
         paths.extend((jobs / "quarantined").glob("*.payload"))
-        supervisor = jobs.parent / "worker-supervisor.json"
+    for lane in (state_dir, state_dir / "maintenance"):
+        paths.extend(path for path in _json_files(lane, error_prefix="state")
+                     if path.name.startswith("hookin-"))
+        supervisor = lane / "worker-supervisor.json"
         if supervisor.exists():
             if _bounded_json(supervisor) is None:
                 raise OSError("worker-supervisor-unreadable")
             paths.append(supervisor)
-        for path in paths:
-            info = path.lstat()
-            observation[path] = (info.st_dev, info.st_ino, info.st_size,
-                                 info.st_mtime_ns, info.st_ctime_ns)
+    for path in paths:
+        info = path.lstat()
+        observation[path] = (info.st_dev, info.st_ino, info.st_size,
+                             info.st_mtime_ns, info.st_ctime_ns)
     return observation
 
 
