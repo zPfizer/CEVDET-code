@@ -1,10 +1,11 @@
-"""Gerçek kullanıcı yolculuğu, gerçek süreç sınırlarıyla.
+"""Sentetik hafıza yolculuğu, gerçek süreç sınırlarıyla.
 
 Diğer testler fonksiyon seviyesinde mock kullanır; burada zincir üretimdeki
-gibi koşar: hook.py stdin JSON ile subprocess olarak çalışır, worker'ı
-kendisi başlatır, flush model olarak CODEX_CLI_PATH'in gösterdiği sahte
-codex ikilisini (süreç sınırında stub) çağırır, daily dosyası gerçekten
-yazılır ve bir SONRAKİ oturumun session-start'ı o içeriği geri çağırır.
+gibi ayrı süreçlere ayrılır: hook.py stdin JSON ile çalışır; kuyruk, worker
+CLI'si de çağrılarak boşaltılır. Flush model olarak CODEX_CLI_PATH'in
+gösterdiği sahte codex ikilisini çağırır; daily dosyası yazılır ve başka bir
+session-start o içeriği geri çağırır. Bu test bağımsız arka plan handoff'unu,
+gerçek modeli veya App oturumunu doğrulamaz.
 """
 
 from __future__ import annotations
