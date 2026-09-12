@@ -155,6 +155,18 @@ class VaultTagQualityTests(unittest.TestCase):
 
         self.assertEqual([violation.tag for violation in violations], ['gercek'])
 
+        nested = tag_taxonomy.NoteIndex(
+            Path('nested.md'),
+            PurePosixPath('nested.md'),
+            '- Ana madde\n'
+            '    #nested-tag\n'
+            'Gerçek #gercek\n',
+        )
+        self.assertEqual(
+            [violation.tag for violation in tag_taxonomy._inline_tag_violations(nested)],
+            ['nested-tag', 'gercek'],
+        )
+
     def test_migration_patch_only_changes_tags_and_dry_run_keeps_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

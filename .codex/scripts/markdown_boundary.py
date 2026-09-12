@@ -8,6 +8,9 @@ import re
 
 FENCE_LINE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^\r\n]*)$")
 INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
+LIST_ITEM = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])(?P<gap>[ \t]+|$)"
+)
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 
 
@@ -80,17 +83,26 @@ def markdown_body(
 
     frontmatter_end = -1
     if lines and lines[0][3].strip() == "---":
-        frontmatter_end = len(lines) - 1
-        for index, frontmatter_line in enumerate(lines[1:], start=1):
-            if frontmatter_line[3].rstrip(" \t") == "---":
-                frontmatter_end = index
-                break
-        if mask_frontmatter:
+        closing = next(
+            (
+                index
+                for index, frontmatter_line in enumerate(lines[1:], start=1)
+                if frontmatter_line[3].rstrip(" \t") == "---"
+            ),
+            None,
+        )
+        if closing is None:
+            if mask_frontmatter:
+                frontmatter_end = len(lines) - 1
+        else:
+            frontmatter_end = closing
+        if mask_frontmatter and frontmatter_end >= 0:
             for start, end, _line_end, _content in lines[: frontmatter_end + 1]:
                 _blank(chars, start, end)
 
     fence_char: str | None = None
     fence_length = 0
+    list_contexts: list[tuple[int, int]] = []
     for index, (start, end, _line_end, content) in enumerate(lines):
         if index <= frontmatter_end:
             continue
@@ -112,9 +124,45 @@ def markdown_body(
             fence_length = len(fence.group(1))
             _blank(chars, start, end)
             continue
+        indentation = len(content) - len(content.lstrip(" \t"))
+        list_item = LIST_ITEM.match(content)
+        if list_item is not None:
+            nested = any(parent < indentation for parent, _content in list_contexts)
+            if indentation < 4 or nested:
+                list_contexts = [
+                    context
+                    for context in list_contexts
+                    if context[0] < indentation
+                ]
+                gap = list_item.group("gap")
+                content_indent = (
+                    indentation
+                    + len(list_item.group("marker"))
+                    + (len(gap) if gap else 1)
+                )
+                list_contexts.append((indentation, content_indent))
+                continue
+            _blank(chars, start, end)
+            list_contexts = []
+            continue
         if INDENTED_CODE_LINE.match(content):
+            list_context = next(
+                (
+                    context
+                    for context in reversed(list_contexts)
+                    if indentation >= context[1]
+                ),
+                None,
+            )
+            if (
+                list_context is not None
+                and indentation < list_context[1] + 4
+            ):
+                continue
             _blank(chars, start, end)
             continue
+        if content.strip():
+            list_contexts = []
     if mask_inline_code:
         _blank_inline_code(chars, "".join(chars))
     return "".join(chars)
