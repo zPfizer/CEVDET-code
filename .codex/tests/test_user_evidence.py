@@ -147,6 +147,31 @@ class UserEvidenceTests(unittest.TestCase):
         self.assertNotIn('Kısa yanıt tercihi.', filtered)
         self.assertNotIn('user-evidence:', filtered)
 
+    def test_reverse_ledger_imports_are_limited_to_quote_grammar(self):
+        # Bağımlılık oku tek yönde: ledger → evidence. bind_evidence artık
+        # okuyucuyu enjeksiyonla alır; ledger'dan kalan tek ters kenar
+        # QUOTED_CONTENT gramerdir ve o da yaprak modüle taşınınca boşalmalı.
+        import ast
+        from pathlib import Path
+
+        tree = ast.parse(Path(evidence.__file__).read_text(encoding='utf-8'))
+        imported_from_ledger = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == 'memory_ledger'
+            for alias in node.names
+        }
+        self.assertLessEqual(imported_from_ledger, {'QUOTED_CONTENT'})
+
+    def test_previous_summary_without_injected_reader_fails_loudly(self):
+        from pathlib import Path
+
+        with self.assertRaises(ValueError):
+            evidence.bind_evidence(
+                sections('Yok.'), [], STAMP,
+                previous_summary='- eski satır', vault_root=Path('.'),
+            )
+
 
 if __name__ == '__main__':
     unittest.main()
