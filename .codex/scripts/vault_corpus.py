@@ -162,7 +162,7 @@ def link_key(target: str) -> str | None:
         return None
     candidate = PurePosixPath(cleaned)
     if candidate.suffix.lower() != ".md":
-        candidate = candidate.with_suffix(".md")
+        candidate = candidate.with_name(candidate.name + ".md")
     return candidate.as_posix()
 
 
@@ -178,5 +178,5 @@ def resolve_link(
     note = keyed.get(key)
     if note is not None:
         return note
-    candidates = stems.get(PurePosixPath(target).name, ())
+    candidates = stems.get(PurePosixPath(key).stem, ())
     return candidates[0] if len(candidates) == 1 else None
