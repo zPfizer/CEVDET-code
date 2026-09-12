@@ -1205,6 +1205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     hook_deadline = _hook_deadline(args.event)
     scope_validated = False
     session_start_context_emitted = False
+    response_emitted = False
     try:
         payload = _load_payload()
         _validate_hook_scope(payload, deadline=hook_deadline)
@@ -1419,6 +1420,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.event == "user-prompt":
             _emit_user_prompt_result(emitted_context or "")
+            response_emitted = bool(emitted_context)
         record_hook_runtime(
             args.event,
             payload,
@@ -1431,6 +1433,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         clear_hook_health(STATE_DIR, payload, deadline=hook_deadline)
         if args.event == "turn-end":
             print(json.dumps({"continue": True}))
+            response_emitted = True
     except HookScopeError as exc:
         print(f"Cevo kanca kapsamı doğrulanamadı: {exc}", file=sys.stderr)
         return 1
@@ -1461,7 +1464,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({
                 "systemMessage": "Son konuşma kaydının durumunu doğrulayamıyorum."
             }, ensure_ascii=True))
-        elif args.event == 'user-prompt':
+        elif args.event == 'user-prompt' and not response_emitted:
             _emit_user_prompt_result(
                 '[Hafıza] Hafıza işlemi tamamlanamadı; kayıt veya unutma başarısı iddia etme. '
                 'Sorunu kullanıcıya kısa biçimde bildir ve kaynağı koru.'

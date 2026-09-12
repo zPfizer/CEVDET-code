@@ -213,6 +213,42 @@ class HookIntegrationTests(unittest.TestCase):
             "ctx",
         )
 
+    def test_user_prompt_receipt_failure_does_not_emit_second_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            deadline = time.monotonic() + 30
+            payload = {"session_id": "prompt-receipt-failure", "prompt": "merhaba", "cwd": str(vault)}
+            output = io.StringIO()
+            with (
+                mock.patch.object(hook, "VAULT_ROOT", vault),
+                mock.patch.object(hook, "STATE_DIR", state),
+                mock.patch.object(hook, "_validate_hook_scope"),
+                mock.patch.object(hook, "_hook_deadline", return_value=deadline),
+                mock.patch.object(hook, "handle_user_prompt", return_value="ctx"),
+                mock.patch.object(
+                    hook,
+                    "record_hook_runtime",
+                    side_effect=hook.LockUnavailable("receipt-busy"),
+                ),
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                mock.patch.object(sys, "stdout", output),
+            ):
+                result = hook.main(["user-prompt", "--strict"])
+
+        lines = output.getvalue().splitlines()
+        self.assertEqual(result, 1)
+        self.assertEqual(len(lines), 1)
+        emitted = json.loads(lines[0])
+        self.assertEqual(
+            emitted["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit",
+        )
+        self.assertEqual(
+            emitted["hookSpecificOutput"]["additionalContext"],
+            "ctx",
+        )
+
     def test_session_start_pre_emit_failures_emit_one_safe_context_warning(self) -> None:
         failures = (
             workers.LockUnavailable("scope-busy"),
@@ -444,6 +480,47 @@ class HookIntegrationTests(unittest.TestCase):
         self.assertEqual(result.parent.name, "pending")
         self.assertGreaterEqual(len(seen), 3)
         self.assertTrue(all(value == deadline for _path, value in seen))
+
+    def test_maintenance_quarantine_writes_share_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / ".state"
+            lane = state / "maintenance"
+            workers._ensure_job_dirs(lane)
+            (lane / "worker-jobs" / "pending" / "job-corrupt.json").write_text(
+                "{bozuk",
+                encoding="utf-8",
+            )
+            deadline = time.monotonic() + 30
+            seen_bytes: list[tuple[Path, float | None]] = []
+            seen_json: list[tuple[Path, float | None]] = []
+            real_atomic_write_bytes = workers.atomic_write_bytes
+            real_atomic_write_json = workers.atomic_write_json
+
+            def capture_bytes(path: Path, payload: bytes, **kwargs: object) -> None:
+                seen_bytes.append((path, kwargs.get("deadline")))
+                real_atomic_write_bytes(path, payload, **kwargs)
+
+            def capture_json(path: Path, payload: object, **kwargs: object) -> None:
+                seen_json.append((path, kwargs.get("deadline")))
+                real_atomic_write_json(path, payload, **kwargs)
+
+            with (
+                mock.patch.object(workers, "atomic_write_bytes", side_effect=capture_bytes),
+                mock.patch.object(workers, "atomic_write_json", side_effect=capture_json),
+            ):
+                result = workers.enqueue_maintenance(
+                    state,
+                    vault_root=root,
+                    start_supervisor=False,
+                    deadline=deadline,
+                )
+
+        self.assertEqual(result.parent.name, "pending")
+        self.assertEqual(len(seen_bytes), 1)
+        self.assertTrue(any(path.parent.name == "quarantined" for path, _value in seen_json))
+        self.assertGreaterEqual(len(seen_json), 3)
+        self.assertTrue(all(value == deadline for _path, value in seen_bytes + seen_json))
 
     def test_supervisor_launch_failure_receipt_writes_share_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

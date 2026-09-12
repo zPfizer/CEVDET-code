@@ -277,7 +277,7 @@ def enqueue_maintenance(
             pending = None
             with locked(lane / "worker-queue", timeout=_lock_timeout(deadline)):
                 for candidate in (_job_root(lane) / "pending").glob("*.json"):
-                    job = _load_job_quarantined(lane, candidate)
+                    job = _load_job_quarantined(lane, candidate, deadline=deadline)
                     if job is not None and job['kind'] == 'maintenance':
                         pending = candidate
                         break
@@ -603,7 +603,13 @@ def _load_job(path: Path) -> dict[str, Any]:
     return _validate_job(path, value)
 
 
-def _quarantine_job(state_dir: Path, path: Path, reason_code: str) -> None:
+def _quarantine_job(
+    state_dir: Path,
+    path: Path,
+    reason_code: str,
+    *,
+    deadline: float | None = None,
+) -> None:
     try:
         payload = path.read_bytes()
         job_id = _job_id_from_path(path) or hashlib.sha256(
@@ -613,7 +619,7 @@ def _quarantine_job(state_dir: Path, path: Path, reason_code: str) -> None:
         tombstone = quarantine / f"job-{job_id}.json"
         payload_path = tombstone.with_suffix(".payload")
         payload_sha256 = hashlib.sha256(payload).hexdigest()
-        atomic_write_bytes(payload_path, payload)
+        atomic_write_bytes(payload_path, payload, deadline=deadline)
         atomic_write_json(
             tombstone,
             {
@@ -627,13 +633,19 @@ def _quarantine_job(state_dir: Path, path: Path, reason_code: str) -> None:
                 "quarantined_ts": int(time.time()),
             },
             sort_keys=True,
+            deadline=deadline,
         )
         path.unlink()
     except OSError as exc:
         raise ValueError("worker-quarantine-failed") from exc
 
 
-def _load_job_quarantined(state_dir: Path, path: Path) -> dict[str, Any] | None:
+def _load_job_quarantined(
+    state_dir: Path,
+    path: Path,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any] | None:
     try:
         return _load_job(path)
     except ValueError as exc:
@@ -642,7 +654,7 @@ def _load_job_quarantined(state_dir: Path, path: Path) -> dict[str, Any] | None:
             if str(exc) == "worker-job-json-invalid"
             else "worker-job-schema-invalid"
         )
-        _quarantine_job(state_dir, path, reason)
+        _quarantine_job(state_dir, path, reason, deadline=deadline)
         return None
 
 
@@ -747,7 +759,7 @@ def _coalesce_pending_flush_locked(
         return None
     matches: list[tuple[Path, dict[str, Any]]] = []
     for path in (_job_root(state_dir) / "pending").glob("*.json"):
-        job = _load_job_quarantined(state_dir, path)
+        job = _load_job_quarantined(state_dir, path, deadline=deadline)
         if job is None or job.get("kind") != "flush":
             continue
         if _flush_scope(job) == scope:
@@ -825,11 +837,15 @@ def _coalesce_pending_flush_locked(
     return retained_path
 
 
-def _unresolved_job_count_locked(state_dir: Path) -> int:
+def _unresolved_job_count_locked(
+    state_dir: Path,
+    *,
+    deadline: float | None = None,
+) -> int:
     count = 0
     for state in ("pending", "claimed", "running", "dead-letter"):
         for path in (_job_root(state_dir) / state).glob("*.json"):
-            if _load_job_quarantined(state_dir, path) is not None:
+            if _load_job_quarantined(state_dir, path, deadline=deadline) is not None:
                 count += 1
     # A quarantine tombstone is unresolved work even when its original schema
     # is no longer readable, so it remains part of admission accounting.
@@ -887,7 +903,7 @@ def _enqueue_job_locked(
     )
     if path is not None:
         return path
-    if _unresolved_job_count_locked(state_dir) >= MAX_UNRESOLVED_JOBS:
+    if _unresolved_job_count_locked(state_dir, deadline=deadline) >= MAX_UNRESOLVED_JOBS:
         raise WorkerQueueBackpressure("worker-queue-backpressure")
     sequence_path = state_dir / "worker-sequence.json"
     try:
