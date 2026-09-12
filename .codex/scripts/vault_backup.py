@@ -296,7 +296,7 @@ def _validate_keep(keep: int) -> None:
 
 def _verify_bundle(vault: Path, bundle: Path) -> None:
     try:
-        _git(vault, "bundle", "verify", str(bundle))
+        _validate_bundle_artifact(vault, bundle)
     except BackupError as error:
         raise BackupError(f"yedek bundle doğrulanamadı: {bundle}") from error
 

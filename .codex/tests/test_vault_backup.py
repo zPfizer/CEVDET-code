@@ -350,7 +350,13 @@ class VaultBackupTests(unittest.TestCase):
             _init_repo(vault)
             valid = vault_backup.create_bundle(vault, dest, now=1_758_000_000)
             corrupt = valid.parent / "vault-20990101-000000.bundle"
-            corrupt.write_bytes(b"not a git bundle")
+            bundle_bytes = valid.read_bytes()
+            corrupt.write_bytes(bundle_bytes[:-1])
+
+            self.assertEqual(
+                _git(vault, "bundle", "verify", str(corrupt)).returncode,
+                0,
+            )
 
             with self.assertRaises(vault_backup.BackupError):
                 vault_backup.prune_bundles(dest, keep=1, vault=vault)
