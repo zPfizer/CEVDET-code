@@ -58,6 +58,10 @@ def _read_receipt(path: Path) -> dict[str, Any] | None:
             and (not isinstance(value['previous_after_sha256'], str)
                  or _KEY.fullmatch(value['previous_after_sha256']) is None)):
         raise ValueError('daily-operation-invalid')
+    if ('summary_sha256' in value
+            and (not isinstance(value['summary_sha256'], str)
+                 or _KEY.fullmatch(value['summary_sha256']) is None)):
+        raise ValueError('daily-operation-invalid')
     if value['schema_version'] == COMPACT_SCHEMA_VERSION and value.get('status') != 'committed':
         raise ValueError('daily-operation-invalid')
     return value
@@ -294,7 +298,8 @@ def publish(
     private_root = vault_root / '.codex/private-memory'
     hashes = load_suppressed_hashes(private_root) if memory_hashes is None else memory_hashes
     projected = filter_suppressed_text(summary, hashes)
-    # A prepared operation from an older preference set cannot be replayed.
+    # Suppression changes use a new operation identity; prepared summary drift
+    # is checked again against the recovery receipt in _publish.
     if hashes:
         idempotency_key = _sha256((idempotency_key + '\0' + ''.join(sorted(hashes))).encode())
     with suppression_guard(private_root, hashes):
@@ -317,6 +322,7 @@ def _publish(
     _fail_after: str | None = None,
 ) -> bool:
     state_dir.mkdir(parents=True, exist_ok=True)
+    summary_sha256 = _sha256(summary.encode('utf-8'))
     operation_id = _operation_id(marker_namespace, idempotency_key)
     operation_dir = state_dir / "daily-operations"
     receipt_path = operation_dir / f"{operation_id}.json"
@@ -327,6 +333,9 @@ def _publish(
         receipt = _read_receipt(receipt_path)
         if receipt is not None and receipt.get('operation_id') != operation_id:
             raise ValueError('daily-operation-invalid')
+        if receipt is not None and receipt.get('status') in ('prepared', 'committing'):
+            if receipt.get('summary_sha256') != summary_sha256:
+                raise ValueError('daily-prepared-summary-drift')
         after_path = _after_path(
             operation_dir,
             operation_id,
@@ -335,9 +344,11 @@ def _publish(
         if receipt is None:
             date_text = now.date().isoformat()
             daily_path = vault_root / "daily" / f"{date_text}.md"
-            newline = "\r\n" if daily_path.is_file() and b"\r\n" in daily_path.read_bytes() else "\n"
             with locked(state_dir / f"daily-{date_text}"):
                 before = daily_path.read_bytes() if daily_path.is_file() else b""
+                # Derive the newline from the locked read: an unlocked probe can
+                # disagree with ``before`` and mix line endings into the image.
+                newline = "\r\n" if b"\r\n" in before else "\n"
                 base = daily_with_graph_link(
                     before.decode("utf-8") if before else "",
                     date_text,
@@ -363,6 +374,7 @@ def _publish(
                     "before_sha256": _sha256(before),
                     "after_sha256": _sha256(after_text.encode("utf-8")),
                     "body_sha256": body_sha256,
+                    "summary_sha256": summary_sha256,
                     "after_image_sha256": _sha256(after_path.read_bytes()),
                 }
                 atomic_write_json(receipt_path, receipt, sort_keys=True)

@@ -1,6 +1,6 @@
 # CEVDET PR çalışma düzeni
 
-Kod deposu: https://github.com/zPfizer/CEVDET-code (private).
+Kod deposu: https://github.com/zPfizer/CEVDET-code (public).
 Yerel Vault ve eski Vault Git geçmişi bu depodan ayrıdır.
 
 ## Her bağımsız iş için
