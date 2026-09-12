@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 from typing import Any, Sequence
 
-from file_lock import locked
+from file_lock import LockUnavailable, locked
 
 SCHEMA_VERSION = 1
 KEEP_DAYS = 30
@@ -68,10 +68,14 @@ def record(
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
     line = json.dumps(entry, ensure_ascii=False)
-    with locked(state_dir / "model-usage"):
-        with _usage_path(state_dir, moment.date()).open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
-        _prune(state_dir, moment.date())
+    try:
+        # ponytail: contention drops telemetry; durable queueing belongs to a separate recorder.
+        with locked(state_dir / "model-usage", timeout=0):
+            with _usage_path(state_dir, moment.date()).open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+            _prune(state_dir, moment.date())
+    except LockUnavailable:
+        return
 
 
 def _iter_records(state_dir: Path, since: datetime.date) -> list[dict[str, Any]]:

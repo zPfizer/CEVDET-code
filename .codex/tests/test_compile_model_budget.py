@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -13,6 +14,31 @@ from test_second_brain_acceptance import _deterministic_compiler, _seed_vault
 
 
 class CompileModelBudgetTests(unittest.TestCase):
+    def test_run_codex_accounts_for_file_backed_prompt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            state_dir = stage / '.state'
+            prompts = ('short', 'long prompt ' * 100)
+            wrapper = (
+                'Read .__alf4_compile_prompt.md. Follow its instructions.'
+                ' Do not modify that file.'
+            )
+
+            with patch.object(compiler, 'STATE_DIR', state_dir), \
+                    patch.object(compiler.codex_runner, '_bounded_exec', return_value=('ok', None)) as execute:
+                for prompt in prompts:
+                    self.assertIsNone(compiler._run_codex(prompt, stage))
+
+            entries = [
+                json.loads(line)
+                for path in state_dir.glob('model-usage-*.jsonl')
+                for line in path.read_text(encoding='utf-8').splitlines()
+            ]
+
+        self.assertEqual([item['prompt_chars'] for item in entries], [len(item) for item in prompts])
+        self.assertEqual([item['purpose'] for item in entries], ['compile', 'compile'])
+        self.assertEqual([item.args[0] for item in execute.call_args_list], [wrapper, wrapper])
+
     def test_repair_counts_against_budget_and_leaves_invalid_daily_pending(self):
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

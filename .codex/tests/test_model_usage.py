@@ -3,12 +3,15 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
 from _fixtures import CODEX_DIR  # noqa: F401
 import codex_runner
+import file_lock
 import model_usage
+import process_control
 
 
 class ModelUsageTests(unittest.TestCase):
@@ -121,6 +124,60 @@ class ModelUsageTests(unittest.TestCase):
         self.assertIsNone(text)
         self.assertEqual(reason, "codex-cli-path-invalid")
         self.assertEqual(leftovers, [])
+
+    def test_run_exec_keeps_result_when_usage_lock_is_contended(self) -> None:
+        cases = (
+            ("success", ("answer", None), None),
+            ("timeout", (None, "codex-timeout"), None),
+            (
+                "cleanup-error",
+                None,
+                process_control.ProcessTreeCleanupError(
+                    ["codex"], 1, 4242, OSError("tree still running")
+                ),
+            ),
+        )
+        for name, bounded_result, bounded_error in cases:
+            with self.subTest(outcome=name), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                captured: dict[str, object] = {}
+
+                def invoke() -> None:
+                    try:
+                        captured["result"] = codex_runner.run_exec(
+                            "prompt",
+                            sandbox="read-only",
+                            timeout=1,
+                            usage_state_dir=state,
+                            purpose="test",
+                        )
+                    except BaseException as exc:  # Thread boundary for cleanup errors.
+                        captured["error"] = exc
+
+                patch_kwargs = (
+                    {"side_effect": bounded_error}
+                    if bounded_error is not None
+                    else {"return_value": bounded_result}
+                )
+                with mock.patch.object(codex_runner, "_bounded_exec", **patch_kwargs):
+                    holder = file_lock.locked(state / "model-usage")
+                    holder.__enter__()
+                    try:
+                        thread = threading.Thread(target=invoke, daemon=True)
+                        thread.start()
+                        thread.join(1)
+                        completed_while_locked = not thread.is_alive()
+                    finally:
+                        holder.__exit__(None, None, None)
+                    thread.join(1)
+
+                self.assertTrue(completed_while_locked)
+                self.assertFalse(thread.is_alive())
+                if bounded_error is None:
+                    self.assertEqual(captured.get("result"), bounded_result)
+                else:
+                    self.assertIs(captured.get("error"), bounded_error)
+                self.assertEqual(list(state.glob("model-usage-*.jsonl")), [])
 
 
 if __name__ == "__main__":

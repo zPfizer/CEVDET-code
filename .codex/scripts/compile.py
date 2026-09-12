@@ -1162,6 +1162,7 @@ def _run_codex(prompt: str, stage: Path) -> str | None:
             stage=stage,
             propagate_cleanup_error=True,
             usage_state_dir=STATE_DIR,
+            usage_prompt_chars=len(prompt),
             purpose=(
                 'compile-repair'
                 if prompt.startswith('BELLEK ŞEMASI ONARIMI')
