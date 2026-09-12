@@ -634,9 +634,17 @@ class JourneyE2ETests(unittest.TestCase):
             self.assertEqual(
                 emitted["hookSpecificOutput"]["hookEventName"], "SessionStart"
             )
-            self.assertIn(CANNED_TODO, context)
-            self.assertIn(CANNED_CLAIM, context)
-            self.assertIn(evidence_link, context)
+            daily_match = re.search(
+                r"\[Hafıza: Bugünün Logu\]\n(?P<body>.*?)(?=\n\n\[|\Z)",
+                context,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(daily_match, context)
+            assert daily_match is not None
+            daily_context = daily_match.group("body")
+            self.assertIn(CANNED_TODO, daily_context)
+            self.assertIn(CANNED_CLAIM, daily_context)
+            self.assertIn(evidence_link, daily_context)
             self._assert_managed_workers_stopped(environment)
 
     def test_read_only_turn_blocks_the_whole_write_chain(self) -> None:
