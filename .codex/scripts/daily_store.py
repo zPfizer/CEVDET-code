@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import stat
 from typing import Any
 
 from file_lock import LockUnavailable, locked
@@ -83,7 +84,36 @@ def _daily_path(vault_root: Path, receipt: dict[str, Any]) -> Path:
     if not valid_date or daily_relative != f'daily/{date_text}.md':
         raise ValueError('daily-operation-path-invalid')
     path = vault_root / daily_relative
-    if path.resolve().parent != vault_root.resolve() / 'daily':
+    vault_resolved = vault_root.resolve()
+    daily_dir = vault_root / 'daily'
+    try:
+        daily_stat = daily_dir.lstat()
+    except FileNotFoundError:
+        daily_stat = None
+    except (OSError, RuntimeError) as exc:
+        raise ValueError('daily-operation-path-invalid') from exc
+    if daily_stat is not None and (
+        daily_dir.is_symlink()
+        or daily_dir.is_junction()
+        or not stat.S_ISDIR(daily_stat.st_mode)
+        or daily_dir.resolve(strict=True) != vault_resolved / 'daily'
+    ):
+        raise ValueError('daily-operation-path-invalid')
+    try:
+        resolved_parent = path.resolve().parent
+        path_stat = path.lstat()
+    except FileNotFoundError:
+        path_stat = None
+        resolved_parent = path.resolve().parent
+    except (OSError, RuntimeError) as exc:
+        raise ValueError('daily-operation-path-invalid') from exc
+    if resolved_parent != vault_resolved / 'daily':
+        raise ValueError('daily-operation-path-invalid')
+    if path_stat is not None and (
+        path.is_symlink()
+        or not stat.S_ISREG(path_stat.st_mode)
+        or path_stat.st_nlink != 1
+    ):
         raise ValueError('daily-operation-path-invalid')
     return path
 
@@ -343,8 +373,14 @@ def _publish(
         )
         if receipt is None:
             date_text = now.date().isoformat()
-            daily_path = vault_root / "daily" / f"{date_text}.md"
             with locked(state_dir / f"daily-{date_text}"):
+                daily_path = _daily_path(
+                    vault_root,
+                    {
+                        "date": date_text,
+                        "daily_relative": f"daily/{date_text}.md",
+                    },
+                )
                 before = daily_path.read_bytes() if daily_path.is_file() else b""
                 # Derive the newline from the locked read: an unlocked probe can
                 # disagree with ``before`` and mix line endings into the image.

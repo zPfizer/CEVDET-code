@@ -239,6 +239,36 @@ class DailyPublishGuards(unittest.TestCase):
                     vault, state, "Özet", "turnend", NOW, idempotency_key=KEY
                 )
 
+    def test_daily_junction_is_rejected_before_external_content_is_staged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault, state = self._vault(root)
+            outside = root / "dis"
+            outside.mkdir()
+            external = outside / "2026-09-11.md"
+            external.write_text(
+                "# Günlük Log: 2026-09-11\n\nexternal daily\n",
+                encoding="utf-8",
+            )
+            (vault / "daily").rmdir()
+            _junction(vault / "daily", outside)
+
+            with self.assertRaisesRegex(ValueError, "daily-operation-path-invalid"):
+                daily_store.publish(
+                    vault, state, "Özet", "turnend", NOW, idempotency_key=KEY
+                )
+
+            self.assertEqual(
+                external.read_text(encoding="utf-8"),
+                "# Günlük Log: 2026-09-11\n\nexternal daily\n",
+            )
+            staged = [
+                path.read_bytes()
+                for path in state.rglob("*")
+                if path.is_file() and path.suffix in {".json", ".md"}
+            ]
+            self.assertEqual(staged, [])
+
     def test_receipt_with_foreign_operation_id_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault, state = self._vault(Path(temporary))
