@@ -411,6 +411,62 @@ class HealthReportTests(unittest.TestCase):
         self.assertIn("Süresi geçmiş çalışan iş var", text)
         self.assertNotIn("Boş — takılı iş yok.", text)
 
+    def test_reused_running_process_identity_prevents_clean_queue_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            job_id = "f" * 32
+            record = _pending_record(job_id)
+            record.update(
+                {
+                    "status": "running",
+                    "attempt": 1,
+                    "claim_token": "a" * 32,
+                    "owner_pid": 1234,
+                    "owner_identity": "old-process",
+                    "lease_until": 1,
+                    "claimed_ts": 1,
+                    "running_ts": 1,
+                }
+            )
+            (state / "worker-jobs" / "running" / f"job-{job_id}.json").write_text(
+                json.dumps(record), encoding="utf-8"
+            )
+
+            with mock.patch.object(
+                worker_supervisor,
+                "_process_owner_classification",
+                return_value="mismatched",
+            ):
+                text = health_report.render(
+                    vault, now=datetime.datetime(2026, 9, 11)
+                )
+
+        self.assertIn("Süresi geçmiş çalışan iş: 1", text)
+        self.assertNotIn("Boş — takılı iş yok.", text)
+
+    def test_custom_report_target_rejects_linked_parent_inside_vault(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            outside = root / "outside-output"
+            vault.mkdir()
+            outside.mkdir()
+            _seed_state(vault)
+            parent = vault / "custom-output"
+            try:
+                parent.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            target = parent / "report.md"
+            try:
+                with self.assertRaisesRegex(ValueError, "report-target-invalid"):
+                    health_report.write_report(vault, target)
+                self.assertFalse((outside / "report.md").exists())
+            finally:
+                parent.unlink(missing_ok=True)
+
     def test_flush_support_artifacts_are_not_counted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

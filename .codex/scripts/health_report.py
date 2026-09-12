@@ -82,6 +82,32 @@ def _default_report_target(vault: Path) -> Path:
     return target
 
 
+def _validate_report_target(vault: Path, target: Path) -> None:
+    lexical = target if target.is_absolute() else Path.cwd() / target
+    lexical = lexical.absolute()
+    try:
+        relative_parent = lexical.parent.relative_to(vault)
+    except ValueError:
+        return
+    current = vault
+    for part in relative_parent.parts:
+        current /= part
+        try:
+            current_stat = current.lstat()
+            resolved = current.resolve(strict=False)
+        except FileNotFoundError:
+            continue
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("report-target-invalid") from exc
+        if (
+            stat.S_ISLNK(current_stat.st_mode)
+            or not stat.S_ISDIR(current_stat.st_mode)
+            or current.is_junction()
+            or not resolved.is_relative_to(vault)
+        ):
+            raise ValueError("report-target-invalid")
+
+
 def _validate_vault(vault: Path) -> None:
     try:
         vault_stat = vault.lstat()
@@ -347,7 +373,7 @@ def stale_running_count(
     jobs: Sequence[Path] | None = None,
     now: float,
 ) -> int:
-    from worker_supervisor import pid_is_alive
+    from worker_supervisor import _process_owner_classification
 
     total = 0
     for jobs_root in _worker_job_roots(state_dir) if jobs is None else jobs:
@@ -356,16 +382,13 @@ def stale_running_count(
             if not isinstance(record, dict):
                 raise OSError("worker-record-invalid")
             lease_until = _timestamp_value(record.get("lease_until"))
-            owner_pid = record.get("owner_pid")
             if lease_until is None:
                 raise OSError("worker-record-invalid")
             try:
-                owner_alive = isinstance(owner_pid, int) and not isinstance(
-                    owner_pid, bool
-                ) and pid_is_alive(owner_pid)
+                owner_status = _process_owner_classification(record)
             except (OSError, RuntimeError, ValueError) as exc:
                 raise OSError("worker-owner-unreadable") from exc
-            if lease_until <= now and not owner_alive:
+            if lease_until <= now and owner_status in {"inactive", "mismatched"}:
                 total += 1
     return total
 
@@ -655,6 +678,7 @@ def write_report(
     vault = vault.resolve()
     _validate_runtime_paths(vault)
     target = output if output is not None else _default_report_target(vault)
+    _validate_report_target(vault, target)
     atomic_write_text(target, render(vault, now=now, output=target), overwrite=overwrite)
     return target
 
