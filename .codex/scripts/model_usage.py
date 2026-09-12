@@ -99,6 +99,9 @@ def record(
     line = json.dumps(entry, ensure_ascii=False)
     try:
         # ponytail: contention drops telemetry; durable queueing belongs to a separate recorder.
+        lock_path = (state_dir / "model-usage").with_suffix(".lock")
+        if _unsafe_usage_target(lock_path):
+            return
         with locked(state_dir / "model-usage", timeout=0):
             usage_path = _usage_path(state_dir, moment.date())
             if _unsafe_usage_target(usage_path):
@@ -119,6 +122,8 @@ def _iter_records(
 ) -> list[dict[str, Any]]:
     records = []
     for path in sorted(Path(state_dir).glob("model-usage-*.jsonl")):
+        if _unsafe_usage_target(path):
+            continue
         day = _file_day(path)
         if day is None or day < since or (until is not None and day > until):
             continue
@@ -149,6 +154,11 @@ def usage_summary(
     since = moment.date() - datetime.timedelta(days=days - 1)
     summary: dict[str, dict[str, int]] = {}
     for entry in _iter_records(state_dir, since, until=moment.date()):
+        try:
+            prompt_chars = int(entry.get("prompt_chars", 0) or 0)
+            duration_ms = int(entry.get("duration_ms", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
         purpose = str(entry.get("purpose", "unknown"))
         bucket = summary.setdefault(
             purpose,
@@ -159,8 +169,8 @@ def usage_summary(
             bucket["ok"] += 1
         else:
             bucket["failed"] += 1
-        bucket["prompt_chars"] += int(entry.get("prompt_chars", 0) or 0)
-        bucket["duration_ms"] += int(entry.get("duration_ms", 0) or 0)
+        bucket["prompt_chars"] += prompt_chars
+        bucket["duration_ms"] += duration_ms
     return summary
 
 

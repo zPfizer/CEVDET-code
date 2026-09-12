@@ -192,7 +192,13 @@ class ModelUsageTests(unittest.TestCase):
             state = root / "state"
             state.mkdir()
             outside = root / "outside.jsonl"
-            outside.write_text("sentinel\n", encoding="utf-8")
+            outside.write_text(json.dumps({
+                "schema": 1,
+                "purpose": "outside",
+                "prompt_chars": 999,
+                "duration_ms": 1,
+                "outcome": "ok",
+            }) + "\n", encoding="utf-8")
             ledger = state / "model-usage-20260911.jsonl"
             try:
                 ledger.symlink_to(outside)
@@ -207,8 +213,74 @@ class ModelUsageTests(unittest.TestCase):
                 outcome="ok",
                 now=datetime.datetime(2026, 9, 11, 12, 0),
             )
-            self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel\n")
+            summary = model_usage.usage_summary(
+                state, days=7, now=datetime.datetime(2026, 9, 11, 12, 0)
+            )
+            self.assertEqual(summary, {})
+            self.assertEqual(
+                outside.read_text(encoding="utf-8"),
+                json.dumps({
+                    "schema": 1,
+                    "purpose": "outside",
+                    "prompt_chars": 999,
+                    "duration_ms": 1,
+                    "outcome": "ok",
+                }) + "\n",
+            )
             self.assertTrue(ledger.is_symlink())
+
+    def test_record_drops_symlinked_lock_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir()
+            outside = root / "outside.lock"
+            outside.write_text("sentinel", encoding="utf-8")
+            lock = state / "model-usage.lock"
+            try:
+                lock.symlink_to(outside)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            model_usage.record(
+                state,
+                purpose="compile",
+                prompt_chars=10,
+                duration_ms=5,
+                outcome="ok",
+                now=datetime.datetime(2026, 9, 11, 12, 0),
+            )
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel")
+            self.assertEqual(list(state.glob("model-usage-*.jsonl")), [])
+
+    def test_summary_skips_records_with_invalid_numeric_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            ledger = state / "model-usage-20260911.jsonl"
+            valid = {
+                "schema": 1,
+                "purpose": "compile",
+                "prompt_chars": 10,
+                "duration_ms": 5,
+                "outcome": "ok",
+            }
+            invalid_prompt = {**valid, "prompt_chars": "not-a-number"}
+            invalid_duration = {**valid, "duration_ms": "not-a-number"}
+            ledger.write_text(
+                "\n".join(json.dumps(item) for item in (
+                    valid, invalid_prompt, invalid_duration,
+                )) + "\n",
+                encoding="utf-8",
+            )
+
+            summary = model_usage.usage_summary(
+                state, days=7, now=datetime.datetime(2026, 9, 11, 12, 0)
+            )
+
+        self.assertEqual(summary["compile"]["calls"], 1)
+        self.assertEqual(summary["compile"]["prompt_chars"], 10)
+        self.assertEqual(summary["compile"]["duration_ms"], 5)
 
     def test_run_exec_keeps_result_when_usage_lock_is_contended(self) -> None:
         cases = (
