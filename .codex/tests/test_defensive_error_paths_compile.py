@@ -14,6 +14,7 @@ from unittest import mock
 from _fixtures import CODEX_DIR  # noqa: F401
 import compile as memory_compile
 import compile_state
+import state_store
 
 
 def _git_result(returncode: int = 0, stdout: str = "") -> types.SimpleNamespace:
@@ -24,14 +25,28 @@ class HealthAndPathGuards(unittest.TestCase):
     def test_health_writes_swallow_os_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
+            state_store.write_health(state, component="compile", error="önceki")
+            before = json.loads((state / "health.json").read_text(encoding="utf-8"))
+
             with mock.patch.object(
-                memory_compile, "write_component_health", side_effect=OSError
-            ):
-                memory_compile.write_health(state, "hata")
+                state_store, "atomic_write_json", side_effect=OSError("disk")
+            ) as atomic_write:
+                self.assertIsNone(memory_compile.write_health(state, "hata"))
+            atomic_write.assert_called_once()
+            self.assertEqual(
+                json.loads((state / "health.json").read_text(encoding="utf-8")),
+                before,
+            )
+
             with mock.patch.object(
-                memory_compile, "clear_component_health", side_effect=OSError
-            ):
-                memory_compile.clear_health(state, "compile")
+                state_store, "atomic_write_json", side_effect=OSError("disk")
+            ) as atomic_write:
+                self.assertIsNone(memory_compile.clear_health(state, "compile"))
+            atomic_write.assert_called_once()
+            self.assertEqual(
+                json.loads((state / "health.json").read_text(encoding="utf-8")),
+                before,
+            )
 
     def test_secret_path_guard(self) -> None:
         with self.assertRaises(memory_compile.PolicyError):

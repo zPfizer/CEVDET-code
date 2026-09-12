@@ -12,7 +12,9 @@ from unittest import mock
 
 from _fixtures import CODEX_DIR  # noqa: F401
 import doctor
+import flush
 import hook
+import worker_supervisor
 
 
 def _ctx(root: Path, now: float = 1000.0) -> doctor.Context:
@@ -194,13 +196,27 @@ class HealthReceiptChecks(unittest.TestCase):
     def test_flush_inflight_rejects_identity_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             ctx = _ctx(Path(temporary))
-            (ctx.state_dir / ("flush-" + "a" * 64 + ".json")).write_text(
-                json.dumps({"status": "inflight", "ts": ctx.now - 1,
-                            "session_key": "b" * 64}),
-                encoding="utf-8",
+            flush._write_flush_state(
+                ctx.state_dir,
+                "oturum",
+                ctx.now,
+                "inflight",
+                reason="turnend",
+                transcript_digest="a" * 64,
             )
+            path = ctx.state_dir / f"flush-{flush._session_key('oturum')}.json"
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            receipt["session_key"] = "b" * 64
+            path.write_text(json.dumps(receipt), encoding="utf-8")
             check = doctor._flush_inflight_check(ctx)
-        self.assertIn(check.status, {"FAIL", "WARN", "UNSTABLE_SNAPSHOT", "OK"})
+        self.assertEqual(
+            check,
+            doctor.Check(
+                "Flush devamlılığı",
+                "FAIL",
+                f"1 bozuk receipt; ilk: {path.name}",
+            ),
+        )
 
 
 class WorkerAndRetentionChecks(unittest.TestCase):
@@ -218,11 +234,38 @@ class WorkerAndRetentionChecks(unittest.TestCase):
             ctx = _ctx(Path(temporary))
             jobs = ctx.state_dir / "worker-jobs" / "pending"
             jobs.mkdir(parents=True)
-            (ctx.state_dir / "worker-supervisor.json").write_text(
-                json.dumps({"schema_version": 99}), encoding="utf-8"
+            (jobs / "job-ready.json").write_text(
+                json.dumps({"next_attempt_ts": ctx.now - 1}),
+                encoding="utf-8",
             )
+            worker_supervisor.ensure_supervisor(
+                ctx.state_dir,
+                vault_root=ctx.vault,
+                launcher=mock.Mock(),
+                now=ctx.now,
+            )
+            receipt_path = ctx.state_dir / "worker-supervisor.json"
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt["schema_version"] = 99
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
             check = doctor._worker_delayed_job_check(ctx)
-        self.assertIn(check.status, {"FAIL", "WARN", "OK"})
+            self.assertEqual(
+                check,
+                doctor.Check(
+                    "Worker gecikmiş iş",
+                    "FAIL",
+                    "supervisor receipt alanları geçersiz",
+                ),
+            )
+
+            receipt["schema_version"] = doctor.SUPERVISOR_SCHEMA_VERSION
+            receipt["status"] = "bozuk"
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            check = doctor._worker_delayed_job_check(ctx)
+        self.assertEqual(
+            check,
+            doctor.Check("Worker gecikmiş iş", "FAIL", "supervisor status geçersiz"),
+        )
 
     def test_compiler_queue_check_maps_policy_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

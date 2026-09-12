@@ -87,17 +87,16 @@ class SanitizerEdges(unittest.TestCase):
         self.assertNotIn("inner", cleaned)
 
     def test_deep_nesting_is_unverifiable_not_crash(self) -> None:
-        payload = "cok-gizli-deger"
-        for _ in range(12):
-            payload = json.dumps({"password": payload})
+        payload = (
+            '{"wrapper":'
+            + "[" * 200
+            + '{"password":"cok-gizli-deger"}'
+        )
         limit = sys.getrecursionlimit()
         try:
             sys.setrecursionlimit(120)
-            try:
-                cleaned, _redactions = memory_ledger.sanitize_text(payload)
-                self.assertNotIn("cok-gizli-deger", cleaned)
-            except (memory_ledger.MemoryPreferenceError, RecursionError):
-                pass
+            with self.assertRaises(memory_ledger.MemoryPreferenceError):
+                memory_ledger.sanitize_text(payload)
         finally:
             sys.setrecursionlimit(limit)
 

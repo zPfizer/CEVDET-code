@@ -14,6 +14,7 @@ from _fixtures import CODEX_DIR  # noqa: F401
 import companion_memory
 import flush
 from memory_ledger import MemoryReadOnlyError, mark_read_only_turn
+import state_store
 
 
 SUMMARY = "\n".join(f"## {s}\nKalıcı özet." for s in flush.EXPECTED_SECTIONS)
@@ -54,15 +55,47 @@ class HealthAndParserEdges(unittest.TestCase):
     def test_health_writes_swallow_os_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
+            state_store.write_health(
+                state,
+                component="flush",
+                error="önceki",
+                scope_key=state_store.session_scope("s"),
+            )
+            before = json.loads((state / "health.json").read_text(encoding="utf-8"))
+
             with mock.patch.object(
-                flush, "write_component_health", side_effect=OSError
-            ):
-                flush.write_health(state, "hata")
+                state_store, "atomic_write_json", side_effect=OSError("disk")
+            ) as atomic_write:
+                self.assertIsNone(flush.write_health(state, "hata", session_id="s"))
+            atomic_write.assert_called_once()
+            self.assertEqual(
+                json.loads((state / "health.json").read_text(encoding="utf-8")),
+                before,
+            )
+
             with mock.patch.object(
-                flush, "clear_component_health", side_effect=OSError
-            ):
-                flush.clear_health(state, "flush")
-                flush.clear_health_error(state, "flush", "hata", session_id="s")
+                state_store, "atomic_write_json", side_effect=OSError("disk")
+            ) as atomic_write:
+                self.assertIsNone(flush.clear_health(state, "flush", session_id="s"))
+            atomic_write.assert_called_once()
+            self.assertEqual(
+                json.loads((state / "health.json").read_text(encoding="utf-8")),
+                before,
+            )
+
+            with mock.patch.object(
+                state_store, "atomic_write_json", side_effect=OSError("disk")
+            ) as atomic_write:
+                self.assertIsNone(
+                    flush.clear_health_error(
+                        state, "flush", "önceki", session_id="s"
+                    )
+                )
+            atomic_write.assert_called_once()
+            self.assertEqual(
+                json.loads((state / "health.json").read_text(encoding="utf-8")),
+                before,
+            )
 
     def test_message_parts_edges(self) -> None:
         self.assertEqual(
