@@ -97,6 +97,30 @@ def _ensure_full_history(vault: Path) -> None:
         raise BackupError("shallow Git deposu tam geçmiş bundle'ı desteklemiyor")
 
 
+def _ref_snapshot(repo: Path) -> dict[str, str]:
+    lines = _git(
+        repo, "for-each-ref", "--format=%(refname) %(objectname)",
+    ).stdout.splitlines()
+    snapshot: dict[str, str] = {}
+    for line in lines:
+        ref, object_name = line.split(maxsplit=1)
+        snapshot[ref] = object_name
+    return snapshot
+
+
+def _bundle_ref_snapshot(repo: Path, bundle: Path) -> dict[str, str]:
+    lines = _git(repo, "bundle", "list-heads", str(bundle)).stdout.splitlines()
+    snapshot: dict[str, str] = {}
+    try:
+        for line in lines:
+            object_name, ref = line.split(maxsplit=1)
+            if ref != "HEAD":
+                snapshot[ref] = object_name
+    except ValueError as error:
+        raise BackupError(f"bundle ref'leri okunamadı: {bundle}") from error
+    return snapshot
+
+
 def _validate_bundle_artifact(vault: Path, bundle: Path) -> None:
     with tempfile.TemporaryDirectory(prefix=".bundle-check-", dir=bundle.parent) as temporary:
         mirror = Path(temporary) / "mirror.git"
@@ -186,6 +210,10 @@ def _create_bundle_locked(vault: Path, dest: Path, *, now: float | None = None) 
         _git(vault, "bundle", "create", str(partial), "--all")
         _git(vault, "bundle", "verify", str(partial))
         _validate_bundle_artifact(vault, partial)
+        bundle_refs = _bundle_ref_snapshot(vault, partial)
+        source_refs = _ref_snapshot(vault)
+        if bundle_refs != source_refs:
+            raise BackupError("Vault ref'leri bundle snapshot'ı sırasında değişti")
         os.replace(partial, final)
     finally:
         partial.unlink(missing_ok=True)

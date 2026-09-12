@@ -488,6 +488,35 @@ class VaultBackupTests(unittest.TestCase):
             self.assertNotIn("YEDEK BAŞARISIZ", output.getvalue())
             self.assertTrue(list(dest.rglob("vault-*.bundle")))
 
+    def test_source_ref_change_before_publish_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            real_validate = vault_backup._validate_bundle_artifact
+
+            def validate_then_commit(source: Path, bundle: Path) -> None:
+                real_validate(source, bundle)
+                (source / "not.md").write_text("snapshot sonrası", encoding="utf-8")
+                _git(source, "add", "not.md")
+                _git(
+                    source,
+                    "-c", "user.name=test",
+                    "-c", "user.email=test@example.invalid",
+                    "commit", "-q", "-m", "snapshot sonrası",
+                )
+
+            with mock.patch.object(
+                vault_backup,
+                "_validate_bundle_artifact",
+                side_effect=validate_then_commit,
+            ):
+                with self.assertRaises(vault_backup.BackupError):
+                    vault_backup.create_bundle(vault, dest)
+
+            self.assertFalse(list(dest.rglob("vault-*.bundle")))
+
     def test_main_reports_ignored_files_outside_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
