@@ -96,8 +96,7 @@ def _after_path(operation_dir: Path, operation_id: str,
             raise ValueError('daily-operation-invalid')
         name = f'{operation_id}.after.{generation}.md'
     path = operation_dir / name
-    # Ad, doğrulanmış hex kimlik + sabit ekten türediği için kaçamaz; savunma hattı.
-    if path.resolve().parent != operation_dir.resolve():  # pragma: no cover
+    if path.resolve().parent != operation_dir.resolve():
         raise ValueError('daily-operation-path-invalid')
     return path
 

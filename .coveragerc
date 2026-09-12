@@ -1,7 +1,7 @@
-# Kapsam sözleşmesi: hedef %100.
-# Dışlama yalnız iki sınıf için meşru: (1) CLI giriş satırı (main() ayrıca
-# test edilir), (2) bu platformda fiziksel olarak koşamayan dallar — her biri
-# kaynakta gerekçeli "pragma: no cover" taşır.
+# Satır kapsamı Windows/Python 3.14 üzerinde ölçülür; canlı App kabulü değildir.
+# CLI giriş satırları, POSIX dalları ve önceki doğrulamaların ulaşılmaz kıldığı
+# savunma dalları dışlanır. Her pragma kaynakta gerekçelendirilir; dosya sistemi
+# yarışları veya bağlantılarla ulaşılabilen güvenlik kontrolleri dışlanmaz.
 [run]
 source = .codex/scripts, .codex/hooks
 

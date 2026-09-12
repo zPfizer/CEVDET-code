@@ -102,6 +102,20 @@ class DailyReceiptGuards(unittest.TestCase):
             )
             self.assertTrue(numbered.name.endswith(".after.2.md"))
 
+    def test_after_path_rejects_symlink_to_external_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            operation_dir = root / "operations"
+            operation_dir.mkdir()
+            external = root / "external.md"
+            external.write_bytes(b"user content")
+            image = operation_dir / f"{KEY}.after.md"
+            image.symlink_to(external)
+
+            with self.assertRaisesRegex(ValueError, "daily-operation-path-invalid"):
+                daily_store._after_path(operation_dir, KEY, {})
+            self.assertEqual(external.read_bytes(), b"user content")
+
     def test_checked_compact_values_rejects_drifted_images(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             after_path = Path(temporary) / "after.md"
