@@ -69,14 +69,24 @@ def _git_probe(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 def _ensure_no_lfs(vault: Path) -> None:
     lfs_files = _git_probe(vault, "lfs", "ls-files", "--all")
-    if lfs_files.returncode == 0 and lfs_files.stdout.strip():
-        raise BackupError("Git LFS dosyaları desteklenmiyor; bundle üretilmedi")
+    if lfs_files.returncode == 0:
+        if lfs_files.stdout.strip():
+            raise BackupError("Git LFS dosyaları desteklenmiyor; bundle üretilmedi")
+        return
 
     pointer_blobs = _git_probe(
-        vault, "grep", "-I", "-l", "git-lfs.github.com/spec/v1", "HEAD", "--",
+        vault,
+        "grep", "-I", "-l", "--all-match", "-E",
+        "-e", r"^version https://git-lfs\.github\.com/spec/v1$",
+        "-e", r"^oid sha256:[0-9a-f]{64}$",
+        "-e", r"^size [0-9]+$",
+        "HEAD", "--",
     )
     attributes = _git_probe(
-        vault, "grep", "-I", "-l", "filter=lfs", "HEAD", "--", "*.gitattributes",
+        vault,
+        "grep", "-I", "-l", "-E",
+        r"(^|[[:space:]])filter=lfs([[:space:]]|$)",
+        "HEAD", "--", "*.gitattributes",
     )
     if pointer_blobs.returncode == 0 or attributes.returncode == 0:
         raise BackupError("Git LFS dosyaları desteklenmiyor; bundle üretilmedi")
@@ -84,6 +94,7 @@ def _ensure_no_lfs(vault: Path) -> None:
         raise BackupError("Git LFS pointer'ları doğrulanamadı")
     if attributes.returncode not in (0, 1):
         raise BackupError("Git LFS ayarları doğrulanamadı")
+    raise BackupError("Git LFS tam geçmişi doğrulanamadı; bundle üretilmedi")
 
 
 def _require_repo(vault: Path) -> None:

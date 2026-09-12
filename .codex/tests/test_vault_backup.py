@@ -258,7 +258,8 @@ class VaultBackupTests(unittest.TestCase):
             )
             (vault / "large.bin").write_text(
                 "version https://git-lfs.github.com/spec/v1\n"
-                "oid sha256:0123456789abcdef\n"
+                "oid sha256:0123456789abcdef0123456789abcdef"
+                "0123456789abcdef0123456789abcdef\n"
                 "size 42\n",
                 encoding="utf-8",
             )
@@ -275,6 +276,51 @@ class VaultBackupTests(unittest.TestCase):
 
             self.assertFalse(list(dest.rglob("vault-*.bundle")))
             self.assertFalse(list(dest.rglob("*.tmp")))
+
+    def test_lfs_literal_in_source_is_not_a_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            (vault / "script.py").write_text(
+                'POINTER_HEADER = "version https://git-lfs.github.com/spec/v1\\n"\n',
+                encoding="utf-8",
+            )
+            _git(vault, "add", "script.py")
+            _git(
+                vault,
+                "-c", "user.name=test",
+                "-c", "user.email=test@example.invalid",
+                "commit", "-q", "-m", "literal",
+            )
+
+            bundle = vault_backup.create_bundle(vault, dest)
+
+            self.assertTrue(bundle.exists())
+
+    def test_lfs_probe_failure_is_rejected_without_full_history_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            real_probe = vault_backup._git_probe
+
+            def failed_lfs_probe(
+                repo: Path, *args: str,
+            ) -> subprocess.CompletedProcess[str]:
+                if args == ("lfs", "ls-files", "--all"):
+                    return subprocess.CompletedProcess(
+                        ["git"], 1, "", "LFS probe failed",
+                    )
+                return real_probe(repo, *args)
+
+            with mock.patch.object(vault_backup, "_git_probe", side_effect=failed_lfs_probe):
+                with self.assertRaises(vault_backup.BackupError):
+                    vault_backup.create_bundle(vault, dest)
+
+            self.assertFalse(list(dest.rglob("vault-*.bundle")))
 
     def test_invalid_keep_does_not_publish_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
