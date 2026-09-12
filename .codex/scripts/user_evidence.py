@@ -9,6 +9,7 @@ import json
 import re
 from typing import TypedDict
 
+from markdown_boundary import markdown_body
 from quote_grammar import QUOTED_CONTENT
 
 
@@ -137,6 +138,18 @@ def _authored_quote(message: str, quote: str) -> bool:
     return False
 
 
+def _visible_source_body(text: str) -> str:
+    """Keep visible source markers while hiding examples and code spans."""
+    masked = markdown_body(text, mask_frontmatter=False)
+    chars = list(masked)
+    prefix = '<!-- user-source:'
+    for match in SOURCE.finditer(text):
+        end = match.start() + len(prefix)
+        if masked[match.start():end] == text[match.start():end]:
+            chars[match.start():match.end()] = text[match.start():match.end()]
+    return ''.join(chars)
+
+
 def _record(
     claim: str,
     citation: Mapping[str, object],
@@ -202,23 +215,34 @@ def bind_evidence(
         # Model output cannot mint a trusted record or reuse an old evidence link.
         body = EVIDENCE.sub('', body)
         body = USER_LINK.sub('', body)
-        logical_lines: list[str] = []
-        for line in body.splitlines():
+        visible_body = _visible_source_body(body)
+        logical_lines: list[tuple[str, str]] = []
+        for line, visible_line in zip(body.splitlines(), visible_body.splitlines()):
             # Models sometimes put the citation directly below its list item.
             # Never cross a blank line/section or silently choose among citations.
-            if (SOURCE.fullmatch(line.strip()) and logical_lines
-                    and logical_lines[-1].lstrip().startswith(('- ', '* ', '+ '))):
-                logical_lines[-1] += ' ' + line.strip()
+            if (SOURCE.fullmatch(visible_line.strip()) and logical_lines
+                    and logical_lines[-1][0].lstrip().startswith(('- ', '* ', '+ '))):
+                raw, visible = logical_lines[-1]
+                logical_lines[-1] = (
+                    raw + ' ' + line.strip(),
+                    visible + ' ' + visible_line.strip(),
+                )
             else:
-                logical_lines.append(line)
-        for line in logical_lines:
-            citations = list(SOURCE.finditer(line))
+                logical_lines.append((line, visible_line))
+        for line, visible_line in logical_lines:
+            citations = list(SOURCE.finditer(visible_line))
             clean = SOURCE.sub('', line).strip()
             claim = re.sub(r'^[-*+]\s+', '', clean).strip()
             record = None
             if len(citations) == 1 and claim:
                 try:
-                    citation = _json_object(json.loads(citations[0].group(1)))
+                    raw_marker = line[citations[0].start():citations[0].end()]
+                    raw_match = SOURCE.fullmatch(raw_marker)
+                    citation = (
+                        _json_object(json.loads(raw_match.group(1)))
+                        if raw_match is not None
+                        else None
+                    )
                     if citation is not None:
                         record = _record(claim, citation, turns, captured_at)
                 except (ValueError, TypeError):

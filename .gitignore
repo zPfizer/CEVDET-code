@@ -55,6 +55,7 @@
 !/.codex/scripts/file_lock.py
 !/.codex/scripts/flush.py
 !/.codex/scripts/graph_integrity.py
+!/.codex/scripts/markdown_boundary.py
 !/.codex/scripts/health_report.py
 !/.codex/scripts/intake_contract.py
 !/.codex/scripts/jsonl_tail.py

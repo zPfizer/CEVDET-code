@@ -241,6 +241,20 @@ class ProfileGuardTests(unittest.TestCase):
             self.assertIn("profile-claim-mismatch", profile_guard.check_profile(root, mismatch))
             self.assertIn("profile-claim-duplicate", profile_guard.check_profile(root, duplicate))
 
+    def test_check_links_ignores_fenced_and_inline_example_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                '```text\n[[missing-example]]\n```\n'
+                '`[[missing-inline]]`\n[[missing-real]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-broken'])
+
     def test_broken_and_outside_links_are_rejected_without_echoing_content(self) -> None:
         broken = PROFILE_TEXT.replace("tercih-kisa#Kayıtlar", "kayip#Kayıtlar")
         outside = PROFILE_TEXT.replace(

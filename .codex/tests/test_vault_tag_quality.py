@@ -134,6 +134,27 @@ class VaultTagQualityTests(unittest.TestCase):
 
         self.assertEqual(violations, [])
 
+    def test_inline_tag_audit_respects_fence_char_and_length_boundaries(self) -> None:
+        note = tag_taxonomy.NoteIndex(
+            Path('note.md'),
+            PurePosixPath('note.md'),
+            '````markdown\n'
+            '#fake-four\n'
+            '```\n'
+            '#fake-short-closer\n'
+            '````\n'
+            '~~~markdown\n'
+            '#fake-tilde\n'
+            '```\n'
+            '#fake-mixed\n'
+            '~~~\n'
+            'Gerçek #gercek\n',
+        )
+
+        violations = tag_taxonomy._inline_tag_violations(note)
+
+        self.assertEqual([violation.tag for violation in violations], ['gercek'])
+
     def test_migration_patch_only_changes_tags_and_dry_run_keeps_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

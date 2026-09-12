@@ -9,6 +9,7 @@ import re
 import subprocess
 from typing import Sequence
 
+from markdown_boundary import markdown_body
 import tag_taxonomy
 from knowledge_schema import parse_frontmatter
 from vault_corpus import INTAKE_CONTENT_ROOTS as _CONTENT_ROOTS
@@ -101,6 +102,7 @@ def validate_note(vault_root: Path, path: Path, text: str) -> tuple[str, ...]:
         if tags:
             for tag in tag_taxonomy.tag_violations(taxonomy, relative, _tag_values(tags)):
                 issues.append(f"tag-not-canonical:{tag}")
+    body = markdown_body(text)
     raw_type = values.get("type")
     note_type = raw_type if isinstance(raw_type, str) else ""
     allowed_roots = _TYPE_ROOTS.get(note_type)
@@ -120,10 +122,10 @@ def validate_note(vault_root: Path, path: Path, text: str) -> tuple[str, ...]:
             issues.append("project-last-decision-summary-missing")
         if not values.get("decision_summary_mirroring"):
             issues.append("project-mirroring-decision-missing")
-    if note_type not in _UPPER_LINK_EXEMPT_TYPES and _UPPER_LINK.search(text) is None:
+    if note_type not in _UPPER_LINK_EXEMPT_TYPES and _UPPER_LINK.search(body) is None:
         issues.append("upper-index-link-missing")
 
-    images = tuple(_IMAGE.finditer(text))
+    images = tuple(_IMAGE.finditer(body))
     if images:
         if note_type != "source-note":
             issues.append("image-record-type-invalid")
@@ -145,7 +147,7 @@ def validate_note(vault_root: Path, path: Path, text: str) -> tuple[str, ...]:
             issues.append("image-assets-folder-split")
         headings = {
             line.strip().casefold()
-            for line in text.splitlines()
+            for line in body.splitlines()
             if line.startswith("## ")
         }
         if "## görselde açıkça görülenler" not in headings:

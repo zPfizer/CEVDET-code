@@ -75,6 +75,33 @@ class UserEvidenceTests(unittest.TestCase):
             self.assertIsNone(evidence.EVIDENCE.search(failed['Önemli Konuşmalar']))
             self.assertIn('cevo-cikarimi', failed['Öğrenilenler'])
 
+    def test_fenced_model_source_example_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '```json\n'
+            + decision('Kısa yanıt tercihi.', quote)
+            + '\n```'
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_visible_citation_with_backticks_in_json_is_parsed_from_raw_text(self):
+        quote = 'Markdown `kod` kullan.'
+        output = evidence.bind_evidence(
+            sections(decision('Markdown tercihi.', quote)),
+            [('user', quote)],
+            STAMP,
+        )
+
+        record = json.loads(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])[1])
+        self.assertEqual(record['quote'], quote)
+
     def test_missing_citation_preserves_content_as_uncertain_not_user_decision(self):
         output = evidence.bind_evidence(sections('- Kaynaksız bir karar.'), [('user', 'Merhaba.')], STAMP)
         self.assertEqual(output['Alınan Kararlar'], '')

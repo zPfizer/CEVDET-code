@@ -169,6 +169,39 @@ Bağ.
         self.assertIn("Metin içinde ## İlgili Kavramlar ifadesi.", details)
         self.assertIn("[[sahte]]", details)
 
+    def test_link_rules_ignore_fenced_and_inline_examples_but_keep_real_links(self) -> None:
+        concept = _concept().replace(
+            "- [[bir]] ilişkisi.\n- [[iki]] ilişkisi.",
+            "````markdown\n- [[sahte-bir]]\n- [[sahte-iki]]\n````\n"
+            "`[[sahte-inline]]`",
+        )
+        self.assertTrue(knowledge_schema._concept_related_ok(Path('ornek.md'), _concept()))
+        self.assertFalse(
+            knowledge_schema._concept_related_ok(Path('ornek.md'), concept)
+        )
+
+        source_section = (
+            '```markdown\n[[daily/2026-09-01|Kaynak]]\n```\n'
+            '[[daily/2026-09-02|Kaynak]]'
+        )
+        self.assertEqual(
+            knowledge_schema._source_links(source_section),
+            {'2026-09-02.md'},
+        )
+
+        connection = (
+            '---\nconnects: [ornek, ikinci]\n---\n'
+            '## Bağlantı\n\n````markdown\n'
+            '[[knowledge/concepts/ornek|Örnek]]\n'
+            '[[knowledge/concepts/ikinci|İkinci]]\n````\n'
+            '## Ana Fikir\n\nBağ.\n'
+        )
+        self.assertFalse(
+            knowledge_schema._connection_links_ok(
+                Path('ornek--ikinci.md'), connection
+            )
+        )
+
     def test_connection_footer_is_repaired_but_extra_sources_are_not_silently_removed(self):
         from test_second_brain_acceptance import _write_derived_tree
         with tempfile.TemporaryDirectory() as temporary:
