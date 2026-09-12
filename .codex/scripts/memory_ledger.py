@@ -16,7 +16,7 @@ import unicodedata
 
 from file_lock import LockUnavailable, locked, timeout_for_deadline
 from compile_state import PolicyError, PublicationSnapshot, require_publication_snapshot
-from state_store import _is_windows_share_error, _pinned_windows_directory, atomic_write_text
+from state_store import _pinned_windows_directory, atomic_write_text
 from profile_guard import PROFILE_RELATIVE, _reparse, check_profile
 from quote_grammar import QUOTED_CASE_SUFFIX, QUOTED_CONTENT
 from user_evidence import filter_evidence, USER_LINK, proof_for_link
@@ -1514,7 +1514,7 @@ def _suppression_controls_scope(
         except MemoryPreferenceError:
             raise
         except OSError as exc:
-            if _is_windows_share_error(exc):
+            if os.name == "nt" and getattr(exc, "winerror", None) in {32, 33}:
                 raise _SuppressionDirectoryBusy("suppression directory busy") from exc
             raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
         except (RuntimeError, ValueError) as exc:

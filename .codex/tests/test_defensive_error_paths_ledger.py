@@ -230,6 +230,26 @@ class SuppressionEdges(unittest.TestCase):
                 ):
                     memory_ledger.load_suppressed_hashes(private)
 
+    def test_suppression_directory_access_denial_fails_without_retry(self) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows directory handle contract")
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary)
+            (private / "controls").mkdir()
+            denied = PermissionError("denied")
+            denied.winerror = 5
+            with mock.patch.object(
+                memory_ledger,
+                "_pinned_windows_directory",
+                side_effect=denied,
+            ) as pin:
+                with self.assertRaisesRegex(
+                    memory_ledger.MemoryPreferenceError,
+                    "memory-suppression-path-invalid",
+                ):
+                    memory_ledger.suppress_derived_memory(private, "hedef")
+            pin.assert_called_once()
+
     def test_repeated_suppression_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             private = Path(temporary)
