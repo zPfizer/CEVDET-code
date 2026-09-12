@@ -52,6 +52,40 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return result
 
 
+def _git_probe(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    command = ["git", "-C", str(repo), *args]
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BackupError(f"git çalıştırılamadı: {exc}") from exc
+
+
+def _ensure_no_lfs(vault: Path) -> None:
+    lfs_files = _git_probe(vault, "lfs", "ls-files", "--all")
+    if lfs_files.returncode == 0 and lfs_files.stdout.strip():
+        raise BackupError("Git LFS dosyaları desteklenmiyor; bundle üretilmedi")
+
+    pointer_blobs = _git_probe(
+        vault, "grep", "-I", "-l", "git-lfs.github.com/spec/v1", "HEAD", "--",
+    )
+    attributes = _git_probe(
+        vault, "grep", "-I", "-l", "filter=lfs", "HEAD", "--", "*.gitattributes",
+    )
+    if pointer_blobs.returncode == 0 or attributes.returncode == 0:
+        raise BackupError("Git LFS dosyaları desteklenmiyor; bundle üretilmedi")
+    if pointer_blobs.returncode not in (0, 1):
+        raise BackupError("Git LFS pointer'ları doğrulanamadı")
+    if attributes.returncode not in (0, 1):
+        raise BackupError("Git LFS ayarları doğrulanamadı")
+
+
 def _require_repo(vault: Path) -> None:
     if not vault.is_dir():
         raise BackupError(f"vault dizini yok: {vault}")
@@ -109,15 +143,19 @@ def _prepare_dest(vault: Path, dest: Path) -> tuple[Path, Path]:
 
 
 def _unique_bundle_path(dest: Path, stamp: str) -> Path:
-    candidate = dest / f"vault-{stamp}.bundle"
-    counter = 0
-    while candidate.exists():
-        counter += 1
-        candidate = dest / f"vault-{stamp}-{counter}.bundle"
-    return candidate
+    matching = [
+        path for path in dest.glob(f"vault-{stamp}*.bundle")
+        if (match := BUNDLE_NAME.fullmatch(path.name)) is not None
+        and match.group(1) == stamp
+    ]
+    if not matching:
+        return dest / f"vault-{stamp}.bundle"
+    suffix = max(_bundle_sort_key(path)[1] for path in matching) + 1
+    return dest / f"vault-{stamp}-{suffix}.bundle"
 
 
 def _create_bundle_locked(vault: Path, dest: Path, *, now: float | None = None) -> Path:
+    _ensure_no_lfs(vault)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
     final = _unique_bundle_path(dest, stamp)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -149,11 +187,15 @@ def _bundle_sort_key(path: Path) -> tuple[str, int]:
     return match.group(1), int(match.group(2) or "0")
 
 
+def _validate_keep(keep: int) -> None:
+    if keep < 1:
+        raise BackupError(f"keep en az 1 olmalı: {keep}")
+
+
 def _prune_bundles_locked(
     dest: Path, keep: int, *, preserve: Path | None = None,
 ) -> list[Path]:
-    if keep < 1:
-        raise BackupError(f"keep en az 1 olmalı: {keep}")
+    _validate_keep(keep)
     bundles = sorted(
         (path for path in Path(dest).glob("vault-*.bundle") if BUNDLE_NAME.fullmatch(path.name)),
         key=_bundle_sort_key,
@@ -188,6 +230,7 @@ def prune_bundles(dest: Path, keep: int, *, vault: Path) -> list[Path]:
 def _create_and_prune(
     vault: Path, dest: Path, keep: int, *, now: float | None = None,
 ) -> tuple[Path, list[Path], int]:
+    _validate_keep(keep)
     vault, owned_dest = _prepare_dest(vault, dest)
     with locked(_lock_target(owned_dest)):
         _validate_owned_destination(owned_dest.parent, owned_dest)
