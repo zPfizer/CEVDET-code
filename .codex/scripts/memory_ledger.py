@@ -8,6 +8,7 @@ import io
 import json
 from pathlib import Path, PurePosixPath
 import re
+import time
 import tokenize
 from typing import Callable, Iterator, Sequence
 import unicodedata
@@ -1330,10 +1331,18 @@ def session_only_path(state_dir: Path, session_id: str) -> Path:
     return state_dir / f"memory-session-only-{_sha256_text(session_id)}"
 
 
-def mark_session_only(state_dir: Path, session_id: str) -> None:
+def mark_session_only(
+    state_dir: Path,
+    session_id: str,
+    *,
+    timeout: float | None = None,
+    deadline: float | None = None,
+) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     path = session_only_path(state_dir, session_id)
-    with locked(path):
+    with locked(path, timeout=timeout_for_deadline(deadline, cap=timeout)):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("memory-session-only-deadline")
         path.touch(exist_ok=True)
 
 
@@ -1847,11 +1856,14 @@ def suppress_derived_memory(
     target: str,
     *,
     now: float | None = None,
+    deadline: float | None = None,
 ) -> Path:
     target_hash = memory_text_hash(target)
     path = _suppression_path(private_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with locked(path):
+    with locked(path, timeout=timeout_for_deadline(deadline)):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("memory-suppression-deadline")
         lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
         if target_hash in _suppression_hashes_from_lines(lines):
             return path
@@ -1863,13 +1875,21 @@ def suppress_derived_memory(
         # Cached read targets must stop exposing the unit before accepting the rule.
         views = _checked_views_dir(private_root)
         for view in views.glob('*.md'):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("memory-suppression-deadline")
             if view.is_symlink() or view.resolve() != views.resolve() / view.name:
                 raise MemoryPreferenceError('memory-view-path-invalid')
             if not re.fullmatch(r'[0-9a-f]{64}\.md', view.name):
                 raise MemoryPreferenceError('memory-view-owner-unknown')
             # Links were rewritten in views, so source hashes cannot safely edit them.
             # Invalidate; the next search rebuilds from the unchanged raw sources.
-            atomic_write_text(view, '[Hafıza görünümü güncel değil; yeni arama gerekli.]\n')
+            atomic_write_text(
+                view,
+                '[Hafıza görünümü güncel değil; yeni arama gerekli.]\n',
+                deadline=deadline,
+            )
         lines.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-        atomic_write_text(path, '\n'.join(lines) + '\n')
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("memory-suppression-deadline")
+        atomic_write_text(path, '\n'.join(lines) + '\n', deadline=deadline)
     return path

@@ -31,6 +31,10 @@ class HookScopeError(ValueError):
     """The hook must never write outside the checkout that launched it."""
 
 
+class HookPrivacyBoundaryError(RuntimeError):
+    """A requested privacy boundary could not be durably established."""
+
+
 HOOK_SCOPE_GIT_TIMEOUT_SECONDS = 0.75
 HOOK_EVENT_BUDGET_SECONDS = {
     "session-start": 9.5,
@@ -54,6 +58,11 @@ def _hook_deadline(event: str) -> float:
     if not math.isfinite(external_deadline) or external_deadline <= now:
         return now
     return min(external_deadline, local_deadline)
+
+
+def _check_hook_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise WorkerDeliveryTimeout("hook-deadline-expired")
 
 
 def _validate_hook_scope(
@@ -163,6 +172,10 @@ MEMORY_CONTEXT_WARNING = (
     '[Hafıza Bağlamı] SessionStart bağlamı güvenli biçimde doğrulanamadı; '
     'bağlam üretimi tamamlanamadı. Ham notlara veya eski önbelleğe geçme; '
     'bilgi yok sonucuna varma.'
+)
+MEMORY_PRIVACY_BOUNDARY_WARNING = (
+    '[Hafıza] Gizlilik kapsamı güvenli biçimde kaydedilemedi; bu istek engellendi. '
+    'Yeniden dene; başarı varsayma.'
 )
 
 _LEADING_SKILL_LINK = re.compile(
@@ -1152,8 +1165,8 @@ def record_hook_runtime(
             atomic_write_json(compatibility, receipt, deadline=deadline)
 
 
-def _emit_user_prompt_result(context: str) -> None:
-    if is_stop_message(context):
+def _emit_user_prompt_result(context: str, *, block: bool = False) -> None:
+    if block or is_stop_message(context):
         print(
             json.dumps(
                 {"decision": "block", "reason": context},
@@ -1221,6 +1234,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 scoped_session_id,
                 timeout=timeout_for_deadline(hook_deadline),
             ):
+                _check_hook_deadline(hook_deadline)
                 read_only = (
                     scoped_session_id is not None
                     and is_read_only_turn(STATE_DIR, scoped_session_id)
@@ -1236,6 +1250,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if not str(exc).startswith('memory-publication-'):
                         raise
                     emitted_context = MEMORY_PUBLICATION_WARNING
+                _check_hook_deadline(hook_deadline)
                 try:
                     queue_unresolved = 0
                     maintenance_quarantined = 0
@@ -1313,11 +1328,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             session_id = payload.get("session_id")
             if isinstance(session_id, str) and session_id:
                 if read_only_requested:
-                    mark_read_only_turn(
-                        STATE_DIR,
-                        session_id,
-                        timeout=timeout_for_deadline(hook_deadline),
-                    )
+                    try:
+                        mark_read_only_turn(
+                            STATE_DIR,
+                            session_id,
+                            timeout=timeout_for_deadline(hook_deadline),
+                        )
+                    except (OSError, ValueError, LockUnavailable) as exc:
+                        raise HookPrivacyBoundaryError(
+                            "read-only-scope-unavailable"
+                        ) from exc
                 elif (
                     isinstance(prompt, str)
                     and is_explicit_write_intent(prompt)
@@ -1330,24 +1350,47 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "session-only",
                     }
                 ):
-                    clear_read_only_turn(
-                        STATE_DIR,
-                        session_id,
-                        timeout=timeout_for_deadline(hook_deadline),
-                    )
+                    try:
+                        clear_read_only_turn(
+                            STATE_DIR,
+                            session_id,
+                            timeout=timeout_for_deadline(hook_deadline),
+                        )
+                    except (OSError, ValueError, LockUnavailable) as exc:
+                        raise HookPrivacyBoundaryError(
+                            "read-only-scope-clear-unavailable"
+                        ) from exc
             if (
                 directive is not None
                 and directive.kind == "session-only"
                 and isinstance(session_id, str)
                 and session_id
             ):
-                mark_session_only(STATE_DIR, session_id)
+                try:
+                    mark_session_only(
+                        STATE_DIR,
+                        session_id,
+                        deadline=hook_deadline,
+                    )
+                except (OSError, ValueError, LockUnavailable) as exc:
+                    raise HookPrivacyBoundaryError(
+                        "session-only-scope-unavailable"
+                    ) from exc
             if (
                 directive is not None
                 and directive.kind == "forget"
                 and not read_only_requested
             ):
-                suppress_derived_memory(LOCAL_MEMORY_ROOT, directive.target)
+                try:
+                    suppress_derived_memory(
+                        LOCAL_MEMORY_ROOT,
+                        directive.target,
+                        deadline=hook_deadline,
+                    )
+                except (OSError, ValueError, LockUnavailable) as exc:
+                    raise HookPrivacyBoundaryError(
+                        "forget-boundary-unavailable"
+                    ) from exc
             emitted_context = handle_user_prompt(
                 payload,
                 STATE_DIR,
@@ -1465,10 +1508,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "systemMessage": "Son konuşma kaydının durumunu doğrulayamıyorum."
             }, ensure_ascii=True))
         elif args.event == 'user-prompt' and not response_emitted:
-            _emit_user_prompt_result(
-                '[Hafıza] Hafıza işlemi tamamlanamadı; kayıt veya unutma başarısı iddia etme. '
-                'Sorunu kullanıcıya kısa biçimde bildir ve kaynağı koru.'
-            )
+            if isinstance(exc, HookPrivacyBoundaryError):
+                _emit_user_prompt_result(
+                    MEMORY_PRIVACY_BOUNDARY_WARNING,
+                    block=True,
+                )
+            else:
+                _emit_user_prompt_result(
+                    '[Hafıza] Hafıza işlemi tamamlanamadı; kayıt veya unutma başarısı iddia etme. '
+                    'Sorunu kullanıcıya kısa biçimde bildir ve kaynağı koru.'
+                )
         # Hook host'u fail-open bekler; yalnız doğrudan CLI/worker çağrısı
         # semantik hatayı işletim sistemine bildirir.
         if args.strict:

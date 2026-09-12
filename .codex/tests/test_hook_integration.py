@@ -175,6 +175,316 @@ class HookIntegrationTests(unittest.TestCase):
         self.assertIn("bağlamı güvenli biçimde doğrulanamadı", context)
         self.assertIn("Ham notlara veya eski önbelleğe geçme", context)
 
+    def test_session_start_checks_deadline_after_late_scope_acquisition(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            session_id = "late-scope"
+            marker = memory_ledger._read_only_path(state, session_id)
+            ready = state / "late-scope-lock-ready"
+            holder_script = (
+                "import sys,time;"
+                "from pathlib import Path;"
+                "sys.path.insert(0,sys.argv[1]);"
+                "from file_lock import locked;"
+                "resource=Path(sys.argv[2]);ready=Path(sys.argv[3]);"
+                "guard=locked(resource);guard.__enter__();"
+                "ready.write_text('ready', encoding='ascii');"
+                "time.sleep(float(sys.argv[4]));"
+                "guard.__exit__(None,None,None)"
+            )
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    holder_script,
+                    str(SCRIPTS_DIR),
+                    str(marker),
+                    str(ready),
+                    "0.35",
+                ],
+                cwd=vault,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            try:
+                limit = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < limit:
+                    time.sleep(0.01)
+                if not ready.exists():
+                    raise AssertionError("late scope lock holder did not start")
+                deadline = time.monotonic() + 0.1
+                payload = {"session_id": session_id, "cwd": str(vault)}
+                output = io.StringIO()
+                with (
+                    mock.patch.object(hook, "VAULT_ROOT", vault),
+                    mock.patch.object(hook, "STATE_DIR", state),
+                    mock.patch.object(hook, "_validate_hook_scope"),
+                    mock.patch.object(hook, "_hook_deadline", return_value=deadline),
+                    mock.patch.object(hook, "timeout_for_deadline", return_value=1.0),
+                    mock.patch.object(hook, "build_session_context") as build,
+                    mock.patch.object(hook, "write_hook_health"),
+                    mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                    mock.patch.object(sys, "stdout", output),
+                ):
+                    result = hook.main(["session-start", "--strict"])
+            finally:
+                child.wait(timeout=5)
+
+        lines = output.getvalue().splitlines()
+        self.assertEqual(result, 1)
+        self.assertEqual(len(lines), 1)
+        context = json.loads(lines[0])["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("bağlamı güvenli biçimde doğrulanamadı", context)
+        build.assert_not_called()
+
+    def test_session_start_checks_deadline_after_context_before_heavy_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            deadline = time.monotonic() + 0.03
+            payload = {"session_id": "late-context", "cwd": str(vault)}
+            output = io.StringIO()
+
+            def slow_context(*_args: object, **_kwargs: object) -> str:
+                time.sleep(0.12)
+                return "ctx"
+
+            with (
+                mock.patch.object(hook, "VAULT_ROOT", vault),
+                mock.patch.object(hook, "STATE_DIR", state),
+                mock.patch.object(hook, "_validate_hook_scope"),
+                mock.patch.object(hook, "_hook_deadline", return_value=deadline),
+                mock.patch.object(hook, "build_session_context", side_effect=slow_context) as build,
+                mock.patch.object(flush, "maybe_trigger_compile") as trigger,
+                mock.patch.object(hook, "write_hook_health"),
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                mock.patch.object(sys, "stdout", output),
+            ):
+                result = hook.main(["session-start", "--strict"])
+
+        lines = output.getvalue().splitlines()
+        self.assertEqual(result, 1)
+        self.assertEqual(len(lines), 1)
+        context = json.loads(lines[0])["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("bağlamı güvenli biçimde doğrulanamadı", context)
+        build.assert_called_once()
+        trigger.assert_not_called()
+
+    def test_privacy_boundary_failure_blocks_prompt_without_claiming_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            session_id = "privacy-contention"
+            marker = memory_ledger._read_only_path(state, session_id)
+            ready = state / "privacy-lock-ready"
+            holder_script = (
+                "import sys,time;"
+                "from pathlib import Path;"
+                "sys.path.insert(0,sys.argv[1]);"
+                "from file_lock import locked;"
+                "resource=Path(sys.argv[2]);ready=Path(sys.argv[3]);"
+                "guard=locked(resource);guard.__enter__();"
+                "ready.write_text('ready', encoding='ascii');"
+                "time.sleep(float(sys.argv[4]));"
+                "guard.__exit__(None,None,None)"
+            )
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    holder_script,
+                    str(SCRIPTS_DIR),
+                    str(marker),
+                    str(ready),
+                    "0.8",
+                ],
+                cwd=vault,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            try:
+                limit = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < limit:
+                    time.sleep(0.01)
+                if not ready.exists():
+                    raise AssertionError("privacy lock holder did not start")
+                payload = {
+                    "session_id": session_id,
+                    "prompt": "Do not modify files or settings.",
+                    "cwd": str(vault),
+                }
+                output = io.StringIO()
+                with (
+                    mock.patch.object(hook, "VAULT_ROOT", vault),
+                    mock.patch.object(hook, "STATE_DIR", state),
+                    mock.patch.object(hook, "_validate_hook_scope"),
+                    mock.patch.object(hook, "_hook_deadline", return_value=time.monotonic() + 0.15),
+                    mock.patch.object(hook, "handle_user_prompt") as handle,
+                    mock.patch.object(hook, "write_hook_health"),
+                    mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                    mock.patch.object(sys, "stdout", output),
+                ):
+                    result = hook.main(["user-prompt", "--strict"])
+            finally:
+                child.wait(timeout=5)
+
+        lines = output.getvalue().splitlines()
+        self.assertEqual(result, 1)
+        self.assertEqual(len(lines), 1)
+        emitted = json.loads(lines[0])
+        self.assertEqual(emitted["decision"], "block")
+        self.assertIn("Gizlilik kapsamı", emitted["reason"])
+        self.assertFalse(marker.exists())
+        handle.assert_not_called()
+
+    def test_session_only_and_forget_boundary_failures_block_prompt(self) -> None:
+        cases = (
+            ("Bu konuşmada kalsın.", "mark_session_only"),
+            ("Şunu unut: Ankara.", "suppress_derived_memory"),
+        )
+        for prompt, boundary_name in cases:
+            with self.subTest(boundary=boundary_name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    vault = Path(temporary)
+                    state = vault / ".codex/scripts/.state"
+                    deadline = time.monotonic() + 30
+                    payload = {
+                        "session_id": "privacy-boundary-failure",
+                        "prompt": prompt,
+                        "cwd": str(vault),
+                    }
+                    output = io.StringIO()
+                    with (
+                        mock.patch.object(hook, "VAULT_ROOT", vault),
+                        mock.patch.object(hook, "STATE_DIR", state),
+                        mock.patch.object(hook, "_validate_hook_scope"),
+                        mock.patch.object(
+                            hook,
+                            "_hook_deadline",
+                            return_value=deadline,
+                        ),
+                        mock.patch.object(
+                            hook,
+                            boundary_name,
+                            side_effect=OSError("privacy-boundary-failure"),
+                        ) as boundary,
+                        mock.patch.object(hook, "handle_user_prompt") as handle,
+                        mock.patch.object(hook, "write_hook_health"),
+                        mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                        mock.patch.object(sys, "stdout", output),
+                    ):
+                        result = hook.main(["user-prompt", "--strict"])
+
+                lines = output.getvalue().splitlines()
+                self.assertEqual(result, 1)
+                self.assertEqual(len(lines), 1)
+                emitted = json.loads(lines[0])
+                self.assertEqual(emitted["decision"], "block")
+                self.assertIn("Gizlilik kapsamı", emitted["reason"])
+                boundary.assert_called_once()
+                self.assertEqual(boundary.call_args.kwargs["deadline"], deadline)
+                handle.assert_not_called()
+
+    def test_session_only_and_forget_boundary_timeouts_block_without_persistence(self) -> None:
+        cases = (
+            (
+                "Bu konuşmada kalsın.",
+                "session-only",
+                lambda state, _private: memory_ledger.session_only_path(
+                    state, "privacy-timeout"
+                ),
+            ),
+            (
+                "Şunu unut: Ankara.",
+                "forget",
+                lambda _state, private: private / "controls" / "suppressions.jsonl",
+            ),
+        )
+        holder_script = (
+            "import sys,time;"
+            "from pathlib import Path;"
+            "sys.path.insert(0,sys.argv[1]);"
+            "from file_lock import locked;"
+            "resource=Path(sys.argv[2]);ready=Path(sys.argv[3]);"
+            "guard=locked(resource);guard.__enter__();"
+            "ready.write_text('ready', encoding='ascii');"
+            "time.sleep(float(sys.argv[4]));"
+            "guard.__exit__(None,None,None)"
+        )
+        for prompt, boundary_name, resource_for in cases:
+            with self.subTest(boundary=boundary_name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    vault = Path(temporary)
+                    state = vault / ".codex/scripts/.state"
+                    state.mkdir(parents=True)
+                    private = vault / "private-memory"
+                    resource = resource_for(state, private)
+                    ready = state / f"{boundary_name}-lock-ready"
+                    child = subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-c",
+                            holder_script,
+                            str(SCRIPTS_DIR),
+                            str(resource),
+                            str(ready),
+                            "0.8",
+                        ],
+                        cwd=vault,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                    try:
+                        limit = time.monotonic() + 5
+                        while not ready.exists() and time.monotonic() < limit:
+                            time.sleep(0.01)
+                        if not ready.exists():
+                            raise AssertionError(
+                                f"{boundary_name} lock holder did not start"
+                            )
+                        payload = {
+                            "session_id": "privacy-timeout",
+                            "prompt": prompt,
+                            "cwd": str(vault),
+                        }
+                        output = io.StringIO()
+                        with (
+                            mock.patch.object(hook, "VAULT_ROOT", vault),
+                            mock.patch.object(hook, "STATE_DIR", state),
+                            mock.patch.object(hook, "LOCAL_MEMORY_ROOT", private),
+                            mock.patch.object(hook, "_validate_hook_scope"),
+                            mock.patch.object(
+                                hook,
+                                "_hook_deadline",
+                                return_value=time.monotonic() + 0.15,
+                            ),
+                            mock.patch.object(hook, "handle_user_prompt") as handle,
+                            mock.patch.object(hook, "write_hook_health"),
+                            mock.patch.object(
+                                sys, "stdin", io.StringIO(json.dumps(payload))
+                            ),
+                            mock.patch.object(sys, "stdout", output),
+                        ):
+                            result = hook.main(["user-prompt", "--strict"])
+                    finally:
+                        child.wait(timeout=5)
+
+                lines = output.getvalue().splitlines()
+                self.assertEqual(result, 1)
+                self.assertEqual(len(lines), 1)
+                emitted = json.loads(lines[0])
+                self.assertEqual(emitted["decision"], "block")
+                self.assertIn("Gizlilik kapsamı", emitted["reason"])
+                self.assertFalse(resource.exists())
+                handle.assert_not_called()
+
     def test_session_start_receipt_failure_does_not_emit_second_context_json(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
