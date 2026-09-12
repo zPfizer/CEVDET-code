@@ -714,6 +714,40 @@ class VaultBackupTests(unittest.TestCase):
 
             self.assertFalse(list(dest.rglob("vault-*.bundle")))
 
+    def test_late_final_bundle_is_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            real_unique = vault_backup._unique_bundle_path
+            real_validate = vault_backup._validate_bundle_artifact
+            final_path: Path | None = None
+
+            def capture_final(namespace: Path, stamp: str) -> Path:
+                nonlocal final_path
+                final_path = real_unique(namespace, stamp)
+                return final_path
+
+            def validate_then_publish(source: Path, partial: Path) -> None:
+                real_validate(source, partial)
+                assert final_path is not None
+                _git(source, "bundle", "create", str(final_path), "--all")
+
+            with mock.patch.object(
+                vault_backup, "_unique_bundle_path", side_effect=capture_final,
+            ), mock.patch.object(
+                vault_backup,
+                "_validate_bundle_artifact",
+                side_effect=validate_then_publish,
+            ):
+                with self.assertRaises(vault_backup.BackupError):
+                    vault_backup.create_bundle(vault, dest)
+
+            assert final_path is not None
+            self.assertTrue(final_path.exists())
+            self.assertFalse(list(dest.rglob("*.tmp")))
+
     def test_detached_head_change_before_publish_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -22,6 +22,7 @@ import time
 from typing import Sequence
 
 from file_lock import locked
+from state_store import replace_with_retry
 
 
 BUNDLE_NAME = re.compile(r"vault-(\d{8}-\d{6})(?:-(\d+))?\.bundle$")
@@ -302,7 +303,10 @@ def _create_bundle_locked(vault: Path, dest: Path, *, now: float | None = None) 
         if bundle_refs != source_refs:
             raise BackupError("Vault ref'leri bundle snapshot'ı sırasında değişti")
         _validate_locked_source(vault, dest)
-        os.replace(partial, final)
+        try:
+            replace_with_retry(partial, final, expected_digest=None)
+        except OSError as error:
+            raise BackupError(f"bundle yayımlanamadı: {final}") from error
     finally:
         partial.unlink(missing_ok=True)
     return final
