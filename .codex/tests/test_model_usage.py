@@ -125,6 +125,52 @@ class ModelUsageTests(unittest.TestCase):
         self.assertEqual(reason, "codex-cli-path-invalid")
         self.assertEqual(leftovers, [])
 
+    def test_run_exec_counts_missing_output_as_ok_for_stage_only_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            with mock.patch.object(codex_runner, "_bounded_exec", return_value=(None, None)):
+                result = codex_runner.run_exec(
+                    "stage prompt",
+                    sandbox="workspace-write",
+                    timeout=5,
+                    usage_state_dir=state,
+                    purpose="compile",
+                    usage_output_optional=True,
+                )
+            entries = [
+                json.loads(line)
+                for path in state.glob("model-usage-*.jsonl")
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(result, (None, None))
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["outcome"], "ok")
+
+    def test_record_drops_symlinked_daily_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir()
+            outside = root / "outside.jsonl"
+            outside.write_text("sentinel\n", encoding="utf-8")
+            ledger = state / "model-usage-20260911.jsonl"
+            try:
+                ledger.symlink_to(outside)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            model_usage.record(
+                state,
+                purpose="compile",
+                prompt_chars=10,
+                duration_ms=5,
+                outcome="ok",
+                now=datetime.datetime(2026, 9, 11, 12, 0),
+            )
+            self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel\n")
+            self.assertTrue(ledger.is_symlink())
+
     def test_run_exec_keeps_result_when_usage_lock_is_contended(self) -> None:
         cases = (
             ("success", ("answer", None), None),

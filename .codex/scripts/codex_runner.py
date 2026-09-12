@@ -145,6 +145,7 @@ def run_exec(
     usage_state_dir: Path | None = None,
     purpose: str = "unknown",
     usage_prompt_chars: int | None = None,
+    usage_output_optional: bool = False,
 ) -> tuple[str | None, str | None]:
     """Run one bounded, sandboxed, hook-disabled `codex exec`.
 
@@ -163,6 +164,8 @@ def run_exec(
     hatası asıl çağrının sonucunu asla değiştirmez.
     ``usage_prompt_chars`` yalnız muhasebe değerini override eder; örneğin
     prompt dosyada taşınıyorsa dosyadaki gerçek prompt uzunluğu verilebilir.
+    ``usage_output_optional`` stage-only çağrılarda son mesaj dosyası yoksa
+    başarılı çalışmayı muhasebede ``ok`` sayar; gerçek hata nedeni önceliklidir.
     """
     start = time.monotonic()
 
@@ -195,7 +198,14 @@ def run_exec(
     except ProcessTreeCleanupError:
         note("codex-cleanup-error")
         raise
-    note(reason or ("ok" if text is not None else "output-missing"), len(text or ""))
+    note(
+        reason or (
+            "ok"
+            if text is not None or usage_output_optional
+            else "output-missing"
+        ),
+        len(text or ""),
+    )
     return text, reason
 
 

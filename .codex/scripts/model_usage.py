@@ -12,6 +12,7 @@ import datetime
 import json
 from pathlib import Path
 import re
+import stat
 from typing import Any, Sequence
 
 from file_lock import LockUnavailable, locked
@@ -21,6 +22,7 @@ KEEP_DAYS = 30
 DEFAULT_SUMMARY_DAYS = 7
 USAGE_FILE = re.compile(r"model-usage-(\d{8})\.jsonl$")
 MAX_RECORD_BYTES = 4096
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
 
 
 def _usage_path(state_dir: Path, day: datetime.date) -> Path:
@@ -43,6 +45,19 @@ def _prune(state_dir: Path, today: datetime.date) -> None:
         day = _file_day(path)
         if day is not None and day < cutoff:
             path.unlink(missing_ok=True)
+
+
+def _unsafe_usage_target(path: Path) -> bool:
+    """Refuse links, reparse points, and non-files before append can follow them."""
+    try:
+        path_stat = path.lstat()
+    except FileNotFoundError:
+        return False
+    return (
+        stat.S_ISLNK(path_stat.st_mode)
+        or bool(getattr(path_stat, "st_file_attributes", 0) & _REPARSE_POINT)
+        or not stat.S_ISREG(path_stat.st_mode)
+    )
 
 
 def record(
@@ -71,7 +86,10 @@ def record(
     try:
         # ponytail: contention drops telemetry; durable queueing belongs to a separate recorder.
         with locked(state_dir / "model-usage", timeout=0):
-            with _usage_path(state_dir, moment.date()).open("a", encoding="utf-8") as handle:
+            usage_path = _usage_path(state_dir, moment.date())
+            if _unsafe_usage_target(usage_path):
+                return
+            with usage_path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
             _prune(state_dir, moment.date())
     except LockUnavailable:

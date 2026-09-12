@@ -25,7 +25,7 @@ class CompileModelBudgetTests(unittest.TestCase):
             )
 
             with patch.object(compiler, 'STATE_DIR', state_dir), \
-                    patch.object(compiler.codex_runner, '_bounded_exec', return_value=('ok', None)) as execute:
+                    patch.object(compiler.codex_runner, '_bounded_exec', return_value=(None, None)) as execute:
                 for prompt in prompts:
                     self.assertIsNone(compiler._run_codex(prompt, stage))
 
@@ -37,6 +37,7 @@ class CompileModelBudgetTests(unittest.TestCase):
 
         self.assertEqual([item['prompt_chars'] for item in entries], [len(item) for item in prompts])
         self.assertEqual([item['purpose'] for item in entries], ['compile', 'compile'])
+        self.assertEqual([item['outcome'] for item in entries], ['ok', 'ok'])
         self.assertEqual([item.args[0] for item in execute.call_args_list], [wrapper, wrapper])
 
     def test_repair_counts_against_budget_and_leaves_invalid_daily_pending(self):
