@@ -408,6 +408,9 @@ def _capture_one_core(
                 mark_source_changed()
                 raise ValueError('attachment-content-changed')
 
+        if source_record is not None and source_record.get('_source_changed'):
+            mark_source_changed()
+            raise ValueError('attachment-content-changed')
         if source_record is not None:
             raw_digest = source_record['source_sanitized_sha256']
             visible = source_record['visible']
@@ -668,6 +671,10 @@ def _capture_one(
         source_record = _read_source(source, attachment_root, hashes)
     except FileNotFoundError:
         source_record = None
+    except ValueError as exc:
+        if str(exc) != 'attachment-content-changed':
+            raise
+        source_record = {'_source_changed': True}
     with locked(state_dir / f'attachment-note-{attachment_id}'):
         return _capture_one_core(
             value, attachment_root, vault_root, event_time, hashes, summarize,

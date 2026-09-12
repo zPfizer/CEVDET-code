@@ -281,6 +281,49 @@ class AttachmentMemoryTests(unittest.TestCase):
                         hashes, mock.Mock(return_value=summary), state_dir=state,
                     )
 
+    def test_source_disappearance_during_preload_marks_mapping_and_blocks_recovery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                attachment_memory.capture_sources(
+                    [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                )
+                real_open = Path.open
+                removed = False
+
+                def disappear_on_open(path, *args, **kwargs):
+                    nonlocal removed
+                    if path == source and not removed:
+                        removed = True
+                        source.unlink()
+                    return real_open(path, *args, **kwargs)
+
+                with mock.patch.object(Path, 'open', autospec=True, side_effect=disappear_on_open):
+                    with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                        attachment_memory.capture_sources(
+                            [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                            frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                        )
+
+                mapping_path = attachment_memory._mapping_path(
+                    state, source.parent.name, attachment_memory._attachment_digest(text.rstrip()),
+                )
+                mapping = json.loads(mapping_path.read_text(encoding='utf-8'))
+                self.assertTrue(mapping['source_changed'])
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                    )
+
     def test_empty_source_receipt_does_not_cross_suppression_revision(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
