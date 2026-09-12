@@ -476,7 +476,7 @@ def _capture_one_core(
                                 source_sanitized_digest=raw_digest,
                                 source_digest=source_digest,
                                 suppression_revision=revision,
-                                event_date=event_time.date().isoformat(),
+                                event_date=mapping['event_date'] if mapping is not None else event_time.date().isoformat(),
                                 redactions=redactions,
                             ),
                         )
@@ -489,7 +489,7 @@ def _capture_one_core(
                 with suppression_guard(vault_root / '.codex/private-memory', hashes):
                     return destination.relative_to(vault_root).with_suffix('').as_posix(), summary
 
-        note_date = mapping['event_date'] if mapping is not None and mapping['status'] == 'prepared' else None
+        note_date = mapping['event_date'] if mapping is not None and mapping['status'] in {'prepared', 'empty'} else None
         rendered = _render_note(
             event_time, attachment_id, source_attachment, visible, summary,
             source_digest, redactions, note_date,

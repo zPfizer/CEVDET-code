@@ -116,6 +116,40 @@ class AttachmentMemoryTests(unittest.TestCase):
                     )
             self.assertEqual(summarize.call_count, 1)
 
+    def test_empty_receipt_keeps_first_date_when_reconsidered_and_promoted(self):
+        for empty_retries in (0, 1):
+            with self.subTest(empty_retries=empty_retries), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                home = root / 'home'
+                source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+                source.parent.mkdir(parents=True)
+                source.write_text('Shared source.', encoding='utf-8')
+                text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+                state = root / 'state'
+                summary = '\n\n'.join('## ' + h + '\nDurable summary.' for h in flush.EXPECTED_SECTIONS)
+                summarize = mock.Mock(side_effect=['FLUSH_BOS'] * (1 + empty_retries) + [summary])
+                first_date = dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc)
+                with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                    for attempt in range(2 + empty_retries):
+                        if attempt:
+                            suppress_derived_memory(root / '.codex/private-memory', f'Unrelated preference {attempt}.')
+                        hashes = load_suppressed_hashes(root / '.codex/private-memory')
+                        result = attachment_memory.capture_sources(
+                            [('user', text)], root, first_date + dt.timedelta(days=attempt * 5),
+                            hashes, summarize, state_dir=state,
+                        )
+                self.assertTrue(result)
+                mapping_path = attachment_memory._mapping_path(
+                    state, source.parent.name, attachment_memory._attachment_digest(text.rstrip()),
+                )
+                mapping = json.loads(mapping_path.read_text(encoding='utf-8'))
+                self.assertEqual(mapping['status'], 'committed')
+                self.assertEqual(mapping['event_date'], '2026-09-01')
+                note = (root / mapping['note_relative']).read_text(encoding='utf-8')
+                self.assertIn('created: 2026-09-01\n', note)
+                self.assertIn('updated: 2026-09-01\n', note)
+                self.assertEqual(summarize.call_count, 2 + empty_retries)
+
     def test_empty_receipt_is_scoped_to_its_envelope(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
