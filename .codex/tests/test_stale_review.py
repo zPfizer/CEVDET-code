@@ -637,6 +637,38 @@ class StaleReviewTests(unittest.TestCase):
                         target.read_text(encoding="utf-8"), "kullanici metni\n"
                     )
 
+    def test_external_alias_to_protected_root_is_rejected(self) -> None:
+        for root_name in ("daily", "knowledge", ".codex"):
+            with self.subTest(root_name=root_name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    vault = root / "vault"
+                    vault.mkdir()
+                    _note(vault, "eski-not", updated="2026-01-02", sources=[])
+                    protected = vault / root_name
+                    protected.mkdir(parents=True, exist_ok=True)
+                    alias = root / "external-output"
+                    try:
+                        alias.symlink_to(protected, target_is_directory=True)
+                    except (OSError, NotImplementedError) as exc:
+                        self.skipTest(f"symlink unavailable: {exc}")
+
+                    target = alias / "report.md"
+                    target.write_text("kullanici metni\n", encoding="utf-8")
+                    try:
+                        with self.assertRaisesRegex(
+                            ValueError, "report-target-invalid"
+                        ):
+                            stale_review.write_report(
+                                vault, output=target, overwrite=True
+                            )
+                        self.assertEqual(
+                            target.read_text(encoding="utf-8"),
+                            "kullanici metni\n",
+                        )
+                    finally:
+                        alias.unlink(missing_ok=True)
+
     def test_report_stays_unwritten_when_compile_lock_is_busy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
