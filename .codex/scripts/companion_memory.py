@@ -43,6 +43,10 @@ def source_marker(name: str) -> bytes:
     return f'{_SOURCE_PREFIX}{name} -->'.encode()
 
 
+def _source_is_suppressed(name: str, hashes: frozenset[str]) -> bool:
+    return contains_suppressed_unit((SOURCE_RELATIVE / name).as_posix(), hashes)
+
+
 def _safe_path(root: Path, parts: tuple[str, ...], error: str) -> Path:
     root = root.resolve(strict=True)
     current = root
@@ -427,7 +431,7 @@ def _raw_views(root: Path, hashes: frozenset[str]):
                 result[name] = path.read_bytes().decode('utf-8')
             else:
                 source = _source_path(root, name)
-                if source.is_file():
+                if source.is_file() and not _source_is_suppressed(name, hashes):
                     prefix, suffix = _manual_parts(name, source.read_bytes())
                     result[name] = (prefix + suffix).decode('utf-8')
         return result
@@ -436,6 +440,11 @@ def _raw_views(root: Path, hashes: frozenset[str]):
     manuals = {}
     for name in VIEW_NAMES:
         if not contains_suppressed_unit(f'🔮 850-Companion/{name}', hashes):
+            if _source_is_suppressed(name, hashes):
+                if not _source_path(root, name).is_file():
+                    raise ValueError('companion-manual-source-missing')
+                manuals[name] = b'', b''
+                continue
             prefix, suffix, _ = _manual_for_view(root, name, metadata.get(name), records, write_source=False, canonical=True)
             manuals[name] = prefix, suffix
     return {name: value.decode('utf-8') for name, value in _render(records, manuals, hashes).items()}
@@ -500,6 +509,11 @@ def ensure_views(
         manuals = {}
         for name in VIEW_NAMES:
             if contains_suppressed_unit(f'🔮 850-Companion/{name}', hashes):
+                continue
+            if _source_is_suppressed(name, hashes):
+                if not _source_path(root, name).is_file():
+                    raise ValueError('companion-manual-source-missing')
+                manuals[name] = b'', b''
                 continue
             prefix, suffix, meta = _manual_for_view(
                 root,
@@ -699,6 +713,11 @@ def publish(root: Path, state: Path, summary: str, event: dt.datetime,
             manuals = {}
             for name in VIEW_NAMES:
                 if contains_suppressed_unit(f'🔮 850-Companion/{name}', hashes):
+                    continue
+                if _source_is_suppressed(name, hashes):
+                    if not _source_path(root, name).is_file():
+                        raise ValueError('companion-manual-source-missing')
+                    manuals[name] = b'', b''
                     continue
                 prefix, suffix, meta = _manual_for_view(root, name, metadata.get(name), records, write_source=True, canonical=canonical)
                 manuals[name] = prefix, suffix

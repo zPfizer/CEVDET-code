@@ -650,6 +650,67 @@ class CompanionSplitTests(unittest.TestCase):
                 "",
             )
 
+    def test_source_suppression_hides_manual_payload_but_keeps_other_sessions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            companion = _seed(root, block=_canonical_block())
+            companion_memory.migrate(root)
+            companion_memory.publish(
+                root,
+                root / ".state",
+                _summary("İlgisiz oturum"),
+                EVENT + dt.timedelta(minutes=1),
+                "b" * 64,
+                "other",
+                frozenset(),
+            )
+            sentinel = "MANUAL_SOURCE_SUPPRESSION_SENTINEL"
+            source = companion / "Sources/Last-Session.md"
+            source.write_bytes(sentinel.encode("utf-8") + b"\n" + source.read_bytes())
+
+            cached = vault_retrieval.build_vault_map(root, write_cache=True)
+            self.assertTrue(vault_retrieval.search_vault(cached, sentinel))
+
+            source_relative = (companion_memory.SOURCE_RELATIVE / "Last-Session.md").as_posix()
+            memory_ledger.suppress_derived_memory(
+                root / ".codex/private-memory", source_relative,
+            )
+            hashes = memory_ledger.load_suppressed_hashes(root / ".codex/private-memory")
+
+            views = companion_memory.render_views(root, hashes=hashes)
+            self.assertNotIn(sentinel, views["Last-Session.md"])
+            self.assertIn("Eski bağlam", views["Last-Session.md"])
+            self.assertIn("İlgisiz oturum", views["Last-Session.md"])
+            self.assertIn("# Last", views["Journal.md"])
+            self.assertIn("# Tail", views["Threads.md"])
+
+            companion_memory.ensure_views(root, root / ".state", hashes=hashes)
+            physical = (companion / "Last-Session.md").read_text(encoding="utf-8")
+            self.assertNotIn(sentinel, physical)
+            self.assertIn("İlgisiz oturum", physical)
+
+            companion_memory.publish(
+                root,
+                root / ".state",
+                _summary("Yeni izinli oturum"),
+                EVENT + dt.timedelta(minutes=2),
+                "c" * 64,
+                "new",
+                hashes,
+            )
+            physical = (companion / "Last-Session.md").read_text(encoding="utf-8")
+            self.assertNotIn(sentinel, physical)
+            self.assertIn("Yeni izinli oturum", physical)
+
+            entries = vault_retrieval.build_vault_map(root, write_cache=True)
+            self.assertFalse(vault_retrieval.search_vault(entries, sentinel))
+            self.assertTrue(vault_retrieval.search_vault(entries, "İlgisiz oturum"))
+            result = vault_retrieval.retrieve_vault_context_detailed(
+                root, sentinel, write_cache=True,
+            )
+            self.assertEqual(result.outcome, "empty")
+            self.assertNotIn(sentinel, result.text)
+
     def test_canonical_session_json_is_not_a_readable_vault_note(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
