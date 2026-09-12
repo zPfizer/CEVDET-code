@@ -5,7 +5,10 @@ import tempfile
 import unittest
 
 from _fixtures import CODEX_DIR  # noqa: F401
+import compile_state
+import memory_ledger as ledger
 import stale_review
+from state_store import state_dir_of
 
 
 def _note(vault: Path, name: str, *, updated: str, sources: list[str]) -> Path:
@@ -111,6 +114,91 @@ class StaleReviewTests(unittest.TestCase):
 
         self.assertEqual(count, 0)
         self.assertIn("Bayat aday yok", text)
+
+    def test_suppressed_note_is_excluded_before_report_wikilink_render(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _note(vault, "gizli-not", updated="2026-01-02", sources=[])
+            _note(vault, "acik-not", updated="2026-01-03", sources=[])
+            ledger.suppress_derived_memory(
+                vault / ".codex/private-memory", "gizli-not"
+            )
+
+            findings = stale_review.review(
+                vault, days=90, now=datetime.date(2026, 9, 11)
+            )
+            target, count = stale_review.write_report(
+                vault, days=90, now=datetime.date(2026, 9, 11)
+            )
+            text = target.read_text(encoding="utf-8")
+
+        self.assertEqual(count, 1)
+        self.assertEqual([finding.note for finding in findings], [
+            "knowledge/concepts/acik-not.md"
+        ])
+        self.assertNotIn("[[knowledge/concepts/gizli-not.md]]", text)
+
+    def test_malformed_suppression_controls_fail_closed_before_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            controls = vault / ".codex/private-memory/controls"
+            controls.mkdir(parents=True)
+            (controls / "suppressions.jsonl").write_text("{\n", encoding="utf-8")
+            target = vault / "report.md"
+
+            with self.assertRaisesRegex(ledger.MemoryPreferenceError, "memory-suppression-invalid"):
+                stale_review.write_report(vault, output=target)
+
+        self.assertFalse(target.exists())
+
+    def test_pending_publication_fails_closed_before_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _note(vault, "pending", updated="2026-01-02", sources=[])
+            compile_state.save_publication(
+                state_dir_of(vault), {"schema_version": 1, "status": "pending"}
+            )
+            target = vault / "report.md"
+
+            with self.assertRaisesRegex(ledger.MemoryPreferenceError, "publication-pending"):
+                stale_review.write_report(vault, output=target)
+
+        self.assertFalse(target.exists())
+
+    def test_source_path_escape_is_not_statted_or_echoed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            outside = vault.parent / "outside-secret.md"
+            outside.write_text("özel içerik", encoding="utf-8")
+            try:
+                _note(
+                    vault,
+                    "kaynak-yolu",
+                    updated="2026-01-02",
+                    sources=[
+                        "/tmp/outside-secret.md",
+                        "../outside-secret.md",
+                        r"C:\outside-secret.md",
+                    ],
+                )
+                findings = stale_review.review(
+                    vault, days=90, now=datetime.date(2026, 9, 11)
+                )
+                target, _count = stale_review.write_report(
+                    vault, now=datetime.date(2026, 9, 11)
+                )
+                text = target.read_text(encoding="utf-8")
+            finally:
+                outside.unlink()
+
+        reasons = findings[0].reasons
+        self.assertEqual(reasons[0], "252 gündür güncellenmemiş")
+        self.assertEqual(reasons[1:], (
+            "kaynak yolu geçersiz",
+            "kaynak yolu geçersiz",
+            "kaynak yolu geçersiz",
+        ))
+        self.assertNotIn("outside-secret", text)
 
 
 if __name__ == "__main__":

@@ -12,14 +12,28 @@ import argparse
 import dataclasses
 import datetime
 from pathlib import Path
+from pathlib import PurePosixPath
+import re
+import stat
 from typing import Sequence
 
+from knowledge_schema import DAILY_SOURCE, parse_frontmatter
+from memory_ledger import (
+    MemoryRead,
+    MemorySourceError,
+    load_suppressed_hashes,
+    memory_read,
+    suppression_guard,
+)
 from state_store import atomic_write_text
-from vault_corpus import DAILY_ROOT, KNOWLEDGE_ROOT, NoteIndex, vault_notes
+from vault_corpus import DAILY_ROOT, KNOWLEDGE_ROOT, NoteIndex, markdown_paths
 
 REPORT_RELATIVE = Path("🎯 100-Command-Center") / "Cevo Bayat İnceleme.md"
 DEFAULT_DAYS = 90
 DERIVED_SUBDIRS = frozenset({"concepts", "connections"})
+MAX_SOURCE_FIELDS = 64
+MAX_SOURCE_CHARS = 256
+_SAFE_SOURCE_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -44,25 +58,138 @@ def _source_reasons(
     vault: Path,
     note: NoteIndex,
     note_date: datetime.date,
+    *,
+    memory: MemoryRead | None = None,
 ) -> list[str]:
     sources = note.frontmatter.get("sources")
     if isinstance(sources, str):
-        sources = [sources]
-    if not isinstance(sources, list):
+        source_values: Sequence[object] = (sources,)
+    elif isinstance(sources, list):
+        if len(sources) > MAX_SOURCE_FIELDS:
+            return ["kaynak listesi sınırı aşıldı"]
+        source_values = sources
+    else:
         return []
     reasons = []
-    for source in sources:
-        if not isinstance(source, str) or not source.strip():
+    daily_root = vault / DAILY_ROOT
+    try:
+        daily_stat = daily_root.lstat()
+        daily_status = "safe" if (
+            stat.S_ISDIR(daily_stat.st_mode)
+            and not stat.S_ISLNK(daily_stat.st_mode)
+            and not daily_root.is_junction()
+            and daily_root.resolve(strict=False).is_relative_to(vault)
+        ) else "unsafe"
+    except FileNotFoundError:
+        daily_status = "missing"
+    except (OSError, RuntimeError):
+        daily_status = "unsafe"
+    for raw_source in source_values:
+        if not isinstance(raw_source, str):
+            reasons.append("kaynak yolu geçersiz")
             continue
-        daily = vault / DAILY_ROOT / source.strip()
+        source = raw_source.strip()
+        if (
+            not source
+            or len(source) > MAX_SOURCE_CHARS
+            or not DAILY_SOURCE.fullmatch(source)
+        ):
+            if _SAFE_SOURCE_LABEL.fullmatch(source):
+                reasons.append(f"kaynağı yok: {source}")
+            else:
+                reasons.append("kaynak yolu geçersiz")
+            continue
+        if memory is not None and (
+            memory.excludes(source)
+            or memory.excludes(f"{DAILY_ROOT}/{source}")
+        ):
+            continue
+        if daily_status == "missing":
+            reasons.append(f"kaynağı yok: {source}")
+            continue
+        if daily_status != "safe":
+            reasons.append("kaynak yolu güvensiz")
+            continue
+        daily = daily_root / source
         try:
-            modified = datetime.date.fromtimestamp(daily.stat().st_mtime)
-        except OSError:
-            reasons.append(f"kaynağı yok: {source.strip()}")
+            source_stat = daily.lstat()
+            resolved = daily.resolve(strict=False)
+            if (
+                stat.S_ISLNK(source_stat.st_mode)
+                or not stat.S_ISREG(source_stat.st_mode)
+                or not resolved.is_relative_to(vault)
+                or not resolved.is_relative_to(daily_root.resolve(strict=False))
+            ):
+                reasons.append("kaynak yolu güvensiz")
+                continue
+            modified = datetime.date.fromtimestamp(source_stat.st_mtime)
+        except FileNotFoundError:
+            reasons.append(f"kaynağı yok: {source}")
+            continue
+        except (OSError, OverflowError, ValueError):
+            reasons.append(f"kaynak zamanı okunamadı: {source}")
             continue
         if modified > note_date:
-            reasons.append(f"kaynağı sonradan değişmiş: {source.strip()} ({modified})")
+            reasons.append(f"kaynağı sonradan değişmiş: {source} ({modified})")
     return reasons
+
+
+def _eligible_note_paths(vault: Path) -> tuple[Path, ...]:
+    root = vault.resolve()
+    paths = []
+    for path in markdown_paths(root / KNOWLEDGE_ROOT):
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            continue
+        parts = relative.parts
+        if len(parts) >= 3 and parts[0] == KNOWLEDGE_ROOT and parts[1] in DERIVED_SUBDIRS:
+            paths.append(path)
+    return tuple(sorted(paths))
+
+
+def _snapshot_notes(vault: Path, memory: MemoryRead) -> tuple[NoteIndex, ...]:
+    notes = []
+    for path in _eligible_note_paths(vault):
+        try:
+            relative, text = memory.read_source(path)
+        except (MemorySourceError, OSError, UnicodeError):
+            continue
+        if text is None:
+            continue
+        notes.append(
+            NoteIndex(
+                path,
+                PurePosixPath(relative.as_posix()),
+                text,
+                parse_frontmatter(text),
+            )
+        )
+    return tuple(notes)
+
+
+def _review_notes(
+    vault: Path,
+    notes: Sequence[NoteIndex],
+    *,
+    days: int,
+    today: datetime.date,
+    memory: MemoryRead,
+) -> list[StaleFinding]:
+    findings = []
+    for note in notes:
+        note_date = _note_date(note)
+        if note_date is None:
+            findings.append(StaleFinding(note.key, -1, ("tarih alanı yok ya da bozuk",)))
+            continue
+        age = (today - note_date).days
+        reasons = _source_reasons(vault, note, note_date, memory=memory)
+        if age >= days:
+            reasons.insert(0, f"{age} gündür güncellenmemiş")
+        if reasons:
+            findings.append(StaleFinding(note.key, age, tuple(reasons)))
+    findings.sort(key=lambda finding: (-finding.age_days, finding.note))
+    return findings
 
 
 def review(
@@ -73,23 +200,16 @@ def review(
 ) -> list[StaleFinding]:
     vault = Path(vault).resolve()
     today = now or datetime.date.today()
-    findings = []
-    for note in vault_notes(vault):
-        parts = note.relative.parts
-        if note.root != KNOWLEDGE_ROOT or len(parts) < 3 or parts[1] not in DERIVED_SUBDIRS:
-            continue
-        note_date = _note_date(note)
-        if note_date is None:
-            findings.append(StaleFinding(note.key, -1, ("tarih alanı yok ya da bozuk",)))
-            continue
-        age = (today - note_date).days
-        reasons = _source_reasons(vault, note, note_date)
-        if age >= days:
-            reasons.insert(0, f"{age} gündür güncellenmemiş")
-        if reasons:
-            findings.append(StaleFinding(note.key, age, tuple(reasons)))
-    findings.sort(key=lambda finding: (-finding.age_days, finding.note))
-    return findings
+    with memory_read(vault) as memory:
+        findings = _review_notes(
+            vault,
+            _snapshot_notes(vault, memory),
+            days=days,
+            today=today,
+            memory=memory,
+        )
+        memory.check_knowledge_snapshot()
+        return findings
 
 
 def render(findings: Sequence[StaleFinding], *, days: int, today: datetime.date) -> str:
@@ -138,10 +258,21 @@ def write_report(
 ) -> tuple[Path, int]:
     vault = Path(vault).resolve()
     today = now or datetime.date.today()
-    findings = review(vault, days=days, now=today)
     target = output if output is not None else vault / REPORT_RELATIVE
-    atomic_write_text(target, render(findings, days=days, today=today))
-    return target, len(findings)
+    private_root = vault / ".codex/private-memory"
+    hashes = load_suppressed_hashes(private_root)
+    with suppression_guard(private_root, hashes):
+        with memory_read(vault) as memory:
+            findings = _review_notes(
+                vault,
+                _snapshot_notes(vault, memory),
+                days=days,
+                today=today,
+                memory=memory,
+            )
+            memory.check_knowledge_snapshot()
+            atomic_write_text(target, render(findings, days=days, today=today))
+            return target, len(findings)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
