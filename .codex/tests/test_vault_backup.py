@@ -432,7 +432,7 @@ class VaultBackupTests(unittest.TestCase):
 
             with mock.patch.object(
                 vault_backup,
-                "working_tree_summary",
+                "_working_tree_summary",
                 side_effect=vault_backup.BackupError("status okunamadı"),
             ), redirect_stdout(output):
                 exit_code = vault_backup.main(
@@ -443,6 +443,31 @@ class VaultBackupTests(unittest.TestCase):
             self.assertIn("Yedek alındı:", output.getvalue())
             self.assertIn("çalışma ağacı özeti alınamadı", output.getvalue())
             self.assertNotIn("YEDEK BAŞARISIZ", output.getvalue())
+
+    def test_main_reports_ignored_files_outside_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            (vault / ".gitignore").write_text("ignored.md\n", encoding="utf-8")
+            _git(vault, "add", ".gitignore")
+            _git(
+                vault,
+                "-c", "user.name=test",
+                "-c", "user.email=test@example.invalid",
+                "commit", "-q", "-m", "ignore",
+            )
+            (vault / "ignored.md").write_text("gizli", encoding="utf-8")
+            output = StringIO()
+
+            with redirect_stdout(output):
+                exit_code = vault_backup.main(
+                    ["--vault", str(vault), "--dest", str(dest), "--keep", "1"],
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("yok sayılan 1 dosya", output.getvalue())
 
     def test_invalid_keep_does_not_publish_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

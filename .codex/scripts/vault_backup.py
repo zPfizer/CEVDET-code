@@ -80,6 +80,15 @@ def _ensure_full_history(vault: Path) -> None:
         raise BackupError("shallow Git deposu tam geçmiş bundle'ı desteklemiyor")
 
 
+def _validate_bundle_artifact(vault: Path, bundle: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix=".bundle-check-", dir=bundle.parent) as temporary:
+        mirror = Path(temporary) / "mirror.git"
+        _git(vault, "clone", "-q", "--mirror", str(bundle), str(mirror))
+        _ensure_full_history(mirror)
+        _ensure_no_submodules(mirror)
+        _ensure_no_lfs(mirror)
+
+
 def _require_repo(vault: Path) -> None:
     if not vault.is_dir():
         raise BackupError(f"vault dizini yok: {vault}")
@@ -150,8 +159,6 @@ def _unique_bundle_path(dest: Path, stamp: str) -> Path:
 
 def _create_bundle_locked(vault: Path, dest: Path, *, now: float | None = None) -> Path:
     _ensure_full_history(vault)
-    _ensure_no_submodules(vault)
-    _ensure_no_lfs(vault)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
     final = _unique_bundle_path(dest, stamp)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -162,6 +169,7 @@ def _create_bundle_locked(vault: Path, dest: Path, *, now: float | None = None) 
     try:
         _git(vault, "bundle", "create", str(partial), "--all")
         _git(vault, "bundle", "verify", str(partial))
+        _validate_bundle_artifact(vault, partial)
         os.replace(partial, final)
     finally:
         partial.unlink(missing_ok=True)
@@ -241,14 +249,25 @@ def _create_and_prune(
 
 def working_tree_summary(vault: Path) -> tuple[int, int]:
     """(izlenen değişiklik, izlenmeyen dosya) sayıları; bundle bunları kapsamaz."""
-    status = _git(vault, "status", "--porcelain", "--untracked-files=all")
+    tracked, untracked, _ignored = _working_tree_summary(vault)
+    return tracked, untracked
+
+
+def _working_tree_summary(vault: Path) -> tuple[int, int, int]:
+    status = _git(
+        vault,
+        "status", "--porcelain", "--untracked-files=all", "--ignored",
+    )
     tracked = untracked = 0
+    ignored = 0
     for line in status.stdout.splitlines():
         if line.startswith("??"):
             untracked += 1
+        elif line.startswith("!!"):
+            ignored += 1
         elif line.strip():
             tracked += 1
-    return tracked, untracked
+    return tracked, untracked, ignored
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -273,7 +292,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     try:
-        tracked, untracked = working_tree_summary(vault)
+        tracked, untracked, ignored = _working_tree_summary(vault)
     except BackupError as error:
         tracked = untracked = 0
         status_error = error
@@ -286,10 +305,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Budanan eski yedek: {len(removed)}")
     if status_error is not None:
         print(f"UYARI: çalışma ağacı özeti alınamadı — {status_error}")
-    elif tracked or untracked:
+    elif tracked or untracked or ignored:
         print(
             "UYARI: commit'lenmemiş değişiklikler yedeğin dışında — "
-            f"izlenen {tracked}, izlenmeyen {untracked} dosya."
+            f"izlenen {tracked}, izlenmeyen {untracked}, yok sayılan {ignored} dosya."
         )
     return 0
 
