@@ -706,6 +706,33 @@ class Bug007JsonCredentialTests(unittest.TestCase):
                 'cmd /c set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET',
                 max_chars=None,
             )
+        with self.assertRaisesRegex(
+            ledger.MemoryPreferenceError,
+            '^memory-credential-container-unverifiable$',
+        ):
+            ledger.sanitize_text(
+                'cmd.exe /c set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET',
+                max_chars=None,
+            )
+
+    def test_powershell_compound_assignment_is_redacted(self) -> None:
+        cases = (
+            (
+                '$env:DATABASE_PASSWORD += "FIRST_SECRET SECOND_SECRET"',
+                '$env:DATABASE_PASSWORD += <REDACTED>',
+            ),
+            (
+                '${env:Database_Password} += "FIRST_SECRET SECOND_SECRET"',
+                '${env:Database_Password} += <REDACTED>',
+            ),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                sanitized, redactions = ledger.sanitize_text(text, max_chars=None)
+                self.assertEqual(sanitized, expected)
+                self.assertEqual(redactions, ('credential',))
+                self.assertNotIn('FIRST_SECRET', sanitized)
+                self.assertNotIn('SECOND_SECRET', sanitized)
 
     def test_batch_if_prose_does_not_consume_safe_context(self) -> None:
         text = 'If you set DATABASE_PASSWORD=FIRST_SECRET then keep this decision'

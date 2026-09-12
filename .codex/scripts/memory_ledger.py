@@ -99,12 +99,12 @@ BATCH_ASSIGNMENT_PREFIX = re.compile(
     r'''(?im)''' + _BATCH_COMMAND_PREFIX + r'''["']?\Z'''
 )
 BATCH_CMD_WRAPPER_CREDENTIAL = re.compile(
-    r'''(?im)(?:^[ \t]*|(?<=[&|<>()])[ \t]*)@?cmd[ \t]+/c[ \t]+"?set[ \t]+'''
+    r'''(?im)(?:^[ \t]*|(?<=[&|<>()])[ \t]*)@?cmd(?:\.exe)?[ \t]+/c[ \t]+"?set[ \t]+'''
     r'''(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
 )
 POWERSHELL_CREDENTIAL = re.compile(
     r'''(?im)(?P<prefix>\$(?:(?i:env):[ \t]*|\{(?i:env):[ \t]*))'''
-    r'''(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')(?P<closing>\}?)(?P<assignment>[ \t]*=[ \t]*)'''
+    r'''(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')(?P<closing>\}?)(?P<assignment>[ \t]*(?:[+\-*/%]?=)[ \t]*)'''
 )
 POWERSHELL_ASSIGNMENT_PREFIX = re.compile(r'''(?im)(?:\$(?i:env):|\$\{(?i:env):)[ \t]*\Z''')
 TOKEN_PREFIX = re.compile(r"\b(?:sk(?=[-_])|ghp|github_pat|AKIA)[-_A-Za-z0-9]{12,}\b")
