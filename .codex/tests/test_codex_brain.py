@@ -556,6 +556,7 @@ class TranscriptTests(unittest.TestCase):
     def test_flush_prompt_separates_decisions_intentions_and_proposals(self) -> None:
         prompt = flush.build_flush_prompt("Kullanıcı seçim ve sonraki adımı anlattı.")
 
+        normalized_prompt = prompt.casefold()
         for phrase in (
             "seçilen seçeneği",
             "kullanıcının verdiği gerekçeyi",
@@ -566,9 +567,10 @@ class TranscriptTests(unittest.TestCase):
             "açık taahhüdü",
             "Şimdilik A'yı kullanacağız",
             "farklı bir dış",
+            "doğrulanmış yürütme\ngörev durumunu ayrıca tamamlandı veya iptal olarak güncelleyebilir",
         ):
             with self.subTest(phrase=phrase):
-                self.assertIn(phrase, prompt)
+                self.assertIn(phrase.casefold(), normalized_prompt)
 
     def test_daily_append_uses_day_lock_and_fsyncs_before_return(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

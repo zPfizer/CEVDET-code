@@ -413,8 +413,9 @@ Kalıcı değeri olan hiçbir şey yoksa yalnızca FLUSH_BOS yaz.
 Bağlam bölümünde amacı, gerekçeyi ve kalınan noktayı koru; ara soru ana işi silmez.
 Yapılacaklar bölümünde açık, tamamlandı, iptal ve öneri durumlarını ayır.
 Yeni açık kullanıcı düzeltmesi eski durumu değiştirir; değişimi gerekçesiyle koru.
-Tamamlanan veya iptal edilen işi açık iş olarak tekrar yazma. Eski durumun
-yerine güncel durumu ancak açık kullanıcı değişikliği getirir; farklı bir dış
+Tamamlanan veya iptal edilen işi açık iş olarak tekrar yazma. Kullanıcı kararının
+yerine güncel kararı ancak açık kullanıcı değişikliği getirir; doğrulanmış yürütme
+görev durumunu ayrıca tamamlandı veya iptal olarak güncelleyebilir. Farklı bir dış
 kaynak görüşünü kullanıcı kararı değişikliği sayma. Doğrulanmamış
 uygulamayı doğrulandı sayma. Yeni parça yalnız geçici sohbetse FLUSH_BOS yaz;
 önceki özetin aynısını yeni bilgi gibi tekrar yayımlama. Önceki özet kaynak

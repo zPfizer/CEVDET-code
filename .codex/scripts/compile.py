@@ -117,9 +117,8 @@ TALİMATLAR
    makaleleri Grep ve Read ile incele. Knowledge dizinini topluca okuma.
 5. Makaleleri kullanıcının dili olan Türkçe yaz. Slug değerlerini ASCII
    kebab-case biçiminde yaz.
-6. Yeni bilgi mevcut bir kayıtla çelişiyorsa eski kaydı koru ve `gecmis` yap;
-   yeni kaydı ayrıca `gecerli` olarak ekle. Önceki iddiayı sessizce silme veya
-   yeniden yazma.
+6. Yukarıdaki `BELLEK ŞEMASI KURALLARI` içindeki çelişki ve kaynak ayrılığı
+   kuralını tek otorite olarak uygula; aynı uzun hükmü burada tekrar yazma.
    Günlükteki gerekçe, konuşulmuş alternatif, koşul ve taahhütü Detaylar veya
    Kayıtlar'da koru; Assistant önerisini kullanıcı kararı yapma.
    Saat, tutar ve durum gibi değişken kararların güncel değerini tek esas
