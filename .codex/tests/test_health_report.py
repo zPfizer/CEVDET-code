@@ -59,6 +59,24 @@ def _pending_record(job_id: str) -> dict[str, object]:
 
 
 class HealthReportTests(unittest.TestCase):
+    def test_missing_compile_state_still_rechecks_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = _seed_state(Path(temporary))
+            state_path = state / "compile-state.json"
+            lstat = Path.lstat
+
+            def begin_publication_before_missing_state(path, *args, **kwargs):
+                if path == state_path:
+                    (state / "compile-publication.json").write_text(
+                        json.dumps({"schema_version": 1, "status": "pending"}),
+                        encoding="utf-8",
+                    )
+                return lstat(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "lstat", begin_publication_before_missing_state):
+                result = health_report.compile_summary(state)
+            self.assertEqual(result, ("?", "yayın kurtarma bekliyor"))
+
     def test_new_transport_after_orphan_scan_aborts_report(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

@@ -504,6 +504,20 @@ def compile_summary(state_dir: Path) -> tuple[str, str]:
         publication_id = compile_state.load_publication_token(state_dir)
     except compile_state.PolicyError:
         return "?", "yayın kaydı doğrulanamadı"
+    result = _compile_state_summary(state_dir)
+    try:
+        if (
+            compile_state.load_publication(state_dir) is not None
+            or compile_state.load_publication_token(state_dir) != publication_id
+            or compile_state.load_publication(state_dir) is not None
+        ):
+            return "?", "yayın kurtarma bekliyor"
+    except compile_state.PolicyError:
+        return "?", "yayın kaydı doğrulanamadı"
+    return result
+
+
+def _compile_state_summary(state_dir: Path) -> tuple[str, str]:
     path = compile_state.state_file(state_dir)
     try:
         path_stat = path.lstat()
@@ -535,15 +549,6 @@ def compile_summary(state_dir: Path) -> tuple[str, str]:
             return "?", "bozuk kayıt"
     if _COMPILE_STATUS.fullmatch(last_status) is None:
         return "?", "bozuk kayıt"
-    try:
-        if (
-            compile_state.load_publication(state_dir) is not None
-            or compile_state.load_publication_token(state_dir) != publication_id
-            or compile_state.load_publication(state_dir) is not None
-        ):
-            return "?", "yayın kurtarma bekliyor"
-    except compile_state.PolicyError:
-        return "?", "yayın kaydı doğrulanamadı"
     return last_run or "hiç", last_status
 
 
