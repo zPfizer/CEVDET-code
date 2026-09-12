@@ -52,49 +52,19 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return result
 
 
-def _git_probe(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    command = ["git", "-C", str(repo), *args]
-    try:
-        return subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=GIT_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise BackupError(f"git çalıştırılamadı: {exc}") from exc
-
-
 def _ensure_no_lfs(vault: Path) -> None:
-    lfs_files = _git_probe(vault, "lfs", "ls-files", "--all")
-    if lfs_files.returncode == 0:
-        if lfs_files.stdout.strip():
-            raise BackupError("Git LFS dosyaları desteklenmiyor; bundle üretilmedi")
-        return
-
-    pointer_blobs = _git_probe(
-        vault,
-        "grep", "-I", "-l", "--all-match", "-E",
-        "-e", r"^version https://git-lfs\.github\.com/spec/v1$",
-        "-e", r"^oid sha256:[0-9a-f]{64}$",
-        "-e", r"^size [0-9]+$",
-        "HEAD", "--",
-    )
-    attributes = _git_probe(
-        vault,
-        "grep", "-I", "-l", "-E",
-        r"(^|[[:space:]])filter=lfs([[:space:]]|$)",
-        "HEAD", "--", "*.gitattributes",
-    )
-    if pointer_blobs.returncode == 0 or attributes.returncode == 0:
+    try:
+        lfs_files = _git(vault, "lfs", "ls-files", "--all")
+    except BackupError as error:
+        raise BackupError("Git LFS tam geçmişi doğrulanamadı; bundle üretilmedi") from error
+    if lfs_files.stdout.strip():
         raise BackupError("Git LFS dosyaları desteklenmiyor; bundle üretilmedi")
-    if pointer_blobs.returncode not in (0, 1):
-        raise BackupError("Git LFS pointer'ları doğrulanamadı")
-    if attributes.returncode not in (0, 1):
-        raise BackupError("Git LFS ayarları doğrulanamadı")
-    raise BackupError("Git LFS tam geçmişi doğrulanamadı; bundle üretilmedi")
+
+
+def _ensure_no_submodules(vault: Path) -> None:
+    index_entries = _git(vault, "ls-files", "--stage").stdout.splitlines()
+    if any(entry.startswith("160000 ") for entry in index_entries):
+        raise BackupError("Git submodule dosyaları desteklenmiyor; bundle üretilmedi")
 
 
 def _require_repo(vault: Path) -> None:
@@ -166,6 +136,7 @@ def _unique_bundle_path(dest: Path, stamp: str) -> Path:
 
 
 def _create_bundle_locked(vault: Path, dest: Path, *, now: float | None = None) -> Path:
+    _ensure_no_submodules(vault)
     _ensure_no_lfs(vault)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
     final = _unique_bundle_path(dest, stamp)
@@ -280,16 +251,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     dest = args.dest if args.dest is not None else vault.parent / f"{vault.name}-yedek"
     try:
         bundle, removed, bundle_size = _create_and_prune(vault, dest, args.keep)
-        tracked, untracked = working_tree_summary(vault)
     except BackupError as error:
         print(f"YEDEK BAŞARISIZ: {error}")
         return 1
+
+    try:
+        tracked, untracked = working_tree_summary(vault)
+    except BackupError as error:
+        tracked = untracked = 0
+        status_error = error
+    else:
+        status_error = None
 
     size_mb = bundle_size / (1024 * 1024)
     print(f"Yedek alındı: {bundle} ({size_mb:.1f} MB)")
     if removed:
         print(f"Budanan eski yedek: {len(removed)}")
-    if tracked or untracked:
+    if status_error is not None:
+        print(f"UYARI: çalışma ağacı özeti alınamadı — {status_error}")
+    elif tracked or untracked:
         print(
             "UYARI: commit'lenmemiş değişiklikler yedeğin dışında — "
             f"izlenen {tracked}, izlenmeyen {untracked} dosya."

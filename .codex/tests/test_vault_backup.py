@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 import subprocess
 import sys
@@ -295,7 +297,17 @@ class VaultBackupTests(unittest.TestCase):
                 "commit", "-q", "-m", "literal",
             )
 
-            bundle = vault_backup.create_bundle(vault, dest)
+            real_git = vault_backup._git
+
+            def successful_lfs_probe(
+                repo: Path, *args: str,
+            ) -> subprocess.CompletedProcess[str]:
+                if args == ("lfs", "ls-files", "--all"):
+                    return subprocess.CompletedProcess(["git"], 0, "", "")
+                return real_git(repo, *args)
+
+            with mock.patch.object(vault_backup, "_git", side_effect=successful_lfs_probe):
+                bundle = vault_backup.create_bundle(vault, dest)
 
             self.assertTrue(bundle.exists())
 
@@ -305,22 +317,62 @@ class VaultBackupTests(unittest.TestCase):
             vault = root / "vault"
             dest = root / "yedek"
             _init_repo(vault)
-            real_probe = vault_backup._git_probe
+            real_git = vault_backup._git
 
-            def failed_lfs_probe(
+            def failed_lfs_command(
                 repo: Path, *args: str,
             ) -> subprocess.CompletedProcess[str]:
                 if args == ("lfs", "ls-files", "--all"):
-                    return subprocess.CompletedProcess(
-                        ["git"], 1, "", "LFS probe failed",
-                    )
-                return real_probe(repo, *args)
+                    raise vault_backup.BackupError("LFS probe failed")
+                return real_git(repo, *args)
 
-            with mock.patch.object(vault_backup, "_git_probe", side_effect=failed_lfs_probe):
+            with mock.patch.object(vault_backup, "_git", side_effect=failed_lfs_command):
                 with self.assertRaises(vault_backup.BackupError):
                     vault_backup.create_bundle(vault, dest)
 
             self.assertFalse(list(dest.rglob("vault-*.bundle")))
+
+    def test_tracked_submodule_is_rejected_before_bundle_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            head = _git(vault, "rev-parse", "HEAD").stdout.strip()
+            _git(vault, "update-index", "--add", "--cacheinfo", f"160000,{head},submodule")
+            _git(
+                vault,
+                "-c", "user.name=test",
+                "-c", "user.email=test@example.invalid",
+                "commit", "-q", "-m", "submodule",
+            )
+
+            with self.assertRaises(vault_backup.BackupError):
+                vault_backup.create_bundle(vault, dest)
+
+            self.assertFalse(list(dest.rglob("vault-*.bundle")))
+
+    def test_status_failure_after_publish_is_reported_as_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            output = StringIO()
+
+            with mock.patch.object(
+                vault_backup,
+                "working_tree_summary",
+                side_effect=vault_backup.BackupError("status okunamadı"),
+            ), redirect_stdout(output):
+                exit_code = vault_backup.main(
+                    ["--vault", str(vault), "--dest", str(dest), "--keep", "1"],
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("Yedek alındı:", output.getvalue())
+            self.assertIn("çalışma ağacı özeti alınamadı", output.getvalue())
+            self.assertNotIn("YEDEK BAŞARISIZ", output.getvalue())
 
     def test_invalid_keep_does_not_publish_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
