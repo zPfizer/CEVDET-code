@@ -114,14 +114,13 @@ def _note_date(note: NoteIndex) -> datetime.date | None:
         return None
 
 
-def _valid_daily_source(source: str) -> bool:
+def _daily_source_date(source: str) -> datetime.date | None:
     if DAILY_SOURCE.fullmatch(source) is None:
-        return False
+        return None
     try:
-        datetime.date.fromisoformat(source[:-3])
+        return datetime.date.fromisoformat(source[:-3])
     except ValueError:
-        return False
-    return True
+        return None
 
 
 def _source_reasons(
@@ -166,10 +165,11 @@ def _source_reasons(
         ):
             reasons.append("kaynak güveni doğrulanamadı")
             continue
+        source_date = _daily_source_date(source)
         if (
             not source
             or len(source) > MAX_SOURCE_CHARS
-            or not _valid_daily_source(source)
+            or source_date is None
         ):
             if (
                 _SAFE_SOURCE_LABEL.fullmatch(source)
@@ -208,6 +208,8 @@ def _source_reasons(
         except (OSError, OverflowError, ValueError):
             reasons.append(f"kaynak zamanı okunamadı: {source}")
             continue
+        if source_date > note_date:
+            reasons.append(f"kaynak tarihi nottan sonra: {source} ({source_date})")
         try:
             relative, text = memory.read_source(
                 daily,

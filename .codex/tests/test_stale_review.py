@@ -342,6 +342,26 @@ class StaleReviewTests(unittest.TestCase):
             ("252 gündür güncellenmemiş", "kaynak yolu geçersiz"),
         )
 
+    def test_source_date_after_note_is_reported_as_invalid_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _daily(vault, "2026-09-11.md", mtime=datetime.date(2026, 9, 9))
+            _note(
+                vault,
+                "gelecek-kaynak",
+                updated="2026-09-10",
+                sources=["2026-09-11.md"],
+            )
+
+            findings = stale_review.review(
+                vault, days=90, now=datetime.date(2026, 9, 11)
+            )
+
+        self.assertEqual(
+            findings[0].reasons,
+            ("kaynak tarihi nottan sonra: 2026-09-11.md (2026-09-11)",),
+        )
+
     def test_missing_vault_fails_closed_before_creating_state_or_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
