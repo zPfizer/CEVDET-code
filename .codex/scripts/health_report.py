@@ -36,6 +36,8 @@ _DEAD_LETTER_REASONS = frozenset(
     {
         "legacy-failed",
         "recovered-by-successor",
+        "redrive-conflict",
+        "redrive-identity-conflict",
         "retry-exhausted",
         "unrecoverable-input",
     }

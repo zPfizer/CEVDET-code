@@ -294,6 +294,31 @@ class HealthReportTests(unittest.TestCase):
         self.assertNotIn("private-reason", text)
         self.assertEqual(text.count("| ? | ? | ? | ? |"), 2)
 
+    def test_current_redrive_conflict_reasons_are_published(self) -> None:
+        reasons = ("redrive-conflict", "redrive-identity-conflict")
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = _seed_state(vault)
+            dead_letter = state / "worker-jobs" / "dead-letter"
+            for index, reason in enumerate(reasons):
+                job_id = f"{index + 8:x}" * 32
+                (dead_letter / f"job-{job_id}.json").write_text(
+                    json.dumps(
+                        _dead_letter_record(
+                            job_id,
+                            finished_ts=1757500000 + index,
+                            terminal_reason=reason,
+                        )
+                    ),
+                    encoding="utf-8",
+                )
+
+            rows = health_report.dead_letter_rows(state)
+
+        self.assertEqual(
+            {row["terminal_reason"] for row in rows}, set(reasons)
+        )
+
     def test_verified_recovered_dead_letter_is_not_stuck(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
