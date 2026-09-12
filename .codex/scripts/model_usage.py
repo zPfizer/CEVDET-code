@@ -22,6 +22,7 @@ KEEP_DAYS = 30
 DEFAULT_SUMMARY_DAYS = 7
 USAGE_FILE = re.compile(r"model-usage-(\d{8})\.jsonl$")
 MAX_RECORD_BYTES = 4096
+MAX_METRIC_VALUE = 1_000_000_000_000
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
 
 
@@ -150,6 +151,8 @@ def usage_summary(
     now: datetime.datetime | None = None,
 ) -> dict[str, dict[str, int]]:
     """Amaç başına: çağrı, başarı, hata, toplam prompt karakteri, ortalama süre."""
+    if days < 1 or days > KEEP_DAYS:
+        raise ValueError("summary-window-out-of-retention")
     moment = now or datetime.datetime.now()
     since = moment.date() - datetime.timedelta(days=days - 1)
     summary: dict[str, dict[str, int]] = {}
@@ -158,6 +161,11 @@ def usage_summary(
             prompt_chars = int(entry.get("prompt_chars", 0) or 0)
             duration_ms = int(entry.get("duration_ms", 0) or 0)
         except (TypeError, ValueError, OverflowError):
+            continue
+        if not (
+            0 <= prompt_chars <= MAX_METRIC_VALUE
+            and 0 <= duration_ms <= MAX_METRIC_VALUE
+        ):
             continue
         purpose = str(entry.get("purpose", "unknown"))
         bucket = summary.setdefault(
@@ -180,7 +188,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--state-dir", type=Path, default=default_state)
     parser.add_argument("--days", type=int, default=DEFAULT_SUMMARY_DAYS)
     args = parser.parse_args(argv)
-    summary = usage_summary(args.state_dir, days=args.days)
+    try:
+        summary = usage_summary(args.state_dir, days=args.days)
+    except ValueError as exc:
+        parser.error(str(exc))
     if not summary:
         print(f"Son {args.days} günde kayıtlı model çağrısı yok.")
         return 0

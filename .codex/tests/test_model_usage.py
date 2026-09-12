@@ -101,6 +101,13 @@ class ModelUsageTests(unittest.TestCase):
 
         self.assertEqual(summary, {})
 
+    def test_summary_rejects_window_beyond_retention(self) -> None:
+        with self.assertRaisesRegex(ValueError, "summary-window-out-of-retention"):
+            model_usage.usage_summary(
+                Path("unused"), days=model_usage.KEEP_DAYS + 1,
+                now=datetime.datetime(2026, 9, 11, 12, 0),
+            )
+
     def test_record_separates_an_incomplete_jsonl_tail(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -267,9 +274,12 @@ class ModelUsageTests(unittest.TestCase):
             }
             invalid_prompt = {**valid, "prompt_chars": "not-a-number"}
             invalid_duration = {**valid, "duration_ms": "not-a-number"}
+            huge_prompt = {**valid, "prompt_chars": 10 ** 3000}
+            negative_duration = {**valid, "duration_ms": -1}
             ledger.write_text(
                 "\n".join(json.dumps(item) for item in (
                     valid, invalid_prompt, invalid_duration,
+                    huge_prompt, negative_duration,
                 )) + "\n",
                 encoding="utf-8",
             )
