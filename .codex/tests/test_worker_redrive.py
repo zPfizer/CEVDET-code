@@ -30,6 +30,26 @@ def _dead_letter_job(state: Path, job_id: str, **overrides) -> Path:
     return path
 
 
+def _succeeded_job(state: Path, job_id: str, **overrides) -> Path:
+    record = {
+        "schema_version": 1,
+        "job_id": job_id,
+        "kind": "maintenance",
+        "status": "succeeded",
+        "generation": 4,
+        "attempt": 1,
+        "enqueue_sequence": 2,
+        "enqueued_ts": 1757400000,
+        "finished_ts": 1757400200,
+        "payload": {},
+    }
+    record.update(overrides)
+    path = state / "worker-jobs" / "succeeded" / f"job-{job_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return path
+
+
 class RedriveDeadLetterTests(unittest.TestCase):
     def test_interrupted_redrive_is_completed_by_queue_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -88,12 +108,14 @@ class RedriveDeadLetterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             job_id = "b" * 32
+            successor_id = "c" * 32
+            _succeeded_job(state, successor_id, payload={"reason": "same"})
             original = _dead_letter_job(
                 state,
                 job_id,
-                payload={},
+                payload={"reason": "same"},
                 terminal_reason="recovered-by-successor",
-                recovery_job_id="c" * 32,
+                recovery_job_id=successor_id,
             )
 
             redriven, skipped = workers.redrive_dead_letter(state)
@@ -102,6 +124,106 @@ class RedriveDeadLetterTests(unittest.TestCase):
         self.assertEqual(redriven, [])
         self.assertEqual(skipped, [(job_id, "zaten kurtarılmış")])
         self.assertTrue(still_there)
+
+    def test_unverified_successor_marker_is_redriven(self) -> None:
+        for variant in ("missing", "corrupt", "pending", "different_payload"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                job_id = "b" * 32
+                successor_id = "c" * 32
+                _dead_letter_job(
+                    state,
+                    job_id,
+                    payload={"reason": "original"},
+                    terminal_reason="recovered-by-successor",
+                    recovery_job_id=successor_id,
+                )
+                if variant == "corrupt":
+                    successor = state / "worker-jobs" / "succeeded" / f"job-{successor_id}.json"
+                    successor.parent.mkdir(parents=True, exist_ok=True)
+                    successor.write_text("{bozuk", encoding="utf-8")
+                elif variant == "pending":
+                    successor = state / "worker-jobs" / "pending" / f"job-{successor_id}.json"
+                    successor.parent.mkdir(parents=True, exist_ok=True)
+                    successor.write_text(
+                        json.dumps(
+                            {
+                                "schema_version": 1,
+                                "job_id": successor_id,
+                                "kind": "maintenance",
+                                "status": "pending",
+                                "generation": 4,
+                                "attempt": 0,
+                                "enqueue_sequence": 2,
+                                "enqueued_ts": 1757400000,
+                                "payload": {"reason": "original"},
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                elif variant == "different_payload":
+                    _succeeded_job(state, successor_id, payload={"reason": "different"})
+
+                redriven, skipped = workers.redrive_dead_letter(state, now=1757500000)
+                pending = state / "worker-jobs" / "pending" / f"job-{job_id}.json"
+                revived = workers._load_job(pending)
+
+            self.assertEqual(redriven, [job_id])
+            self.assertEqual(skipped, [])
+            self.assertEqual(revived["status"], "pending")
+            self.assertNotIn("terminal_reason", revived)
+
+    def test_cli_redrive_wakes_supervisor_for_redriven_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            vault = root / "vault"
+            vault.mkdir()
+            job_id = "a" * 32
+            _dead_letter_job(state, job_id, payload={"reason": "wake"})
+            with (
+                mock.patch.object(
+                    workers.sys,
+                    "argv",
+                    [
+                        "worker_supervisor.py",
+                        "--vault",
+                        str(vault),
+                        "--state-dir",
+                        str(state),
+                        "--redrive",
+                    ],
+                ),
+                mock.patch.object(workers, "ensure_supervisor") as wake,
+            ):
+                result = workers.main()
+
+        self.assertEqual(result, 0)
+        wake.assert_called_once_with(state, vault_root=vault)
+
+    def test_cli_targeted_missing_job_returns_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            vault = root / "vault"
+            vault.mkdir()
+            missing_id = "a" * 32
+            with mock.patch.object(
+                workers.sys,
+                "argv",
+                [
+                    "worker_supervisor.py",
+                    "--vault",
+                    str(vault),
+                    "--state-dir",
+                    str(state),
+                    "--redrive",
+                    missing_id,
+                ],
+            ):
+                result = workers.main()
+
+        self.assertEqual(result, 1)
 
     def test_flush_job_with_deleted_managed_input_is_skipped(self) -> None:
         # Yönetilen hookin girdisi silinmişse iş koşamaz; sessiz düşmek

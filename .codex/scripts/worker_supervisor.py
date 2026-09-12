@@ -1548,7 +1548,7 @@ def redrive_dead_letter(
                 continue
             if job_id is not None and job["job_id"] != job_id:
                 continue
-            if job.get("terminal_reason") == "recovered-by-successor":
+            if _has_verified_successor(_job_root(state_dir), job):
                 skipped.append((job["job_id"], "zaten kurtarılmış"))
                 continue
             if job["kind"] == "flush":
@@ -2144,13 +2144,15 @@ def main() -> int:
         if target is not None and re.fullmatch(r"[0-9a-f]{32}", target) is None:
             raise ValueError("worker-redrive-job-id-invalid")
         redriven, skipped = redrive_dead_letter(state_dir, job_id=target)
+        if redriven:
+            ensure_supervisor(state_dir, vault_root=vault_root)
         for identifier in redriven:
             print(f"pending'e döndü: {identifier}")
         for identifier, reason in skipped:
             print(f"atlandı: {identifier} — {reason}")
         if not redriven and not skipped:
             print("dead-letter boş ya da eşleşen iş yok")
-        return 0 if not skipped else 1
+        return 1 if skipped or (target is not None and not redriven) else 0
     if args.execute_job is not None:
         if not isinstance(args.claim_token, str) or re.fullmatch(
             r"[0-9a-f]{32}", args.claim_token
