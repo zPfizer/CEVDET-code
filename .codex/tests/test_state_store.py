@@ -68,6 +68,31 @@ class AtomicWriteTests(unittest.TestCase):
             state_store.atomic_write_text(root / "note.md", "gövde\n")
             self.assertEqual(sorted(item.name for item in root.iterdir()), ["note.md"])
 
+    def test_atomic_write_text_no_clobber_is_atomic_and_preserves_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "note.md"
+            original = b"kullanici metni\r\nek not\r\n"
+            target.write_bytes(original)
+            with mock.patch.object(
+                state_store.os,
+                "replace",
+                side_effect=AssertionError("no-clobber must not replace"),
+            ):
+                with self.assertRaises(FileExistsError):
+                    state_store.atomic_write_text(
+                        target,
+                        "generated\n",
+                        overwrite=False,
+                        newline="\n",
+                    )
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual(list(root.glob(".note.md.*.tmp")), [])
+
+            created = root / "created.md"
+            state_store.atomic_write_text(created, "generated\n", overwrite=False)
+            self.assertEqual(created.read_text(encoding="utf-8"), "generated\n")
+
     def test_stale_temporary_does_not_corrupt_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

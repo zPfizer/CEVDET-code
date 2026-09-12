@@ -19,8 +19,8 @@ from typing import Sequence
 
 from knowledge_schema import DAILY_SOURCE, parse_frontmatter
 from memory_ledger import (
+    MemoryPreferenceError,
     MemoryRead,
-    MemorySourceError,
     load_suppressed_hashes,
     memory_read,
     suppression_guard,
@@ -151,10 +151,10 @@ def _eligible_note_paths(vault: Path) -> tuple[Path, ...]:
 def _snapshot_notes(vault: Path, memory: MemoryRead) -> tuple[NoteIndex, ...]:
     notes = []
     for path in _eligible_note_paths(vault):
-        try:
-            relative, text = memory.read_source(path)
-        except (MemorySourceError, OSError, UnicodeError):
-            continue
+        relative, text = memory.read_source(path)
+        expected_relative = PurePosixPath(path.relative_to(vault).as_posix())
+        if PurePosixPath(relative.as_posix()) != expected_relative:
+            raise MemoryPreferenceError("stale-review-source-identity")
         if text is None:
             continue
         notes.append(
@@ -255,6 +255,7 @@ def write_report(
     *,
     days: int = DEFAULT_DAYS,
     now: datetime.date | None = None,
+    overwrite: bool = False,
 ) -> tuple[Path, int]:
     vault = Path(vault).resolve()
     today = now or datetime.date.today()
@@ -271,7 +272,11 @@ def write_report(
                 memory=memory,
             )
             memory.check_knowledge_snapshot()
-            atomic_write_text(target, render(findings, days=days, today=today))
+            atomic_write_text(
+                target,
+                render(findings, days=days, today=today),
+                overwrite=overwrite,
+            )
             return target, len(findings)
 
 
@@ -280,8 +285,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--vault", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace an existing report target",
+    )
     args = parser.parse_args(argv)
-    target, count = write_report(args.vault, args.output, days=args.days)
+    target, count = write_report(
+        args.vault,
+        args.output,
+        days=args.days,
+        overwrite=args.overwrite,
+    )
     print(f"Rapor yazıldı: {target} ({count} aday)")
     return 0
 

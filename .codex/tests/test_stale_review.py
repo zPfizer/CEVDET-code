@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from _fixtures import CODEX_DIR  # noqa: F401
 import compile_state
@@ -115,6 +116,38 @@ class StaleReviewTests(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertIn("Bayat aday yok", text)
 
+    def test_default_report_write_does_not_clobber_existing_user_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _note(vault, "eski-not", updated="2026-01-02", sources=[])
+            target = vault / stale_review.REPORT_RELATIVE
+            original = b"# Kullanici paneli\r\nEk not\r\n"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(original)
+
+            with self.assertRaises(FileExistsError):
+                stale_review.write_report(vault, now=datetime.date(2026, 9, 11))
+            preserved = target.read_bytes()
+
+        self.assertEqual(preserved, original)
+
+    def test_cli_overwrite_replaces_existing_report_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _note(vault, "eski-not", updated="2026-01-02", sources=[])
+            target = vault / "report.md"
+            target.write_text("kullanici notu\n", encoding="utf-8")
+
+            with mock.patch("builtins.print"):
+                result = stale_review.main(
+                    ["--vault", str(vault), "--output", str(target), "--overwrite"]
+                )
+            text = target.read_text(encoding="utf-8")
+
+        self.assertEqual(result, 0)
+        self.assertIn("Cevo Bayat İnceleme", text)
+        self.assertNotIn("kullanici notu", text)
+
     def test_suppressed_note_is_excluded_before_report_wikilink_render(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -185,6 +218,39 @@ class StaleReviewTests(unittest.TestCase):
                 stale_review.write_report(vault, output=target)
 
         self.assertFalse(target.exists())
+
+    def test_unreadable_eligible_source_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            path = _note(vault, "bozuk-not", updated="2026-01-02", sources=[])
+            path.write_bytes(b"\xff")
+            target = vault / "report.md"
+
+            with self.assertRaises(UnicodeDecodeError):
+                stale_review.write_report(vault, output=target)
+
+        self.assertFalse(target.exists())
+
+    def test_inventory_identity_mismatch_fails_closed_after_symlink_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            target = _note(vault, "ilk-not", updated="2026-01-02", sources=[])
+            other = _note(vault, "baska-not", updated="2026-01-03", sources=[])
+            real_read = ledger.MemoryRead.read_source
+
+            def replace_with_link(memory, path, **kwargs):
+                if path == target:
+                    target.unlink()
+                    target.symlink_to(other)
+                return real_read(memory, path, **kwargs)
+
+            with mock.patch.object(
+                ledger.MemoryRead, "read_source", new=replace_with_link
+            ):
+                with self.assertRaisesRegex(
+                    ledger.MemoryPreferenceError, "stale-review-source-identity"
+                ):
+                    stale_review.review(vault, now=datetime.date(2026, 9, 11))
 
     def test_source_path_escape_is_not_statted_or_echoed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
