@@ -146,7 +146,12 @@ def _validate_runtime_paths(vault: Path) -> None:
 
 def _bounded_json(path: Path) -> dict[str, Any] | None:
     try:
-        if path.stat().st_size > MAX_RECORD_BYTES:
+        metadata = path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or getattr(metadata, "st_nlink", 1) != 1
+            or metadata.st_size > MAX_RECORD_BYTES
+        ):
             return None
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -425,11 +430,9 @@ def stale_running_count(
                     owner_status = _process_owner_classification(record)
                 except (OSError, RuntimeError, ValueError) as exc:
                     raise OSError("worker-owner-unreadable") from exc
-                if lease_until <= now and owner_status in {
-                    "inactive",
-                    "mismatched",
-                    "unreadable",
-                }:
+                if owner_status in {"inactive", "mismatched"} or (
+                    lease_until <= now and owner_status == "unreadable"
+                ):
                     total += 1
     return total
 
@@ -445,6 +448,24 @@ def worker_fences(state_dir: Path) -> tuple[str, ...]:
         if has_unverified_process_tree(lane):
             fences.append(label)
     return tuple(fences)
+
+
+def _worker_observation(state_dir: Path) -> dict[Path, tuple[int, ...]]:
+    """Detect ordinary atomic queue moves/writes across a report scan."""
+    observation = {}
+    for jobs in _worker_job_roots(state_dir):
+        paths = [path for stage in WORKER_STAGES for path in _json_files(jobs / stage)]
+        paths.extend((jobs / "quarantined").glob("*.payload"))
+        supervisor = jobs.parent / "worker-supervisor.json"
+        if supervisor.exists():
+            if _bounded_json(supervisor) is None:
+                raise OSError("worker-supervisor-unreadable")
+            paths.append(supervisor)
+        for path in paths:
+            info = path.lstat()
+            observation[path] = (info.st_dev, info.st_ino, info.st_size,
+                                 info.st_mtime_ns, info.st_ctime_ns)
+    return observation
 
 
 def marker_counts(state_dir: Path) -> dict[str, int]:
@@ -488,6 +509,7 @@ def compile_summary(state_dir: Path) -> tuple[str, str]:
         return "hiç", "kayıt yok"
     if path_stat is not None and (
         stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode)
+        or getattr(path_stat, "st_nlink", 1) != 1
     ):
         return "?", "okunamadı"
     try:
@@ -647,6 +669,9 @@ def render(
     selected_output = output if output is not None else vault / PANEL_RELATIVE
     created = _previous_created(selected_output, today)
 
+    from doctor import check_ready_worker_jobs
+
+    worker_before = _worker_observation(state_dir)
     counts = worker_counts(state_dir, include_dead_letter=False)
     markers = marker_counts(state_dir)
     last_run, last_status = compile_summary(state_dir)
@@ -658,6 +683,13 @@ def render(
         now=moment.timestamp(),
     )
     fences = worker_fences(state_dir)
+    readiness = [
+        ("global" if jobs.parent == state_dir else "maintenance",
+         check_ready_worker_jobs(jobs.parent, moment.timestamp()))
+        for jobs in _worker_job_roots(state_dir)
+    ]
+    if _worker_observation(state_dir) != worker_before:
+        raise OSError("worker-state-changed")
 
     lines = [
         "---",
@@ -710,7 +742,7 @@ def render(
         )
     elif stale_running:
         lines.append(
-            "Süresi geçmiş çalışan iş var — "
+            "Sahiplik veya süre sorunu olan iş var — "
             f"{stale_running} iş yeniden ele alınmayı bekliyor."
         )
     elif orphan_hook_inputs is None:
@@ -720,6 +752,10 @@ def render(
             "Worker kurtarma bekliyor — "
             f"{orphan_hook_inputs} hook girdisi kuyruğa alınmayı bekliyor."
         )
+    elif any(check.status != "OK" for _, check in readiness):
+        lines.append("Hazır işler için yürütücü durumu doğrulanamadı.")
+    elif any(counts[stage] for stage in ("pending", "claimed", "running")):
+        lines.append("Bekleyen veya yürütülen iş var; tamamlanma doğrulanmadı.")
     else:
         lines.append("Taranan kuyruklarda takılı iş saptanmadı.")
     lines += [
@@ -730,12 +766,14 @@ def render(
         f"- Aktif session-only işareti: {markers['session_only']}",
         f"- Flush durum dosyası: {flush_state_count(state_dir, now=moment.timestamp())}",
         f"- Kurtarılmayı bekleyen hook girdisi: {orphan_hook_inputs if orphan_hook_inputs is not None else 'doğrulanamadı'}",
-        f"- Süresi geçmiş çalışan iş: {stale_running}",
+        f"- Sahiplik veya süre sorunu olan iş: {stale_running}",
         f"- Derleyici son çalışma: {last_run} (durum: {last_status})",
         f"- Sağlık kaydı (health.json): {health_summary(state_dir)}",
         f"- Worker temizleme fence'i: {', '.join(fences) if fences else 'yok'}",
         "",
     ]
+    lines.extend(f"- Hazır iş denetimi ({lane}): {check.status}; {check.evidence}"
+                 for lane, check in readiness)
     return "\n".join(lines)
 
 

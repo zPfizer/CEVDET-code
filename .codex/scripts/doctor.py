@@ -1094,7 +1094,11 @@ def _worker_queue_check(ctx: Context) -> Check | list[Check]:
 
 
 def _worker_delayed_job_check(ctx: Context) -> Check:
-    state_dir, now = ctx.state_dir, ctx.now
+    return check_ready_worker_jobs(ctx.state_dir, ctx.now)
+
+
+def check_ready_worker_jobs(state_dir: Path, now: float) -> Check:
+    """Read-only readiness/owner check shared with the health dashboard."""
     ready_pending = 0
     for path in (state_dir / "worker-jobs" / "pending").glob("*.json"):
         try:
