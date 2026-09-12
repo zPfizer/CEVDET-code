@@ -87,6 +87,36 @@ class VaultBackupTests(unittest.TestCase):
             with self.assertRaises(vault_backup.BackupError):
                 vault_backup.create_bundle(vault, root / "yedek")
 
+    def test_shallow_repository_is_rejected_before_bundle_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            vault = root / "shallow"
+            dest = root / "yedek"
+            _init_repo(source)
+            (source / "not.md").write_text("ikinci içerik", encoding="utf-8")
+            _git(source, "add", "not.md")
+            _git(
+                source,
+                "-c", "user.name=test",
+                "-c", "user.email=test@example.invalid",
+                "commit", "-q", "-m", "ikinci",
+            )
+            _git(
+                root,
+                "-c", "protocol.file.allow=always",
+                "clone", "-q", "--depth", "1", source.as_uri(), str(vault),
+            )
+
+            self.assertEqual(
+                _git(vault, "rev-parse", "--is-shallow-repository").stdout.strip(),
+                "true",
+            )
+            with self.assertRaises(vault_backup.BackupError):
+                vault_backup.create_bundle(vault, dest)
+
+            self.assertFalse(list(dest.rglob("vault-*.bundle")))
+
     def test_linked_source_namespace_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -162,6 +192,23 @@ class VaultBackupTests(unittest.TestCase):
                 ],
             )
             self.assertTrue((owned / "vault-20260903-120000-10.bundle").exists())
+
+    def test_prune_ignores_bundle_named_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            owned = _owned_dest(vault, dest)
+            directory = owned / "vault-20200101-000000.bundle"
+            directory.mkdir()
+
+            bundle = vault_backup.create_bundle(vault, dest, now=1_758_000_000)
+            removed = vault_backup.prune_bundles(dest, keep=1, vault=vault)
+
+            self.assertEqual(removed, [])
+            self.assertTrue(bundle.exists())
+            self.assertTrue(directory.is_dir())
 
     def test_clock_rollback_keeps_current_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -346,6 +393,29 @@ class VaultBackupTests(unittest.TestCase):
                 "-c", "user.email=test@example.invalid",
                 "commit", "-q", "-m", "submodule",
             )
+            _git(vault, "update-index", "--force-remove", "submodule")
+
+            with self.assertRaises(vault_backup.BackupError):
+                vault_backup.create_bundle(vault, dest)
+
+            self.assertFalse(list(dest.rglob("vault-*.bundle")))
+
+    def test_submodule_on_other_ref_is_rejected_before_bundle_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            _git(vault, "checkout", "-q", "-b", "with-submodule")
+            head = _git(vault, "rev-parse", "HEAD").stdout.strip()
+            _git(vault, "update-index", "--add", "--cacheinfo", f"160000,{head},submodule")
+            _git(
+                vault,
+                "-c", "user.name=test",
+                "-c", "user.email=test@example.invalid",
+                "commit", "-q", "-m", "submodule",
+            )
+            _git(vault, "checkout", "-q", "-")
 
             with self.assertRaises(vault_backup.BackupError):
                 vault_backup.create_bundle(vault, dest)

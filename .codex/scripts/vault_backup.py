@@ -62,9 +62,22 @@ def _ensure_no_lfs(vault: Path) -> None:
 
 
 def _ensure_no_submodules(vault: Path) -> None:
-    index_entries = _git(vault, "ls-files", "--stage").stdout.splitlines()
-    if any(entry.startswith("160000 ") for entry in index_entries):
+    history = _git(
+        vault, "log", "--all", "--raw", "--format=", "--no-renames", "--root", "-m",
+    ).stdout.splitlines()
+    if any(
+        len(fields) >= 2
+        and (fields[0][1:] == "160000" or fields[1] == "160000")
+        for line in history
+        if (fields := line.split()) and line.startswith(":")
+    ):
         raise BackupError("Git submodule dosyaları desteklenmiyor; bundle üretilmedi")
+
+
+def _ensure_full_history(vault: Path) -> None:
+    shallow = _git(vault, "rev-parse", "--is-shallow-repository").stdout.strip()
+    if shallow != "false":
+        raise BackupError("shallow Git deposu tam geçmiş bundle'ı desteklemiyor")
 
 
 def _require_repo(vault: Path) -> None:
@@ -136,6 +149,7 @@ def _unique_bundle_path(dest: Path, stamp: str) -> Path:
 
 
 def _create_bundle_locked(vault: Path, dest: Path, *, now: float | None = None) -> Path:
+    _ensure_full_history(vault)
     _ensure_no_submodules(vault)
     _ensure_no_lfs(vault)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
@@ -179,7 +193,10 @@ def _prune_bundles_locked(
 ) -> list[Path]:
     _validate_keep(keep)
     bundles = sorted(
-        (path for path in Path(dest).glob("vault-*.bundle") if BUNDLE_NAME.fullmatch(path.name)),
+        (
+            path for path in Path(dest).glob("vault-*.bundle")
+            if path.is_file() and BUNDLE_NAME.fullmatch(path.name)
+        ),
         key=_bundle_sort_key,
         reverse=True,
     )
