@@ -77,6 +77,29 @@ def _active_job(state: Path, job_id: str, status: str, **overrides) -> Path:
     return path
 
 
+def _pending_job(state: Path, job_id: str, **overrides) -> Path:
+    record = {
+        "schema_version": 1,
+        "job_id": job_id,
+        "kind": "maintenance",
+        "status": "pending",
+        "generation": 2,
+        "attempt": 0,
+        "enqueue_sequence": 2,
+        "enqueued_ts": 1757400000,
+        "payload": {"reason": "active"},
+    }
+    record.update(overrides)
+    path = state / "worker-jobs" / "pending" / f"job-{job_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return path
+
+
+class _Cp1252Stdout(io.StringIO):
+    encoding = "cp1252"
+
+
 class RedriveDeadLetterTests(unittest.TestCase):
     def test_interrupted_redrive_is_completed_by_queue_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -494,6 +517,82 @@ class RedriveDeadLetterTests(unittest.TestCase):
                     )
                     self.assertTrue(conflict_still_there)
 
+    def test_redrive_rejects_unmarked_existing_job_id(self) -> None:
+        for status in ("pending", "claimed", "running", "succeeded", "quarantined"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                job_id = "a" * 32
+                active_payload = {"reason": "active"}
+                if status == "pending":
+                    _pending_job(state, job_id, payload=active_payload)
+                elif status == "quarantined":
+                    source = _succeeded_job(
+                        state, job_id, payload=active_payload
+                    )
+                    workers._quarantine_job(
+                        state, source, "worker-job-schema-invalid"
+                    )
+                elif status == "succeeded":
+                    _succeeded_job(state, job_id, payload=active_payload)
+                else:
+                    _active_job(
+                        state,
+                        job_id,
+                        status,
+                        payload=active_payload,
+                        redriven_ts=None,
+                    )
+                dead_letter = _dead_letter_job(
+                    state, job_id, payload=active_payload
+                )
+
+                redriven, skipped = workers.redrive_dead_letter(
+                    state, job_id=job_id
+                )
+                saved = workers._load_job(dead_letter)
+                pending = state / "worker-jobs" / "pending" / dead_letter.name
+                conflict_still_there = dead_letter.is_file()
+
+            self.assertEqual(redriven, [])
+            self.assertEqual(skipped, [(job_id, "redrive çakışması")])
+            self.assertEqual(saved["terminal_reason"], "redrive-conflict")
+            self.assertFalse(pending.exists())
+            self.assertTrue(conflict_still_there)
+
+    def test_cli_redrive_output_is_safe_for_legacy_encoding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            vault = root / "vault"
+            vault.mkdir()
+            job_id = "a" * 32
+            _succeeded_job(
+                state,
+                job_id,
+                payload={"reason": "legacy"},
+                redriven_ts=1757500000,
+            )
+            argv = [
+                "worker_supervisor.py",
+                "--vault",
+                str(vault),
+                "--state-dir",
+                str(state),
+                "--redrive",
+                job_id,
+            ]
+            output = _Cp1252Stdout()
+            with (
+                mock.patch.object(workers.sys, "argv", argv),
+                mock.patch.object(workers, "ensure_supervisor") as wake,
+                mock.patch.object(workers.sys, "stdout", output),
+            ):
+                result = workers.main()
+
+        self.assertEqual(result, 0)
+        wake.assert_not_called()
+        self.assertIn(r"redrive zaten tamamland\u0131", output.getvalue())
+
     def test_cli_targeted_missing_job_returns_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -612,11 +711,13 @@ class RedriveDeadLetterTests(unittest.TestCase):
 
             redriven, skipped = workers.redrive_dead_letter(state, now=1757500001)
             saved = workers._load_job(pending)
+            conflict = workers._load_job(dead_letter)
             still_there = dead_letter.is_file()
 
         self.assertEqual(redriven, [])
-        self.assertEqual(skipped, [(job_id, "hedef kayıt mevcut")])
+        self.assertEqual(skipped, [(job_id, "redrive çakışması")])
         self.assertEqual(saved["payload"], {"reason": "existing"})
+        self.assertEqual(conflict["terminal_reason"], "redrive-identity-conflict")
         self.assertTrue(still_there)
 
     def test_invalid_record_is_reported_and_left_in_place(self) -> None:

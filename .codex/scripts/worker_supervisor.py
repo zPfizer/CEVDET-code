@@ -1272,6 +1272,11 @@ def _same_redrive_identity(left: dict[str, Any], right: dict[str, Any]) -> bool:
     )
 
 
+def _console_safe(text: str) -> str:
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    return text.encode(encoding, errors="backslashreplace").decode(encoding)
+
+
 def _has_pending_redrive(state_dir: Path, *, job_id: str | None = None) -> bool:
     with locked(state_dir / "worker-queue"):
         for path in sorted((_job_root(state_dir) / "pending").glob("*.json")):
@@ -1596,15 +1601,50 @@ def redrive_dead_letter(
     redriven: list[str] = []
     skipped: list[tuple[str, str]] = []
     with locked(state_dir / "worker-queue"):
+        seen_records: dict[str, dict[str, Any]] = {}
         seen_redriven: dict[str, dict[str, Any]] = {}
-        for state in ("pending", "claimed", "running", "succeeded"):
+        for state in (
+            "pending",
+            "claimed",
+            "running",
+            "succeeded",
+            "quarantined",
+        ):
             for path in sorted((_job_root(state_dir) / state).glob("*.json")):
                 try:
-                    job = _load_job(path)
+                    if state == "quarantined":
+                        tombstone = _load_job(path)
+                        job = {
+                            "job_id": tombstone["job_id"],
+                            "kind": None,
+                            "payload": None,
+                        }
+                        try:
+                            payload_path = path.with_name(
+                                str(tombstone["payload_file"])
+                            )
+                            original = json.loads(
+                                payload_path.read_text(encoding="utf-8")
+                            )
+                        except (
+                            OSError,
+                            UnicodeError,
+                            json.JSONDecodeError,
+                            TypeError,
+                            ValueError,
+                        ):
+                            original = None
+                        if isinstance(original, dict):
+                            job["kind"] = original.get("kind")
+                            job["payload"] = original.get("payload")
+                    else:
+                        job = _load_job(path)
                 except ValueError:
                     continue
+                seen_records.setdefault(job["job_id"], job)
                 if (
-                    _has_redrive_marker(job)
+                    state != "quarantined"
+                    and _has_redrive_marker(job)
                     and (job_id is None or job["job_id"] == job_id)
                     and job["job_id"] not in seen_redriven
                 ):
@@ -1627,6 +1667,8 @@ def redrive_dead_letter(
                 skipped.append((job["job_id"], "redrive çakışması"))
                 continue
             active = seen_redriven.get(job["job_id"])
+            if active is None:
+                active = seen_records.get(job["job_id"])
             if active is not None:
                 # Persist the conflict so a later receipt prune cannot reopen it.
                 # The ID may be reused for a different logical job; retain both
@@ -2242,17 +2284,17 @@ def main() -> int:
         for identifier in redriven:
             current_state = _redrive_state(state_dir, identifier)
             if current_state == "pending":
-                print(f"pending'e döndü: {identifier}")
+                print(_console_safe(f"pending'e döndü: {identifier}"))
             elif current_state in {"claimed", "running"}:
-                print(f"redrive zaten sürüyor: {identifier}")
+                print(_console_safe(f"redrive zaten sürüyor: {identifier}"))
             elif current_state == "succeeded":
-                print(f"redrive zaten tamamlandı: {identifier}")
+                print(_console_safe(f"redrive zaten tamamlandı: {identifier}"))
             else:
-                print(f"redrive kabul edildi: {identifier}")
+                print(_console_safe(f"redrive kabul edildi: {identifier}"))
         for identifier, reason in skipped:
-            print(f"atlandı: {identifier} — {reason}")
+            print(_console_safe(f"atlandı: {identifier} — {reason}"))
         if not redriven and not skipped:
-            print("dead-letter boş ya da eşleşen iş yok")
+            print(_console_safe("dead-letter boş ya da eşleşen iş yok"))
         return 1 if skipped or (target is not None and not redriven) else 0
     if args.execute_job is not None:
         if not isinstance(args.claim_token, str) or re.fullmatch(
