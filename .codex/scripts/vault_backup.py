@@ -1,12 +1,13 @@
 """Vault git deposunun tam geçmişini taşınabilir bundle olarak yedekler.
 
 Yedek `git bundle --all` ile üretilir: bütün ref'ler ve commit geçmişi tek
-dosyada taşınır, `git clone <bundle>` ile eksiksiz geri yüklenir. Bundle yalnız
-commit edilmiş durumu kapsar; çalışma ağacındaki commit'lenmemiş değişiklikler
-özette ayrıca raporlanır ki kullanıcı yedeğin neyi kapsamadığını görsün. Kaynak
-ref'leri yayın öncesi yakalanan point-in-time snapshot ile bağlanır; karşılaştırma
-sonrası yazılan commit bir sonraki yedeğin kapsamındadır. Canlı Git yazıcıları
-için nanosaniye düzeyinde atomik snapshot garantisi verilmez.
+dosyada taşınır. Tam ref restore için `git clone --mirror <bundle> <restore.git>`
+kullanılır; çalışma checkout'ı bu mirror'dan ayrı bir `git clone` ile açılır.
+Bundle yalnız Git nesneleri ve ref'leri kapsar; seçilen `--vault` çalışma
+ağacındaki commit'lenmemiş veya yok sayılan dosyalar özette ayrıca raporlanır.
+Kaynak ref'leri yayın öncesi yakalanan point-in-time snapshot ile bağlanır;
+karşılaştırma sonrası yazılan commit bir sonraki yedeğin kapsamındadır. Canlı Git
+yazıcıları için nanosaniye düzeyinde atomik snapshot garantisi verilmez.
 """
 
 from __future__ import annotations
@@ -126,28 +127,30 @@ def _ref_snapshot(repo: Path) -> dict[str, str]:
     if not worktrees.is_absolute():
         worktrees = repo / worktrees
     if worktrees.is_dir():
+        git_dir_text = _git(repo, "rev-parse", "--git-dir").stdout.strip()
+        git_dir = Path(git_dir_text)
+        if not git_dir.is_absolute():
+            git_dir = repo / git_dir
+        selected_id = (
+            git_dir.name
+            if git_dir.resolve().parent == worktrees.resolve()
+            else None
+        )
         try:
             entries = list(worktrees.iterdir())
         except OSError as error:
             raise BackupError(f"linked worktree HEAD'leri okunamadı: {worktrees}") from error
         for entry in entries:
-            head_file = entry / "HEAD"
-            if not head_file.is_file():
+            if not (entry / "HEAD").is_file():
                 continue
-            try:
-                head = head_file.read_text(encoding="utf-8").strip()
-            except OSError as error:
-                raise BackupError(f"linked worktree HEAD'i okunamadı: {head_file}") from error
-            if head.startswith("ref: "):
-                ref = head[5:].strip()
-                if not ref.startswith("refs/"):
-                    raise BackupError(f"linked worktree HEAD ref'i geçersiz: {head_file}")
-                object_name = _git(repo, "rev-parse", "--verify", ref).stdout.strip()
-            elif re.fullmatch(r"[0-9a-fA-F]{40}", head):
-                object_name = head.lower()
-            else:
-                raise BackupError(f"linked worktree HEAD'i geçersiz: {head_file}")
-            snapshot[f"worktrees/{entry.name}/HEAD"] = object_name
+            if entry.name == selected_id:
+                snapshot["main-worktree/HEAD"] = _git(
+                    repo, "rev-parse", "--verify", "main-worktree/HEAD",
+                ).stdout.strip()
+                continue
+            snapshot[f"worktrees/{entry.name}/HEAD"] = _git(
+                repo, "rev-parse", "--verify", f"worktrees/{entry.name}/HEAD",
+            ).stdout.strip()
     return snapshot
 
 
@@ -157,8 +160,6 @@ def _bundle_ref_snapshot(repo: Path, bundle: Path) -> dict[str, str]:
     try:
         for line in lines:
             object_name, ref = line.split(maxsplit=1)
-            if ref == "main-worktree/HEAD":
-                ref = "HEAD"
             snapshot[ref] = object_name
     except ValueError as error:
         raise BackupError(f"bundle ref'leri okunamadı: {bundle}") from error
@@ -336,7 +337,7 @@ def _verify_bundle(vault: Path, bundle: Path) -> None:
     try:
         _validate_bundle_artifact(vault, bundle)
         for object_name in set(_bundle_ref_snapshot(vault, bundle).values()):
-            _git(vault, "cat-file", "-e", f"{object_name}^{{commit}}")
+            _git(vault, "cat-file", "-e", object_name)
     except BackupError as error:
         raise BackupError(f"yedek bundle doğrulanamadı: {bundle}") from error
 
@@ -468,6 +469,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     size_mb = bundle_size / (1024 * 1024)
     print(f"Yedek alındı: {bundle} ({size_mb:.1f} MB)")
+    print(
+        "Kapsam: bundle yalnız Git nesneleri ve ref'leri kapsar; "
+        "--vault çalışma ağacındaki commit'lenmemiş ve yok sayılan dosyaları kapsamaz."
+    )
     if removed:
         print(f"Budanan eski yedek: {len(removed)}")
     if prune_warning is not None:
@@ -476,7 +481,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"UYARI: çalışma ağacı özeti alınamadı — {status_error}")
     elif tracked or untracked or ignored:
         print(
-            "UYARI: commit'lenmemiş değişiklikler yedeğin dışında — "
+            "UYARI: --vault çalışma ağacındaki commit'lenmemiş değişiklikler yedeğin dışında — "
             f"izlenen {tracked}, izlenmeyen {untracked}, yok sayılan {ignored} dosya."
         )
     return 0

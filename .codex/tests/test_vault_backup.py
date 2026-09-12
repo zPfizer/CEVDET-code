@@ -61,6 +61,23 @@ class VaultBackupTests(unittest.TestCase):
             self.assertRegex(bundle.name, r"vault-\d{8}-\d{6}\.bundle")
             self.assertFalse(list((root / "yedek").glob("*.tmp")))
 
+    def test_mirror_clone_restores_custom_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            _init_repo(vault)
+            head = _git(vault, "rev-parse", "HEAD").stdout.strip()
+            _git(vault, "update-ref", "refs/kept/custom", head)
+
+            bundle = vault_backup.create_bundle(vault, root / "yedek")
+            restored = root / "restored.git"
+            _git(root, "clone", "-q", "--mirror", str(bundle), str(restored))
+
+            self.assertEqual(
+                _git(restored, "rev-parse", "refs/kept/custom").stdout.strip(),
+                head,
+            )
+
     def test_dest_inside_vault_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary) / "vault"
@@ -201,11 +218,19 @@ class VaultBackupTests(unittest.TestCase):
             dest = root / "yedek"
             _init_repo(vault)
             _git(vault, "worktree", "add", "-q", str(linked))
+            (linked / "linked.md").write_text("linked", encoding="utf-8")
+            _git(linked, "add", "linked.md")
+            _git(
+                linked,
+                "-c", "user.name=test",
+                "-c", "user.email=test@example.invalid",
+                "commit", "-q", "-m", "linked",
+            )
 
-            bundle = vault_backup.create_bundle(vault, dest)
+            bundle = vault_backup.create_bundle(linked, dest)
 
-            heads = _git(vault, "bundle", "list-heads", str(bundle)).stdout.splitlines()
-            self.assertTrue(any(" worktrees/" in line and line.endswith("/HEAD") for line in heads))
+            heads = _git(linked, "bundle", "list-heads", str(bundle)).stdout.splitlines()
+            self.assertTrue(any(" main-worktree/HEAD" in line for line in heads))
 
     def test_shallow_repository_is_rejected_before_bundle_publish(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -406,6 +431,23 @@ class VaultBackupTests(unittest.TestCase):
 
             self.assertTrue(valid.exists())
             self.assertTrue(copied.exists())
+
+    def test_prune_accepts_non_commit_ref_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            dest = root / "yedek"
+            _init_repo(vault)
+            blob = root / "blob"
+            blob.write_text("blob ref", encoding="utf-8")
+            blob_oid = _git(vault, "hash-object", "-w", str(blob)).stdout.strip()
+            _git(vault, "tag", "blobtag", blob_oid)
+
+            bundle = vault_backup.create_bundle(vault, dest)
+            removed = vault_backup.prune_bundles(dest, keep=1, vault=vault)
+
+            self.assertEqual(removed, [])
+            self.assertTrue(bundle.exists())
 
     def test_clock_rollback_keeps_current_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -878,6 +920,26 @@ class VaultBackupTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             self.assertIn("yok sayılan 1 dosya", output.getvalue())
+
+    def test_main_states_bundle_scope_for_selected_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            linked = root / "linked"
+            dest = root / "yedek"
+            _init_repo(vault)
+            _git(vault, "worktree", "add", "-q", str(linked))
+            (linked / "untracked.md").write_text("linked", encoding="utf-8")
+            output = StringIO()
+
+            with redirect_stdout(output):
+                exit_code = vault_backup.main(
+                    ["--vault", str(vault), "--dest", str(dest), "--keep", "1"],
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("Kapsam: bundle yalnız Git nesneleri ve ref'leri kapsar", output.getvalue())
+            self.assertIn("--vault çalışma ağacındaki", output.getvalue())
 
     def test_invalid_keep_does_not_publish_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
