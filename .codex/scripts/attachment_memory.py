@@ -21,6 +21,7 @@ from memory_ledger import (
     sanitize_text,
     suppression_guard,
 )
+from summary_contract import validate_summary
 from state_store import atomic_write_json, atomic_write_text
 
 
@@ -205,9 +206,18 @@ def _read_note(
         if headings and headings[0][:3] == ('##', 'Bağlam', 0):
             summary = candidate
             break
-    if summary is None or _attachment_digest(source_text) != source_digest:
+    if (
+        summary is None
+        or not validate_summary(summary)
+        or _attachment_digest(source_text) != source_digest
+    ):
         raise ValueError('attachment-note-invalid')
     return {'text': text, 'summary': summary, 'source': source_text}
+
+
+def _require_summary_contract(summary: str) -> None:
+    if not validate_summary(summary):
+        raise ValueError('attachment-summary-invalid')
 
 
 def _summary_from_model(summarize: Callable[[str], str], source: str) -> str | None:
@@ -475,6 +485,7 @@ def _capture_one_core(
             if mapped_note is not None:
                 summary = filter_suppressed_text(mapped_note['summary'], hashes)
                 if summary == mapped_note['summary']:
+                    _require_summary_contract(summary)
                     updated = dict(mapping)
                     updated['status'] = 'committed'
                     updated['envelope_sha256'] = envelope_digest
@@ -517,6 +528,8 @@ def _capture_one_core(
             legacy_summary = filter_suppressed_text(legacy['summary'], hashes)
             if legacy_summary != legacy['summary']:
                 summary_only_rebuild = True
+            if not summary_only_rebuild:
+                _require_summary_contract(legacy_summary)
             with _publication_scope(state_dir, session_id):
                 with suppression_guard(vault_root / '.codex/private-memory', hashes):
                     _write_mapping(mapping_path, mapping)
@@ -531,6 +544,7 @@ def _capture_one_core(
         if not summary.strip():
             retain_empty_result()
             return None
+        _require_summary_contract(summary)
         if summary_only_rebuild and mapping is not None and destination.is_file():
             with _publication_scope(state_dir, session_id):
                 with suppression_guard(vault_root / '.codex/private-memory', hashes):

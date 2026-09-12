@@ -345,6 +345,28 @@ class AttachmentCaptureGuards(unittest.TestCase):
                 _capture(root, _envelope(source), hashes=hashes), []
             )
 
+    def test_partially_suppressed_summary_is_rejected_on_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _seed(root)
+            private = root / ".codex/private-memory"
+            suppress_derived_memory(private, "## Bağlam")
+            hashes = load_suppressed_hashes(private)
+            summarize = mock.Mock(return_value=SUMMARY)
+            for _ in range(2):
+                with self.assertRaisesRegex(
+                    ValueError, "attachment-summary-invalid"
+                ):
+                    _capture(
+                        root, _envelope(source), summarize=summarize,
+                        hashes=hashes,
+                    )
+            self.assertEqual(summarize.call_count, 2)
+            self.assertEqual(
+                list((root / attachment_memory.SOURCE_DIR).glob("*.md")), []
+            )
+            self.assertEqual(list(root.rglob("attachment-memory-*.json")), [])
+
     def test_capture_core_path_guards_directly(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -438,6 +460,8 @@ class AttachmentCaptureGuards(unittest.TestCase):
                 read(text.replace(attachment_memory.SOURCE_BODY, "\n## Başka gövde\n"))
             with self.assertRaises(ValueError):
                 read(text.replace("Kalıcı kaynak dersi.", "Değişmiş kaynak dersi!"))
+            with self.assertRaises(ValueError):
+                read(text.replace("## Alınan Kararlar", "## Başka bölüm"))
 
     def test_prepared_note_drift_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
