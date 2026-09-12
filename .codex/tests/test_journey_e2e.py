@@ -261,7 +261,9 @@ class JourneyE2ETests(unittest.TestCase):
         )
         self.assertIn(marker, context)
 
-    def _assert_session_end_succeeded(self, state: Path, session_id: str) -> None:
+    def _assert_session_end_succeeded(
+        self, state: Path, session_id: str, expected_generation: int = 1,
+    ) -> None:
         session_end_key = hashlib.sha256(
             session_id.encode("utf-8")
         ).hexdigest()
@@ -277,7 +279,9 @@ class JourneyE2ETests(unittest.TestCase):
         )
         self.assertEqual(session_end_runtime["event"], "session-end")
         self.assertEqual(session_end_runtime["session_key"], session_end_key)
-        self.assertEqual(session_end_runtime["event_generation"], 1)
+        self.assertEqual(
+            session_end_runtime["event_generation"], expected_generation
+        )
 
     def test_model_stub_rejects_missing_or_misordered_transcript(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cevo-journey-stub-") as temporary:
@@ -414,6 +418,9 @@ class JourneyE2ETests(unittest.TestCase):
             # Aynı kapanışın tekrarı ikinci bir kayıt üretmemeli (idempotency).
             repeated = _run_hook(vault, "session-end", payload, environment)
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self._assert_session_end_succeeded(
+                state, session_id, expected_generation=2
+            )
             _drain_worker(vault, environment)
             self.assertTrue(
                 _wait_until(
