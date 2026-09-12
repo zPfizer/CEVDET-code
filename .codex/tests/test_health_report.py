@@ -375,6 +375,46 @@ class HealthReportTests(unittest.TestCase):
                 health_report.write_report(vault, target)
             self.assertFalse(target.exists())
 
+    def test_quarantined_record_with_linked_payload_aborts_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            outside = root / "outside-payload"
+            vault.mkdir()
+            outside.write_bytes(b"external payload")
+            state = _seed_state(vault)
+            quarantine = state / "worker-jobs" / "quarantined"
+            job_id = "6" * 32
+            payload = quarantine / f"job-{job_id}.payload"
+            try:
+                payload.symlink_to(outside)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+            (quarantine / f"job-{job_id}.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": worker_supervisor.JOB_SCHEMA_VERSION,
+                        "job_id": job_id,
+                        "status": "quarantined",
+                        "reason_code": "worker-job-json-invalid",
+                        "payload_sha256": hashlib.sha256(
+                            outside.read_bytes()
+                        ).hexdigest(),
+                        "payload_file": payload.name,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            target = vault / "report.md"
+            try:
+                with self.assertRaisesRegex(OSError, "worker-record-invalid"):
+                    health_report.write_report(vault, target)
+                self.assertFalse(target.exists())
+                self.assertEqual(outside.read_bytes(), b"external payload")
+            finally:
+                payload.unlink(missing_ok=True)
+
     def test_nonexistent_vault_is_rejected_before_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

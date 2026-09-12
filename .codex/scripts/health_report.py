@@ -235,8 +235,13 @@ def _validate_worker_records(
                 validated = _validate_job(path, record)
                 if stage == "quarantined":
                     payload_path = path.with_name(str(validated.get("payload_file", "")))
+                    payload_stat = payload_path.lstat()
+                    payload_resolved = payload_path.resolve(strict=False)
                     if (
-                        not payload_path.is_file()
+                        stat.S_ISLNK(payload_stat.st_mode)
+                        or not stat.S_ISREG(payload_stat.st_mode)
+                        or payload_path.is_junction()
+                        or not payload_resolved.is_relative_to(path.parent)
                         or hashlib.sha256(payload_path.read_bytes()).hexdigest()
                         != validated["payload_sha256"]
                     ):
