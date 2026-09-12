@@ -41,6 +41,7 @@ DERIVED_SUBDIRS = frozenset({"concepts", "connections"})
 MAX_SOURCE_FIELDS = 64
 MAX_SOURCE_CHARS = 256
 _SAFE_SOURCE_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
+_NOTE_LINK_UNSAFE = frozenset("[]|#^\\`\r\n")
 
 
 def _default_report_target(vault: Path) -> Path:
@@ -225,6 +226,58 @@ def _validate_source_observations(
         raise MemoryPreferenceError("stale-review-source-changed") from exc
 
 
+def _validate_vault(vault: Path) -> None:
+    try:
+        vault_stat = vault.lstat()
+    except (FileNotFoundError, OSError, RuntimeError) as exc:
+        raise MemoryPreferenceError("stale-review-vault-invalid") from exc
+    if not stat.S_ISDIR(vault_stat.st_mode) or vault.is_junction():
+        raise MemoryPreferenceError("stale-review-vault-invalid")
+    knowledge = vault / KNOWLEDGE_ROOT
+    try:
+        knowledge_stat = knowledge.lstat()
+        knowledge_resolved = knowledge.resolve(strict=False)
+        if (
+            stat.S_ISLNK(knowledge_stat.st_mode)
+            or not stat.S_ISDIR(knowledge_stat.st_mode)
+            or knowledge.is_junction()
+            or not knowledge_resolved.is_relative_to(vault)
+        ):
+            raise ValueError("knowledge-root-invalid")
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+        raise MemoryPreferenceError("stale-review-knowledge-root-invalid") from exc
+
+
+def _validate_note_observations(
+    vault: Path,
+    observations: dict[Path, tuple[int, int, int, int, int]],
+) -> None:
+    for path, expected in observations.items():
+        try:
+            path_stat = path.lstat()
+            resolved = path.resolve(strict=False)
+            if (
+                stat.S_ISLNK(path_stat.st_mode)
+                or not stat.S_ISREG(path_stat.st_mode)
+                or not resolved.is_relative_to(vault / KNOWLEDGE_ROOT)
+                or not resolved.is_relative_to(
+                    vault / KNOWLEDGE_ROOT / path.relative_to(vault).parts[1]
+                )
+            ):
+                raise ValueError("knowledge-note-invalid")
+            current = (
+                path_stat.st_dev,
+                path_stat.st_ino,
+                path_stat.st_size,
+                path_stat.st_mtime_ns,
+                path_stat.st_ctime_ns,
+            )
+            if current != expected:
+                raise ValueError("knowledge-note-changed")
+        except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+            raise MemoryPreferenceError("stale-review-note-changed") from exc
+
+
 def _eligible_note_paths(vault: Path) -> tuple[Path, ...]:
     root = vault.resolve()
     paths = []
@@ -232,7 +285,7 @@ def _eligible_note_paths(vault: Path) -> tuple[Path, ...]:
     try:
         knowledge_stat = knowledge.lstat()
     except FileNotFoundError:
-        return ()
+        raise MemoryPreferenceError("stale-review-knowledge-root-invalid")
     except (OSError, RuntimeError) as exc:
         raise MemoryPreferenceError("stale-review-knowledge-root-unreadable") from exc
     try:
@@ -333,9 +386,30 @@ def _checked_markdown_paths(root: Path) -> Iterator[Path]:
         ) from exc
 
 
-def _snapshot_notes(vault: Path, memory: MemoryRead) -> tuple[NoteIndex, ...]:
+def _snapshot_notes(
+    vault: Path,
+    memory: MemoryRead,
+    observations: dict[Path, tuple[int, int, int, int, int]] | None = None,
+) -> tuple[NoteIndex, ...]:
     notes = []
     for path in _eligible_note_paths(vault):
+        try:
+            path_stat = path.lstat()
+            if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+                raise ValueError("knowledge-note-invalid")
+            if observations is not None:
+                observations.setdefault(
+                    path,
+                    (
+                        path_stat.st_dev,
+                        path_stat.st_ino,
+                        path_stat.st_size,
+                        path_stat.st_mtime_ns,
+                        path_stat.st_ctime_ns,
+                    ),
+                )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise MemoryPreferenceError("stale-review-source-identity") from exc
         relative, text = memory.read_source(path)
         expected_relative = PurePosixPath(path.relative_to(vault).as_posix())
         if PurePosixPath(relative.as_posix()) != expected_relative:
@@ -391,6 +465,7 @@ def review(
     now: datetime.date | None = None,
 ) -> list[StaleFinding]:
     vault = Path(vault).resolve()
+    _validate_vault(vault)
     today = now or datetime.date.today()
     with memory_read(vault) as memory:
         findings = _review_notes(
@@ -424,6 +499,25 @@ def render(findings: Sequence[StaleFinding], *, days: int, today: datetime.date)
         "bastırmasını söyle. Bu rapor hiçbir şeyi kendiliğinden silmez.",
         "",
     ]
+
+    def finding_link(note: str) -> str:
+        if any(character in _NOTE_LINK_UNSAFE for character in note):
+            longest_backticks = max(
+                (len(run) for run in re.findall(r"`+", note)),
+                default=0,
+            )
+            delimiter = "`" * (longest_backticks + 1)
+            escaped = (
+                note.replace("\\", "\\\\")
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+                .replace("|", "\\|")
+                .replace("[", "\\[")
+                .replace("]", "\\]")
+            )
+            return f"{delimiter}{escaped}{delimiter}"
+        return f"[[{note}]]"
+
     if not findings:
         lines += ["Bayat aday yok — türetilmiş bilgi güncel görünüyor.", ""]
         return "\n".join(lines)
@@ -436,7 +530,7 @@ def render(findings: Sequence[StaleFinding], *, days: int, today: datetime.date)
     for finding in findings:
         age = "?" if finding.age_days < 0 else str(finding.age_days)
         reasons = "; ".join(finding.reasons)
-        lines.append(f"| [[{finding.note}]] | {age} | {reasons} |")
+        lines.append(f"| {finding_link(finding.note)} | {age} | {reasons} |")
     lines.append("")
     return "\n".join(lines)
 
@@ -450,6 +544,7 @@ def write_report(
     overwrite: bool = False,
 ) -> tuple[Path, int]:
     vault = Path(vault).resolve()
+    _validate_vault(vault)
     today = now or datetime.date.today()
     state_dir = state_dir_of(vault)
     private_root = vault / ".codex/private-memory"
@@ -459,15 +554,17 @@ def write_report(
         with suppression_guard(private_root, hashes):
             with memory_read(vault) as memory:
                 observations: dict[Path, tuple[int, int, int, int, int]] = {}
+                note_observations: dict[Path, tuple[int, int, int, int, int]] = {}
                 findings = _review_notes(
                     vault,
-                    _snapshot_notes(vault, memory),
+                    _snapshot_notes(vault, memory, note_observations),
                     days=days,
                     today=today,
                     memory=memory,
                     observations=observations,
                 )
                 memory.check_knowledge_snapshot()
+                _validate_note_observations(vault, note_observations)
                 _validate_source_observations(vault, observations)
                 atomic_write_text(
                     target,

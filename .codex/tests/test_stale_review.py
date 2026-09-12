@@ -164,6 +164,34 @@ class StaleReviewTests(unittest.TestCase):
                     )
             self.assertFalse(target.exists())
 
+    def test_derived_note_drift_before_publish_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            note = _note(vault, "degisen-not", updated="2026-01-02", sources=[])
+            target = vault / "report.md"
+            real_review = stale_review._review_notes
+
+            def review_then_mutate(*args: object, **kwargs: object) -> list[stale_review.StaleFinding]:
+                findings = real_review(*args, **kwargs)
+                note.write_text(
+                    note.read_text(encoding="utf-8") + "\nsonradan düzenlendi\n",
+                    encoding="utf-8",
+                )
+                return findings
+
+            with mock.patch.object(
+                stale_review,
+                "_review_notes",
+                new=review_then_mutate,
+            ):
+                with self.assertRaisesRegex(
+                    ledger.MemoryPreferenceError, "stale-review-note-changed"
+                ):
+                    stale_review.write_report(
+                        vault, output=target, now=datetime.date(2026, 9, 11)
+                    )
+            self.assertFalse(target.exists())
+
     def test_missing_source_and_broken_date_are_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -186,6 +214,18 @@ class StaleReviewTests(unittest.TestCase):
             ("tarih alanı yok ya da bozuk",),
         )
 
+    def test_missing_vault_fails_closed_before_creating_state_or_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "missing-vault"
+            target = root / "report.md"
+            with self.assertRaisesRegex(
+                ledger.MemoryPreferenceError, "stale-review-vault-invalid"
+            ):
+                stale_review.write_report(vault, output=target)
+            self.assertFalse(target.exists())
+            self.assertFalse(vault.exists())
+
     def test_report_written_to_command_center_with_findings_table(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
@@ -199,6 +239,18 @@ class StaleReviewTests(unittest.TestCase):
         self.assertEqual(target.name, "Cevo Bayat İnceleme.md")
         self.assertIn("| [[knowledge/concepts/eski-not.md]] | 252 |", text)
         self.assertIn("type: dashboard", text)
+
+    def test_note_path_delimiters_are_not_rendered_as_wikilink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            _note(vault, "x]] ![[Private.md", updated="2026-01-02", sources=[])
+            target, _count = stale_review.write_report(
+                vault, output=vault / "report.md", now=datetime.date(2026, 9, 11)
+            )
+            text = target.read_text(encoding="utf-8")
+
+        self.assertNotIn("[[Private.md]]", text)
+        self.assertIn(r"`knowledge/concepts/x\]\] !\[\[Private.md.md`", text)
 
     def test_clean_vault_renders_empty_report(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -396,6 +448,7 @@ class StaleReviewTests(unittest.TestCase):
     def test_malformed_suppression_controls_fail_closed_before_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
+            (vault / "knowledge" / "concepts").mkdir(parents=True)
             controls = vault / ".codex/private-memory/controls"
             controls.mkdir(parents=True)
             (controls / "suppressions.jsonl").write_text("{\n", encoding="utf-8")
