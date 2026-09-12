@@ -96,7 +96,7 @@ BATCH_ASSIGNMENT_PREFIX = re.compile(
     r'''(?im)''' + _BATCH_COMMAND_PREFIX + r'''["']?\Z'''
 )
 BATCH_CMD_WRAPPER_CREDENTIAL = re.compile(
-    r'''(?im)(?:^[ \t]*|(?<=[&|<>()])[ \t]*)@?cmd[ \t]+/c[ \t]+"set[ \t]+'''
+    r'''(?im)(?:^[ \t]*|(?<=[&|<>()])[ \t]*)@?cmd[ \t]+/c[ \t]+"?set[ \t]+'''
     r'''(?P<key>''' + BATCH_CREDENTIAL_NAME + r''')[ \t]*=[ \t]*'''
 )
 POWERSHELL_CREDENTIAL = re.compile(
@@ -827,7 +827,7 @@ def _powershell_credential_value_end(text: str, start: int) -> int | None:
         cursor = end
         while cursor < len(text) and text[cursor] in {' ', '\t'}:
             cursor += 1
-        if cursor == len(text) or text[cursor] in {'\r', '\n', ';'}:
+        if cursor == len(text) or text[cursor] in {'\r', '\n', ';', '#'}:
             return end
         return None
 

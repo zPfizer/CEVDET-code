@@ -597,6 +597,18 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         self.assertNotIn('FIRST_SECRET', sanitized)
         self.assertIn('keep-decision', sanitized)
 
+        sanitized, redactions = ledger.sanitize_text(
+            '$env:DATABASE_PASSWORD="FIRST_SECRET" # deployment note',
+            max_chars=None,
+        )
+        self.assertEqual(
+            sanitized,
+            '$env:DATABASE_PASSWORD=<REDACTED> # deployment note',
+        )
+        self.assertEqual(redactions, ('credential',))
+        self.assertNotIn('FIRST_SECRET', sanitized)
+        self.assertIn('# deployment note', sanitized)
+
     def test_posix_ansi_c_quoted_credential_value_is_redacted(self) -> None:
         text = "DATABASE_PASSWORD=$'FIRST_SECRET SECOND_SECRET'"
 
@@ -676,6 +688,14 @@ class Bug007JsonCredentialTests(unittest.TestCase):
         ):
             ledger.sanitize_text(
                 'cmd /c "set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET"',
+                max_chars=None,
+            )
+        with self.assertRaisesRegex(
+            ledger.MemoryPreferenceError,
+            '^memory-credential-container-unverifiable$',
+        ):
+            ledger.sanitize_text(
+                'cmd /c set DATABASE_PASSWORD=FIRST_SECRET SECOND_SECRET',
                 max_chars=None,
             )
 
