@@ -36,7 +36,7 @@ LIST_ITEM = re.compile(
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 ATX_HEADING_LINE = re.compile(r"^[ \t]{0,3}#{1,6}(?:[ \t]+|$)")
 REFERENCE_DEFINITION = re.compile(
-    r'(?m)^[ \t]{0,3}\[[^\]\r\n]+\]:[^\r\n]*'
+    r'(?m)^[ \t]{0,3}\[(?P<label>(?:\\[^\r\n]|[^\]\\\r\n])+)\]:[^\r\n]*'
 )
 
 
@@ -119,8 +119,7 @@ def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
     def title_start_after_definition(
         definition: re.Match[str],
     ) -> tuple[int, str] | None:
-        suffix_offset = definition.group(0).index(']:') + 2
-        cursor = definition.start() + suffix_offset
+        cursor = definition.end('label') + 2
         cursor = skip_hspace(cursor)
         if text.startswith('\r\n', cursor) or text.startswith('\n', cursor):
             after_definition = newline_after(cursor)
@@ -398,6 +397,8 @@ def _blank_inline_html_elements(
         def handle_endtag(self, tag: str) -> None:
             folded = tag.casefold()
             if folded not in tags:
+                return
+            if folded == 'code' and is_escaped(text, self._offset()):
                 return
             for index in range(len(self.open_tags) - 1, -1, -1):
                 if self.open_tags[index][0] != folded:

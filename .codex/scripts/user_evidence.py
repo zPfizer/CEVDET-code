@@ -10,7 +10,6 @@ import re
 from typing import TypedDict
 
 from markdown_boundary import (
-    BLOCKQUOTE_PREFIX,
     FENCE_LINE,
     HTML_LITERAL_OPEN,
     HTML_TAG,
@@ -166,7 +165,7 @@ def _visible_source_body(text: str) -> str:
             or HTML_LITERAL_OPEN.match(stripped) is not None
         )
 
-    lazy_blockquote_starts: set[int] = set()
+    blockquote_starts: set[int] = set()
     quote_paragraph = False
     list_contexts: list[int] = []
     offset = 0
@@ -198,11 +197,12 @@ def _visible_source_body(text: str) -> str:
                     value for kind, value in containers if kind == 'list'
                 ]
         if in_blockquote:
+            blockquote_starts.add(offset)
             quote_paragraph = is_lazy_paragraph(remainder)
         elif not line.strip():
             quote_paragraph = False
         elif quote_paragraph and is_lazy_paragraph(line):
-            lazy_blockquote_starts.add(offset)
+            blockquote_starts.add(offset)
         else:
             quote_paragraph = False
         if line.strip() and not explicit_list and list_contexts and remainder == line:
@@ -211,19 +211,8 @@ def _visible_source_body(text: str) -> str:
     link_spans = markdown_link_spans(text)
     for match in SOURCE.finditer(text):
         line_start = text.rfind('\n', 0, match.start()) + 1
-        line_prefix = text[line_start:match.start()]
-        in_blockquote = False
-        while True:
-            if BLOCKQUOTE_PREFIX.match(line_prefix) is not None:
-                in_blockquote = True
-                break
-            list_prefix = LIST_PREFIX.match(line_prefix)
-            if list_prefix is None:
-                break
-            line_prefix = line_prefix[list_prefix.end():]
         if (
-            line_start in lazy_blockquote_starts
-            or in_blockquote
+            line_start in blockquote_starts
             or any(start < match.start() < end for start, end in link_spans)
             or any(
                 tag.start() < match.start() < tag.end()

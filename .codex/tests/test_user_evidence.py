@@ -336,6 +336,43 @@ class UserEvidenceTests(unittest.TestCase):
         self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
         self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
 
+    def test_explicit_quote_in_deep_list_continuation_cannot_create_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for body in (
+            '1.    item\n      > ' + cited,
+            '1.    item\n      > Alıntı\n      ' + cited.removeprefix('- '),
+        ):
+            with self.subTest(body=body):
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(output['Alınan Kararlar'], '')
+                self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+        output = evidence.bind_evidence(
+            sections('1.    item\n      ' + cited), [('user', quote)], STAMP
+        )
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+
+    def test_escaped_html_code_closer_cannot_expose_source_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for slashes, trusted in (('\\', False), ('\\\\', True)):
+            with self.subTest(slashes=slashes):
+                body = '<code>example ' + slashes + '</code>\n' + cited
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
+    def test_escaped_reference_labels_keep_title_sources_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for label in (r'foo\]', r'foo\]:bar'):
+            for separator in (' ', '\n'):
+                with self.subTest(label=label, separator=separator):
+                    body = '[' + label + ']: /url' + separator + "'" + cited + "'"
+                    output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                    self.assertEqual(output['Alınan Kararlar'], '')
+                    self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
     def test_source_marker_inside_reference_definition_title_is_not_provenance(self):
         quote = 'Bundan sonra kısa yanıt ver.'
         marker = decision('Kısa yanıt tercihi.', quote).split(' <!--', 1)[1]
