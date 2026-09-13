@@ -452,6 +452,40 @@ class AttachmentMemoryTests(unittest.TestCase):
                 attachment_memory._source_changed_marker_path(state, source.parent.name).is_file()
             )
 
+    def test_source_change_during_note_staging_leaves_no_note(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            real_write = attachment_memory.atomic_write_text
+
+            def write_then_replace(path: Path, value: str, **kwargs) -> None:
+                real_write(path, value, **kwargs)
+                if Path(path).suffix == '.staging':
+                    replacement = source.with_name('replacement.txt')
+                    replacement.write_text('Changed source.', encoding='utf-8')
+                    replacement.replace(source)
+
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}), \
+                 mock.patch.object(
+                     attachment_memory,
+                     'atomic_write_text',
+                     side_effect=write_then_replace,
+                 ):
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                    )
+
+            self.assertEqual(list((root / attachment_memory.SOURCE_DIR).glob('*.md')), [])
+            self.assertEqual(list(root.rglob('*.staging')), [])
+
     def test_source_change_marker_survives_session_only_gate(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

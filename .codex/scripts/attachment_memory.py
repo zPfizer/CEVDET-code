@@ -710,6 +710,7 @@ def _capture_one_core(
             verify_source_snapshot()
             with suppression_guard(vault_root / '.codex/private-memory', hashes):
                 verify_source_snapshot()
+                created_destination = False
                 if destination.exists():
                     if not destination.is_file():
                         raise ValueError('attachment-note-invalid')
@@ -721,14 +722,34 @@ def _capture_one_core(
                     # ayrışma imkânsızdır — derinlemesine savunma satırı.
                     if existing['source'] != visible or existing['summary'] != summary:  # pragma: no cover
                         raise ValueError('attachment-note-integrity')
+                    verify_source_snapshot()
                 else:
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     _write_mapping(mapping_path, candidate)
-                    atomic_write_text(destination, rendered, newline='\n')
+                    staging = destination.with_suffix('.staging')
+                    if staging.is_symlink() or staging.exists():
+                        raise ValueError('attachment-note-invalid')
+                    try:
+                        atomic_write_text(staging, rendered, newline='\n')
+                        verify_source_snapshot()
+                        os.replace(staging, destination)
+                        created_destination = True
+                        verify_source_snapshot()
+                    except Exception:
+                        if created_destination:
+                            destination.unlink(missing_ok=True)
+                        raise
+                    finally:
+                        staging.unlink(missing_ok=True)
                 candidate['status'] = 'committed'
-                _write_mapping(mapping_path, candidate)
-                mapping = candidate
-                clear_source_changed_marker()
+                try:
+                    _write_mapping(mapping_path, candidate)
+                    mapping = candidate
+                    clear_source_changed_marker()
+                except Exception:
+                    if created_destination:
+                        destination.unlink(missing_ok=True)
+                    raise
         return destination.relative_to(vault_root).with_suffix('').as_posix(), summary
 
 
