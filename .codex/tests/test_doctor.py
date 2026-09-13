@@ -978,6 +978,8 @@ class DoctorTests(unittest.TestCase):
                 ("delivery_schema_version", "1"),
                 ("session_id", 7),
                 ("transcript_path", None),
+                ("transcript_path", "private prompt"),
+                ("transcript_path", "sk-proj-abc123secret"),
                 ("reason", "unknown"),
                 ("event_iso", 7),
                 ("event_iso", "private prompt"),

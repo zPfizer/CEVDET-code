@@ -741,6 +741,21 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
             and timestamp.isoformat() == value
         )
 
+    def is_transcript_path(value: object) -> bool:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 32_767
+            or any(char in value for char in "\x00\r\n")
+            or contains_secret(value)
+        ):
+            return False
+        try:
+            name = Path(value).expanduser().name
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return name.casefold().endswith(".jsonl") and name.casefold() != ".jsonl"
+
     def is_continuation_field(field: str) -> bool:
         value = payload[field]
         if field == "continuation_reason":
@@ -767,8 +782,7 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
         and "transcript_path" in payload
         and (
             (
-                isinstance(payload.get("transcript_path"), str)
-                and bool(payload["transcript_path"])
+                is_transcript_path(payload.get("transcript_path"))
             )
             or (
                 payload["reason"] == "sessionend"
