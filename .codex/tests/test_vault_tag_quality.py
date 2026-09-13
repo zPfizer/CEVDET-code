@@ -178,6 +178,17 @@ class VaultTagQualityTests(unittest.TestCase):
             ['continuation-tag'],
         )
 
+        indented_rule = tag_taxonomy.NoteIndex(
+            Path('indented-rule.md'),
+            PurePosixPath('indented-rule.md'),
+            ' ---\n'
+            'Visible #indented-rule\n',
+        )
+        self.assertEqual(
+            [violation.tag for violation in tag_taxonomy._inline_tag_violations(indented_rule)],
+            ['indented-rule'],
+        )
+
     def test_migration_patch_only_changes_tags_and_dry_run_keeps_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

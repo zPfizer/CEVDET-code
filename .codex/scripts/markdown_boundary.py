@@ -8,8 +8,14 @@ import re
 
 FENCE_LINE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^\r\n]*)$")
 BLOCKQUOTE_PREFIX = re.compile(r"^[ \t]{0,3}>[ \t]?")
-HTML_PRE_OPEN = re.compile(r"^[ \t]{0,3}<pre(?:[ \t/>]|$)", re.IGNORECASE)
-HTML_PRE_CLOSE = re.compile(r"</pre[ \t]*>", re.IGNORECASE)
+HTML_LITERAL_OPEN = re.compile(
+    r"^[ \t]{0,3}<(?P<tag>pre|script|style|textarea)(?:[ \t/>]|$)",
+    re.IGNORECASE,
+)
+HTML_LITERAL_CLOSE = re.compile(
+    r"</(?P<tag>pre|script|style|textarea)[ \t]*>",
+    re.IGNORECASE,
+)
 INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
 LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])(?P<gap>[ \t]+|$)"
@@ -70,80 +76,100 @@ def _blank_inline_code(chars: list[str], text: str) -> None:
 def _fence_parts(
     content: str,
     *,
-    container: tuple[int, int | None] | None = None,
-) -> tuple[tuple[int, int | None], str, str] | None:
-    remainder = content
-    quote_depth = 0
-    while (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
-        quote_depth += 1
-        remainder = remainder[prefix.end():]
-
-    if container is not None:
-        expected_quote_depth, list_indent = container
-        if quote_depth != expected_quote_depth:
+    container: tuple[tuple[str, int], ...] | None = None,
+) -> tuple[tuple[tuple[str, int], ...], str, str] | None:
+    if container is None:
+        remainder, container = _container_prefix(content)
+    else:
+        remainder = _container_body(content, container)
+        if remainder is None:
             return None
-        if list_indent is not None:
-            if len(remainder) < list_indent:
-                return None
-            prefix = remainder[:list_indent]
-            if not prefix or not all(char in " \t" for char in prefix):
-                return None
-            remainder = remainder[list_indent:]
-        match = FENCE_LINE.fullmatch(remainder)
-        if match is None:
-            return None
-        return container, match.group(1), match.group(2)
-
-    match = FENCE_LINE.fullmatch(remainder)
-    if match is not None:
-        return (quote_depth, None), match.group(1), match.group(2)
-
-    list_item = LIST_ITEM.match(remainder)
-    if list_item is None:
-        return None
-    gap = list_item.group("gap")
-    if gap and len(gap) > 4:
-        return None
-    remainder = remainder[list_item.end():]
     match = FENCE_LINE.fullmatch(remainder)
     if match is None:
         return None
-    content_indent = (
-        len(list_item.group("indent"))
-        + len(list_item.group("marker"))
-        + (len(gap) if gap else 1)
-    )
-    return (quote_depth, content_indent), match.group(1), match.group(2)
+    return container, match.group(1), match.group(2)
 
 
-def _is_html_pre_open(content: str) -> bool:
+def _container_prefix(
+    content: str,
+) -> tuple[str, tuple[tuple[str, int], ...]]:
     remainder = content
-    while (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
-        remainder = remainder[prefix.end():]
-    list_item = LIST_ITEM.match(remainder)
-    if list_item is not None:
+    containers: list[tuple[str, int]] = []
+    while True:
+        quote_depth = 0
+        while (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
+            quote_depth += 1
+            remainder = remainder[prefix.end():]
+        if quote_depth:
+            containers.append(("quote", quote_depth))
+            continue
+        list_item = LIST_ITEM.match(remainder)
+        if list_item is None:
+            break
+        gap = list_item.group("gap")
+        if gap and len(gap) > 4:
+            return content, ()
+        content_indent = (
+            len(list_item.group("indent"))
+            + len(list_item.group("marker"))
+            + (len(gap) if gap else 1)
+        )
+        containers.append(("list", content_indent))
         remainder = remainder[list_item.end():]
-    return HTML_PRE_OPEN.match(remainder) is not None
+    return remainder, tuple(containers)
+
+
+def _container_body(
+    content: str,
+    container: tuple[tuple[str, int], ...],
+) -> str | None:
+    remainder = content
+    for kind, value in container:
+        if kind == "quote":
+            quote_depth = 0
+            while (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
+                quote_depth += 1
+                remainder = remainder[prefix.end():]
+            if quote_depth != value:
+                return None
+            continue
+        if len(remainder) < value:
+            return None
+        prefix = remainder[:value]
+        if not prefix or not all(char in " \t" for char in prefix):
+            return None
+        remainder = remainder[value:]
+    return remainder
+
+
+def _is_html_literal_open(content: str) -> bool:
+    remainder, _container = _container_prefix(content)
+    return HTML_LITERAL_OPEN.match(remainder) is not None
 
 
 def _container_present(
     content: str,
-    container: tuple[int, int | None],
+    container: tuple[tuple[str, int], ...],
 ) -> bool:
     remainder = content
-    quote_depth = 0
-    while (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
-        quote_depth += 1
-        remainder = remainder[prefix.end():]
-    expected_quote_depth, list_indent = container
-    if quote_depth < expected_quote_depth:
-        return False
-    if list_indent is None or quote_depth > expected_quote_depth:
-        return True
-    if not content.strip():
-        return True
-    prefix = remainder[:list_indent]
-    return len(prefix) == list_indent and all(char in " \t" for char in prefix)
+    for kind, value in container:
+        if kind == "quote":
+            quote_depth = 0
+            while (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
+                quote_depth += 1
+                remainder = remainder[prefix.end():]
+            if quote_depth < value:
+                return False
+            if quote_depth > value:
+                return True
+            continue
+        if not content.strip():
+            return True
+        prefix = remainder[:value]
+        if len(prefix) != value or not all(char in " \t" for char in prefix):
+            return False
+        remainder = remainder[value:]
+    return True
 
 
 def _is_paragraph_line(content: str) -> bool:
@@ -181,12 +207,12 @@ def markdown_body(
         lines.append((offset, len(text), len(text), text[offset:]))
 
     frontmatter_end = -1
-    if lines and lines[0][3].strip() == "---":
+    if lines and lines[0][3] == "---":
         closing = next(
             (
                 index
                 for index, frontmatter_line in enumerate(lines[1:], start=1)
-                if frontmatter_line[3].rstrip(" \t") == "---"
+                if frontmatter_line[3] == "---"
             ),
             None,
         )
@@ -201,17 +227,18 @@ def markdown_body(
 
     fence_char: str | None = None
     fence_length = 0
-    fence_container: tuple[int, int | None] | None = None
-    html_pre = False
+    fence_container: tuple[tuple[str, int], ...] | None = None
+    html_literal: str | None = None
     list_contexts: list[tuple[int, int]] = []
     paragraph_active = False
     for index, (start, end, _line_end, content) in enumerate(lines):
         if index <= frontmatter_end and mask_frontmatter:
             continue
-        if html_pre:
+        if html_literal is not None:
             _blank(chars, start, end)
-            if HTML_PRE_CLOSE.search(content) is not None:
-                html_pre = False
+            closing = HTML_LITERAL_CLOSE.search(content)
+            if closing is not None and closing.group("tag").casefold() == html_literal:
+                html_literal = None
             paragraph_active = False
             continue
         fence = _fence_parts(content, container=fence_container)
@@ -249,12 +276,16 @@ def markdown_body(
             _blank(chars, start, end)
             paragraph_active = False
             continue
-        if _is_html_pre_open(content):
+        if _is_html_literal_open(content):
             _blank(chars, start, end)
-            if HTML_PRE_CLOSE.search(content) is None and not re.search(
-                r"<pre\b[^>]*?/>", content, re.IGNORECASE
+            remainder, _container = _container_prefix(content)
+            opening = HTML_LITERAL_OPEN.match(remainder)
+            closing = HTML_LITERAL_CLOSE.search(content)
+            if opening is not None and (
+                closing is None
+                or closing.group("tag").casefold() != opening.group("tag").casefold()
             ):
-                html_pre = True
+                html_literal = opening.group("tag").casefold()
             paragraph_active = False
             continue
         indentation = len(content) - len(content.lstrip(" \t"))
