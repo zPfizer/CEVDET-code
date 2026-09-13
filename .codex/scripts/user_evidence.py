@@ -28,7 +28,6 @@ EVIDENCE = re.compile(r'<!-- user-evidence:\s*(\{[^\n]*\})\s*-->')
 LIST_PREFIX = re.compile(r'^[ \t]*(?:[-+*]|\d+[.)])(?:[ \t]+|$)')
 REFERENCE_DEFINITION = re.compile(
     r'(?m)^[ \t]{0,3}\[[^\]\r\n]+\]:[^\r\n]*'
-    r'(?:\r?\n[ \t]{1,3}(?:["\'(])[^\r\n]*)?'
 )
 USER_ANCHOR = r'(?:#user-[a-f0-9]{64})?'
 USER_LINK = re.compile(r'\[\[daily/(\d{4}-\d{2}-\d{2})#user-([a-f0-9]{64})(?:\|[^\]]+)?\]\]')
@@ -153,6 +152,67 @@ def _authored_quote(message: str, quote: str) -> bool:
     return False
 
 
+def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
+    spans: list[tuple[int, int]] = []
+    for definition in REFERENCE_DEFINITION.finditer(text):
+        end = definition.end()
+        if text.startswith('\r\n', end):
+            next_start = end + 2
+        elif text.startswith('\n', end):
+            next_start = end + 1
+        else:
+            spans.append((definition.start(), definition.end()))
+            continue
+        next_end = text.find('\n', next_start)
+        if next_end < 0:
+            next_end = len(text)
+        continuation = text[next_start:next_end].rstrip('\r')
+        title = re.match(r'[ \t]{0,3}(["\'(])', continuation)
+        if title is None:
+            spans.append((definition.start(), definition.end()))
+            continue
+        delimiter = {"(": ")"}.get(title.group(1), title.group(1))
+        cursor = next_start + title.end()
+        line_start = next_start
+        depth = 1 if delimiter == ")" else 0
+        span_end = len(text)
+        while True:
+            current_end = text.find('\n', line_start)
+            if current_end < 0:
+                current_end = len(text)
+            escaped = False
+            for index in range(cursor, current_end):
+                if escaped:
+                    escaped = False
+                elif text[index] == '\\':
+                    escaped = True
+                elif delimiter == ")" and text[index] == "(":
+                    depth += 1
+                elif delimiter == ")" and text[index] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        span_end = index + 1
+                        break
+                elif delimiter != ")" and text[index] == delimiter:
+                    span_end = index + 1
+                    break
+            if span_end != len(text):
+                break
+            if current_end == len(text):
+                break
+            next_line_start = current_end + 1
+            next_line_end = text.find('\n', next_line_start)
+            if next_line_end < 0:
+                next_line_end = len(text)
+            if not text[next_line_start:next_line_end].rstrip('\r').strip():
+                span_end = next_line_start
+                break
+            line_start = next_line_start
+            cursor = next_line_start
+        spans.append((definition.start(), span_end))
+    return tuple(spans)
+
+
 def _markdown_link_spans(text: str) -> tuple[tuple[int, int], ...]:
     spans: list[tuple[int, int]] = []
     index = 0
@@ -195,10 +255,7 @@ def _markdown_link_spans(text: str) -> tuple[tuple[int, int], ...]:
             cursor += 1
         else:
             index = label_end + 2
-    spans.extend(
-        (match.start(), match.end())
-        for match in REFERENCE_DEFINITION.finditer(text)
-    )
+    spans.extend(_reference_definition_spans(text))
     return tuple(spans)
 
 

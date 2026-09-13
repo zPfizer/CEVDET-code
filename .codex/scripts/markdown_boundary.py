@@ -72,9 +72,7 @@ def _fence_match(content: str) -> re.Match[str] | None:
     return match
 
 
-def _blank_inline_code(
-    chars: list[str], text: str, *, multiline_only: bool = False
-) -> None:
+def _blank_inline_code(chars: list[str], text: str) -> None:
     index = 0
     while index < len(text):
         if text[index] != "`" or is_escaped(text, index):
@@ -97,10 +95,8 @@ def _blank_inline_code(
             # An unmatched delimiter is ordinary text; advance past it.
             index = delimiter_end
             continue
-        end = close + len(delimiter)
-        if not multiline_only or any(char in "\r\n" for char in text[index:end]):
-            _blank(chars, index, end)
-        index = end
+        _blank(chars, index, close + len(delimiter))
+        index = close + len(delimiter)
 
 
 def _blank_inline_html_elements(

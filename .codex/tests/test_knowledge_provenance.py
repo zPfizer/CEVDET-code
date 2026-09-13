@@ -151,10 +151,13 @@ Bağ.
             [("##", "Görünür")],
         )
 
-    def test_multiline_inline_code_cannot_supply_required_headings(self) -> None:
+    def test_multiline_backticks_do_not_hide_a_block_heading(self) -> None:
         text = "`\n## Önemli Noktalar\n`\n"
 
-        self.assertEqual(knowledge_schema.markdown_headings(text), [])
+        self.assertEqual(
+            [(level, title) for level, title, _start, _end in knowledge_schema.markdown_headings(text)],
+            [("##", "Önemli Noktalar")],
+        )
 
     def test_heading_schema_ignores_fenced_headings_and_inline_tokens(self) -> None:
         fenced = "```markdown\n" + "\n".join(knowledge_schema.CONCEPT_HEADINGS) + "\n```\n"
