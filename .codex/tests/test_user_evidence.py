@@ -261,6 +261,18 @@ class UserEvidenceTests(unittest.TestCase):
         self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
         self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
 
+    def test_unclosed_inline_html_code_model_source_stays_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '<code>' + decision('Kısa yanıt tercihi.', quote)
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
     def test_source_marker_inside_html_attribute_is_not_provenance(self):
         quote = 'Bundan sonra kısa yanıt ver.'
         marker = decision('Kısa yanıt tercihi.', quote).split(' <!--', 1)[1]
@@ -288,6 +300,18 @@ class UserEvidenceTests(unittest.TestCase):
                 self.assertEqual(output['Alınan Kararlar'], '')
                 self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
                 self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_blockquoted_model_source_example_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '> ' + decision('Kısa yanıt tercihi.', quote)
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
 
     def test_tab_list_marker_gap_does_not_close_a_fenced_example(self):
         quote = 'Bundan sonra kısa yanıt ver.'

@@ -268,6 +268,19 @@ class ProfileGuardTests(unittest.TestCase):
 
         self.assertEqual(issues, ['profile-link-traversal'])
 
+    def test_blockquoted_links_remain_visible_to_profile_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                '> [[../secret]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-traversal'])
+
     def test_check_links_keeps_nested_list_links_visible(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -16,7 +16,10 @@ HTML_LITERAL_CLOSE = re.compile(
     r"</(?P<tag>pre|script|style|textarea)[ \t]*>",
     re.IGNORECASE,
 )
-HTML_CODE_OPEN = re.compile(r"<code(?:[ \t\r\n/>]|$)", re.IGNORECASE)
+HTML_CODE_OPEN = re.compile(
+    r"<code(?=[ \t\r\n/>])(?:[^\"'<>]|\"[^\"]*\"|'[^']*')*>",
+    re.IGNORECASE | re.DOTALL,
+)
 HTML_CODE_CLOSE = re.compile(r"</code[ \t]*>", re.IGNORECASE)
 INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
 LIST_ITEM = re.compile(
@@ -106,6 +109,7 @@ def _blank_inline_html_code(chars: list[str], text: str) -> None:
             continue
         closing = HTML_CODE_CLOSE.search(text, opening.end())
         if closing is None:
+            _blank(chars, opening.start(), len(text))
             return
         _blank(chars, opening.start(), closing.end())
         index = closing.end()

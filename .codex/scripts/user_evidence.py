@@ -9,13 +9,14 @@ import json
 import re
 from typing import TypedDict
 
-from markdown_boundary import markdown_body
+from markdown_boundary import BLOCKQUOTE_PREFIX, markdown_body
 from quote_grammar import QUOTED_CONTENT
 
 
 SOURCE = re.compile(r'<!-- user-source:\s*(\{[^\n]*\})\s*-->')
 EVIDENCE = re.compile(r'<!-- user-evidence:\s*(\{[^\n]*\})\s*-->')
 HTML_TAG = re.compile(r'<(?:[^"\'>]|"[^"]*"|\'[^\']*\')*>', re.DOTALL)
+LIST_PREFIX = re.compile(r'^[ \t]*(?:[-+*]|\d+[.)])(?:[ \t]+|$)')
 USER_ANCHOR = r'(?:#user-[a-f0-9]{64})?'
 USER_LINK = re.compile(r'\[\[daily/(\d{4}-\d{2}-\d{2})#user-([a-f0-9]{64})(?:\|[^\]]+)?\]\]')
 SCOPES = frozenset({'general', 'project', 'session', 'unspecified'})
@@ -145,7 +146,18 @@ def _visible_source_body(text: str) -> str:
     chars = list(masked)
     prefix = '<!-- user-source:'
     for match in SOURCE.finditer(text):
-        if any(
+        line_start = text.rfind('\n', 0, match.start()) + 1
+        line_prefix = text[line_start:match.start()]
+        in_blockquote = False
+        while True:
+            if BLOCKQUOTE_PREFIX.match(line_prefix) is not None:
+                in_blockquote = True
+                break
+            list_prefix = LIST_PREFIX.match(line_prefix)
+            if list_prefix is None:
+                break
+            line_prefix = line_prefix[list_prefix.end():]
+        if in_blockquote or any(
             tag.start() < match.start() < tag.end()
             for tag in HTML_TAG.finditer(text)
         ):
