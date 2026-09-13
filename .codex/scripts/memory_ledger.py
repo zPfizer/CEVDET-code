@@ -35,6 +35,12 @@ MEMORY_READ_RULE = (
     'memory_ledger.read_memory_source(vault_root, path) ile süzülmüş olarak oku.'
 )
 
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError('memory-view-deadline')
+
+
 PRIVATE_KEY = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?"
     r"-----END [A-Z0-9 ]*PRIVATE KEY-----",
@@ -1441,9 +1447,14 @@ def _suppression_path(private_root: Path) -> Path:
     return private_root / "controls" / "suppressions.jsonl"
 
 
-def _suppression_hashes_from_lines(lines: Sequence[str]) -> frozenset[str]:
+def _suppression_hashes_from_lines(
+    lines: Sequence[str],
+    *,
+    deadline: float | None = None,
+) -> frozenset[str]:
     hashes: set[str] = set()
     for raw in lines:
+        _check_deadline(deadline)
         try:
             record = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -1459,16 +1470,25 @@ def _suppression_hashes_from_lines(lines: Sequence[str]) -> frozenset[str]:
     return frozenset(hashes)
 
 
-def load_suppressed_hashes(private_root: Path) -> frozenset[str]:
+def load_suppressed_hashes(
+    private_root: Path,
+    *,
+    deadline: float | None = None,
+) -> frozenset[str]:
     path = _suppression_path(private_root)
+    _check_deadline(deadline)
     try:
         # Writers atomically replace the file; read-only callers need no lock file.
-        lines = path.read_text(encoding="utf-8").splitlines()
+        text = path.read_text(encoding="utf-8")
+        _check_deadline(deadline)
+        lines = text.splitlines()
     except FileNotFoundError:
         return frozenset()
+    except TimeoutError:
+        raise
     except (OSError, UnicodeError) as exc:
         raise MemoryPreferenceError('memory-suppression-unreadable') from exc
-    return _suppression_hashes_from_lines(lines)
+    return _suppression_hashes_from_lines(lines, deadline=deadline)
 
 
 def memory_syntactic_units(value: str) -> Iterator[str]:
@@ -1549,20 +1569,29 @@ class MemoryRead:
         text: str,
         *,
         resolved_relative: str | None = None,
+        deadline: float | None = None,
     ) -> str | None:
         """Apply this read's suppression, provenance and sanitization snapshot."""
+        _check_deadline(deadline)
         source_relative = resolved_relative or relative
         alias = _COMPANION_SOURCE_ALIASES.get(source_relative)
         if self.excludes(relative) or (alias is not None and self.excludes(alias)):
             return None
         text = self.filter(text)
         root = self._vault_root.resolve(strict=True)
+        _check_deadline(deadline)
         self._check_source_publication(source_relative)
         if PurePosixPath(source_relative).parts[0] != 'daily':
             lines = []
             for line in text.splitlines(keepends=True):
+                _check_deadline(deadline)
                 if USER_LINK.search(line):
-                    proof = proof_for_link(root, line, reader=lambda path: self.read_source(path)[1])
+                    if deadline is None:
+                        reader = lambda path: self.read_source(path)[1]
+                    else:
+                        reader = lambda path: self.read_source(path, deadline=deadline)[1]
+                    proof = proof_for_link(root, line, reader=reader)
+                    _check_deadline(deadline)
                     if proof is None:
                         continue
                     line = USER_LINK.sub(
@@ -1571,23 +1600,42 @@ class MemoryRead:
                     )
                 lines.append(line)
             text = ''.join(lines)
-        if source_relative == PROFILE_RELATIVE and check_profile(
-            root, text, read_source=lambda path: self.read_source(path)[1],
-        ):
-            self._check_source_publication(source_relative)
-            return None
+        if source_relative == PROFILE_RELATIVE:
+            if deadline is None:
+                reader = lambda path: self.read_source(path)[1]
+                profile_issues = check_profile(root, text, read_source=reader)
+            else:
+                reader = lambda path: self.read_source(path, deadline=deadline)[1]
+                profile_issues = check_profile(
+                    root,
+                    text,
+                    read_source=reader,
+                    check_deadline=lambda: _check_deadline(deadline),
+                )
+            if profile_issues:
+                self._check_source_publication(source_relative)
+                return None
+        _check_deadline(deadline)
         self._check_source_publication(source_relative)
         return sanitize_text(text, max_chars=None)[0]
 
-    def read_source(self, path: Path, *, relative: str | None = None) -> tuple[Path, str | None]:
+    def read_source(
+        self,
+        path: Path,
+        *,
+        relative: str | None = None,
+        deadline: float | None = None,
+    ) -> tuple[Path, str | None]:
         """Read a sanitized source inside the vault; None content means exclusion.
 
         Views retain their supplied lexical identity; other readers use the resolved path.
         Provenance filtering and validation run before sanitization; the source is never
         rewritten. Full source reads skip the bounded ledger-event truncation.
         """
+        _check_deadline(deadline)
         source = path.resolve(strict=False)
         root = self._vault_root.resolve(strict=True)
+        _check_deadline(deadline)
         if not source.is_relative_to(root):
             raise MemorySourceError('memory-source-outside-vault')
         source_relative = source.relative_to(root)
@@ -1603,28 +1651,55 @@ class MemoryRead:
         self._check_source_publication(resolved_identity)
         if resolved_identity in _COMPANION_SOURCE_ALIASES.values() and (root / _COMPANION_CANONICAL).is_file():
             from companion_memory import render_views
-            text = render_views(root, hashes=self._hashes, memory=self).get(source.name)
+            text = render_views(
+                root,
+                hashes=self._hashes,
+                memory=self,
+                deadline=deadline,
+            ).get(source.name)
             return source_relative, None if text is None else self.project_text(
-                identity, text, resolved_relative=resolved_identity,
+                identity,
+                text,
+                resolved_relative=resolved_identity,
+                deadline=deadline,
             )
+        _check_deadline(deadline)
+        text = source.read_text(encoding='utf-8')
+        _check_deadline(deadline)
         return source_relative, self.project_text(
             identity,
-            source.read_text(encoding='utf-8'),
+            text,
             resolved_relative=resolved_identity,
+            deadline=deadline,
         )
 
-    def profile_issues(self) -> tuple[str, ...]:
+    def profile_issues(self, *, deadline: float | None = None) -> tuple[str, ...]:
+        _check_deadline(deadline)
         if self.excludes(PROFILE_RELATIVE):
             return ()
 
         def read(path: Path) -> str | None:
+            _check_deadline(deadline)
             relative = path.resolve().relative_to(self._vault_root.resolve()).as_posix()
             self._check_source_publication(relative)
-            text = None if self.excludes(relative) else self.filter(path.read_text(encoding='utf-8'))
+            if self.excludes(relative):
+                return None
+            text = path.read_text(encoding='utf-8')
+            _check_deadline(deadline)
+            text = self.filter(text)
+            _check_deadline(deadline)
             self._check_source_publication(relative)
             return text
 
-        issues = check_profile(self._vault_root, read_source=read)
+        if deadline is None:
+            issues = check_profile(self._vault_root, read_source=read)
+        else:
+            issues = check_profile(
+                self._vault_root,
+                read_source=read,
+                check_deadline=lambda: _check_deadline(deadline),
+            )
+        _check_deadline(deadline)
         self._check_source_publication(PROFILE_RELATIVE)
         return issues
 
@@ -1640,6 +1715,7 @@ class MemoryRead:
             return {}
         try:
             for relative, _title in sources:
+                _check_deadline(deadline)
                 self._check_source_publication(relative)
             views = materialize_memory_views(
                 self._vault_root,
@@ -1653,6 +1729,8 @@ class MemoryRead:
             return views
         except MemoryPreferenceError:
             raise
+        except TimeoutError:
+            raise
         except (OSError, ValueError) as exc:
             if str(exc) == 'memory-preferences-changed':
                 raise MemoryPreferenceError('memory-preferences-changed') from exc
@@ -1663,38 +1741,49 @@ class MemoryRead:
         sources: Sequence[tuple[str, str]],
         *,
         alias_sources: Sequence[tuple[str, str]] | None = None,
+        deadline: float | None = None,
     ) -> tuple[dict[str, str], dict[str, str]]:
         """Render filtered sources in memory, without creating view files."""
         if not self.active:
             return {}, {}
         try:
             for relative, _title in sources:
+                _check_deadline(deadline)
                 self._check_source_publication(relative)
             views = _render_memory_views(
                 self._vault_root,
                 sources,
                 self._hashes,
                 alias_sources=alias_sources,
+                deadline=deadline,
             )
             if self._publication is not None:
                 self.check_knowledge_snapshot()
             return views
         except MemoryPreferenceError:
             raise
+        except TimeoutError:
+            raise
         except (OSError, ValueError) as exc:
             raise MemoryPreferenceError('memory-view-unavailable') from exc
 
 
 @contextmanager
-def memory_read(vault_root: Path) -> Iterator[MemoryRead]:
+def memory_read(
+    vault_root: Path,
+    *,
+    deadline: float | None = None,
+) -> Iterator[MemoryRead]:
     """Reject a completed read if a concurrent preference change made it stale."""
     private = vault_root / '.codex/private-memory'
-    hashes = load_suppressed_hashes(private)
+    _check_deadline(deadline)
+    hashes = load_suppressed_hashes(private, deadline=deadline)
     memory = MemoryRead(vault_root, hashes)
     yield memory
+    _check_deadline(deadline)
     if memory._publication is not None:
         memory.check_knowledge_snapshot()
-    if load_suppressed_hashes(private) != hashes:
+    if load_suppressed_hashes(private, deadline=deadline) != hashes:
         raise MemoryPreferenceError('memory-preferences-changed')
 
 
@@ -1743,8 +1832,10 @@ def _render_memory_views(
     hashes: frozenset[str],
     *,
     alias_sources: Sequence[tuple[str, str]] | None = None,
+    deadline: float | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Return filtered source text and its safe view identities without writing."""
+    _check_deadline(deadline)
     private = vault_root / '.codex/private-memory'
     if private.is_symlink() or private.resolve() != vault_root.resolve() / '.codex/private-memory':
         raise MemoryPreferenceError('memory-view-path-invalid')
@@ -1755,11 +1846,13 @@ def _render_memory_views(
     }
     aliases: dict[str, Path | None] = {}
     for relative, title in alias_sources if alias_sources is not None else sources:
+        _check_deadline(deadline)
         path = PurePosixPath(relative)
         names = (relative.removesuffix('.md'), path.stem, title,
                  relative.removeprefix('knowledge/').removesuffix('.md'))
         target = targets.get(relative)
         for name in names:
+            _check_deadline(deadline)
             key = name.casefold()
             if key in aliases and aliases[key] != target:
                 aliases[key] = None
@@ -1785,16 +1878,30 @@ def _render_memory_views(
     memory = MemoryRead(vault_root, hashes)
     rendered: dict[str, str] = {}
     for relative, _title in sources:
+        _check_deadline(deadline)
         source = vault_root / relative
         if source.is_symlink():
             raise MemoryPreferenceError('memory-view-source-invalid')
         try:
-            _source_relative, projected = memory.read_source(source, relative=relative)
+            if deadline is None:
+                _source_relative, projected = memory.read_source(
+                    source,
+                    relative=relative,
+                )
+            else:
+                _source_relative, projected = memory.read_source(
+                    source,
+                    relative=relative,
+                    deadline=deadline,
+                )
         except MemorySourceError as exc:
             raise MemoryPreferenceError('memory-view-source-invalid') from exc
+        _check_deadline(deadline)
         projected = projected or ''
         projected = re.sub(r'(?<!!)\[([^\]]*)\]\(([^)]+)\)', markdown_link, projected)
+        _check_deadline(deadline)
         projected = re.sub(r'\[\[([^\]]+)\]\]', link, projected)
+        _check_deadline(deadline)
         rendered[relative] = projected
     return rendered, {
         relative: memory_view_relative_path(relative)
@@ -1825,8 +1932,10 @@ def materialize_memory_views(
             sources,
             hashes,
             alias_sources=alias_sources,
+            deadline=deadline,
         )
         for relative, projected in rendered.items():
+            _check_deadline(deadline)
             target = vault_root / paths[relative]
             if target.is_symlink() or target.resolve() != views.resolve() / target.name:
                 raise MemoryPreferenceError('memory-view-path-invalid')

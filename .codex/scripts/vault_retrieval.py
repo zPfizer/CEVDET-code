@@ -15,11 +15,12 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import time
 import unicodedata
 from urllib.parse import unquote, urlsplit
 
 import companion_memory
-from file_lock import LockUnavailable, locked
+from file_lock import LockUnavailable, locked, timeout_for_deadline
 from memory_ledger import (
     MEMORY_READ_RULE,
     MemoryPreferenceError,
@@ -43,6 +44,11 @@ CACHE_RELATIVE_PATH = Path(".codex/scripts/.state/vault-retrieval-cache.json")
 SOURCE_READ_ATTEMPTS = 3
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 MARKDOWN_LINK = re.compile(r"(?<!!)\[([^\]]*)\]\(([^)]+)\)")
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("vault-retrieval-deadline")
 
 # Vault içindeki proje notlarını açık route ile daraltan sözlük.
 # Değer = path terim grupları: bir grubun TÜM terimleri notun path'inde geçiyorsa
@@ -511,13 +517,20 @@ def _entry_from_text(
     text: str,
     *,
     memory: MemoryRead | None = None,
+    deadline: float | None = None,
 ) -> VaultEntry | None:
-
+    _check_deadline(deadline)
     lines = HTML_COMMENT.sub("", text).splitlines()
+    _check_deadline(deadline)
     # The shared parser owns metadata syntax; retrieval keeps case-insensitive keys.
-    metadata = {key.casefold(): value for key, value in parse_frontmatter(
-        "\n".join(line.strip() if line.strip() == "---" else line for line in lines)
-    ).items()}
+    _check_deadline(deadline)
+    metadata = {
+        key.casefold(): value
+        for key, value in parse_frontmatter(
+            "\n".join(line.strip() if line.strip() == "---" else line for line in lines)
+        ).items()
+    }
+    _check_deadline(deadline)
     record_type_value = metadata.get("type", "")
     record_type = record_type_value if isinstance(record_type_value, str) else ""
     schema_value = metadata.get("schema", "")
@@ -528,24 +541,27 @@ def _entry_from_text(
         title, *_field_items(metadata, 'aliases'),
     )):
         return None
+    _check_deadline(deadline)
     # Frontmatter yalnız 1. satır `---` ise vardır: gövdedeki tematik çizgi
     # notun üstünü (başlıklar, safe_lines) index dışına atmaz.
-    frontmatter_end = (
-        next(
-            (index for index in range(1, len(lines)) if lines[index].strip() == "---"),
-            0,
-        )
-        if lines and lines[0].strip() == "---"
-        else 0
-    )
+    frontmatter_end = 0
+    if lines and lines[0].strip() == "---":
+        for index in range(1, len(lines)):
+            _check_deadline(deadline)
+            if lines[index].strip() == "---":
+                frontmatter_end = index
+                break
     body_lines = lines[frontmatter_end + 1 :] if frontmatter_end else lines
-    headings = [
-        line.lstrip("#").strip() for line in body_lines if line.startswith("#")
-    ]
+    headings: list[str] = []
+    for line in body_lines:
+        _check_deadline(deadline)
+        if line.startswith("#"):
+            headings.append(line.lstrip("#").strip())
     if not title:
         title = headings[0] if headings else path.stem
     if memory is not None and memory.excludes(title):
         return None
+    _check_deadline(deadline)
     tags = " ".join(
         _field_items(metadata, "tags") + _field_items(metadata, "aliases")
     )
@@ -556,11 +572,12 @@ def _entry_from_text(
     elif relative.parts[0] == TEMPLATES_ROOT:
         status = "template"
     bounded_safe_lines: list[str] = []
-    claim_states = {
-        index: match.group(1)
-        for index, line in enumerate(body_lines)
-        if (match := CLAIM_ROW.fullmatch(line)) is not None
-    }
+    claim_states: dict[int, str] = {}
+    for index, line in enumerate(body_lines):
+        _check_deadline(deadline)
+        match = CLAIM_ROW.fullmatch(line)
+        if match is not None:
+            claim_states[index] = match.group(1)
     historical_source_indexes = {
         frontmatter_end + 1 + index
         for index, state in claim_states.items()
@@ -568,6 +585,7 @@ def _entry_from_text(
     }
     safe_claim_states: list[str] = []
     for index, line in enumerate(body_lines):
+        _check_deadline(deadline)
         stripped = _content_line(line)
         if (
             stripped == "---"
@@ -579,26 +597,20 @@ def _entry_from_text(
         bounded_safe_lines.append(stripped)
         safe_claim_states.append(claim_states.get(index, ""))
     safe_lines = tuple(bounded_safe_lines)
-    historical_lines = (
-        tuple(
-            line
-            for line, state in zip(safe_lines, safe_claim_states)
-            if state == "gecmis"
-        )
-        if schema.casefold() == "knowledge-v2"
-        else ()
-    )
-    current_lines = tuple(
-        line
-        for line, state in zip(safe_lines, safe_claim_states)
-        if schema.casefold() != "knowledge-v2" or state != "gecmis"
-    )
-    non_historical_source_lines = tuple(
-        line
-        for index, line in enumerate(lines)
-        if schema.casefold() != "knowledge-v2"
-        or index not in historical_source_indexes
-    )
+    historical_lines: list[str] = []
+    current_lines: list[str] = []
+    for line, state in zip(safe_lines, safe_claim_states):
+        _check_deadline(deadline)
+        if schema.casefold() == "knowledge-v2" and state == "gecmis":
+            historical_lines.append(line)
+        else:
+            current_lines.append(line)
+    non_historical_source_lines: list[str] = []
+    for index, line in enumerate(lines):
+        _check_deadline(deadline)
+        if schema.casefold() != "knowledge-v2" or index not in historical_source_indexes:
+            non_historical_source_lines.append(line)
+    _check_deadline(deadline)
     return VaultEntry(
         path=relative.as_posix(),
         title=title,
@@ -639,7 +651,7 @@ def _entry_from_text(
             + _url_terms("\n".join(historical_lines))
         ),
         content_key=_content_key(safe_lines),
-        historical_lines=historical_lines,
+        historical_lines=tuple(historical_lines),
     )
 
 
@@ -648,8 +660,10 @@ def _source_snapshot(
     path: Path,
     *,
     memory: MemoryRead | None = None,
+    deadline: float | None = None,
 ) -> tuple[Path | None, str | None, str | None]:
     """Read through MemoryRead once; hash exactly the text parsed by retrieval."""
+    _check_deadline(deadline)
     try:
         if path.resolve(strict=False).relative_to(
             (vault_root / COMPANION_ROOT / "Sources").resolve(strict=False)
@@ -670,12 +684,18 @@ def _source_snapshot(
         return None, None, None
     source_memory = memory if memory is not None else MemoryRead(vault_root, frozenset())
     try:
-        relative, text = source_memory.read_source(path)
+        if deadline is None:
+            relative, text = source_memory.read_source(path)
+        else:
+            relative, text = source_memory.read_source(path, deadline=deadline)
     except MemorySourceError:
         return None, None, None
+    _check_deadline(deadline)
     if text is None:
         return relative, None, None
-    return relative, text, hashlib.sha256(text.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    _check_deadline(deadline)
+    return relative, text, digest
 
 
 def _source_signature(file_stat: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -693,16 +713,21 @@ def _stable_entry_snapshot(
     vault_root: Path,
     path: Path,
     read_entry: Callable[[Path, Path], VaultEntry | None],
+    *,
+    deadline: float | None = None,
 ) -> tuple[VaultEntry | None, os.stat_result | None, bool]:
     """Read one parsed note between matching lstat calls."""
     for attempt in range(SOURCE_READ_ATTEMPTS):
+        _check_deadline(deadline)
         try:
             before = path.lstat()
             if not stat.S_ISREG(before.st_mode):
                 return None, None, True
-            before_hash = _source_sha256(path)
+            before_hash = _source_sha256(path, deadline=deadline)
+            _check_deadline(deadline)
             entry = read_entry(vault_root, path)
-            after_hash = _source_sha256(path)
+            _check_deadline(deadline)
+            after_hash = _source_sha256(path, deadline=deadline)
             after = path.lstat()
         except (FileNotFoundError, NotADirectoryError):
             if attempt + 1 == SOURCE_READ_ATTEMPTS:
@@ -712,6 +737,7 @@ def _stable_entry_snapshot(
             if attempt + 1 == SOURCE_READ_ATTEMPTS:
                 return None, None, True
             continue
+        _check_deadline(deadline)
         return entry, after, False
     # Son denemede her sapma kolu döngü içinde döner; kuyruk savunma hattı.
     return None, None, True  # pragma: no cover
@@ -733,14 +759,36 @@ def _retrieval_entry_snapshot(
     vault_root: Path,
     path: Path,
     memory: MemoryRead,
+    *,
+    deadline: float | None = None,
 ) -> tuple[VaultEntry | None, os.stat_result | None, bool]:
     """Read a disk note or a canonical-backed Companion view without writing."""
+    _check_deadline(deadline)
     if _is_virtual_companion_view(vault_root, path):
-        return entry_from_file(vault_root, path, memory=memory), None, False
+        if deadline is None:
+            return entry_from_file(vault_root, path, memory=memory), None, False
+        return entry_from_file(
+            vault_root,
+            path,
+            memory=memory,
+            deadline=deadline,
+        ), None, False
+
+    def read_entry(root: Path, source: Path) -> VaultEntry | None:
+        if deadline is None:
+            return entry_from_file(root, source, memory=memory)
+        return entry_from_file(
+            root,
+            source,
+            memory=memory,
+            deadline=deadline,
+        )
+
     return _stable_entry_snapshot(
         vault_root,
         path,
-        lambda root, source: entry_from_file(root, source, memory=memory),
+        read_entry,
+        deadline=deadline,
     )
 
 
@@ -749,9 +797,11 @@ def _stable_source_snapshot(
     path: Path,
     *,
     memory: MemoryRead | None = None,
+    deadline: float | None = None,
 ) -> tuple[Path | None, str | None, str | None, os.stat_result | None, bool]:
     """Read projected source text while bounding replace/disappearance races."""
     for attempt in range(SOURCE_READ_ATTEMPTS):
+        _check_deadline(deadline)
         try:
             before = path.lstat()
         except (FileNotFoundError, NotADirectoryError):
@@ -759,7 +809,19 @@ def _stable_source_snapshot(
         if before is not None and not stat.S_ISREG(before.st_mode):
             return None, None, None, before, True
         try:
-            relative, text, content_sha256 = _source_snapshot(vault_root, path, memory=memory)
+            if deadline is None:
+                relative, text, content_sha256 = _source_snapshot(
+                    vault_root,
+                    path,
+                    memory=memory,
+                )
+            else:
+                relative, text, content_sha256 = _source_snapshot(
+                    vault_root,
+                    path,
+                    memory=memory,
+                    deadline=deadline,
+                )
         except (FileNotFoundError, NotADirectoryError):
             if attempt + 1 == SOURCE_READ_ATTEMPTS:
                 return None, None, None, None, True
@@ -782,18 +844,24 @@ def _stable_source_snapshot(
             if attempt + 1 == SOURCE_READ_ATTEMPTS:
                 return None, None, None, None, True
             continue
+        _check_deadline(deadline)
         return relative, text, content_sha256, after, False
     # Son denemede her sapma kolu döngü içinde döner; kuyruk savunma hattı.
     return None, None, None, None, True  # pragma: no cover
 
 
-def _stable_raw_hash(path: Path) -> tuple[str | None, os.stat_result | None, bool]:
+def _stable_raw_hash(
+    path: Path,
+    *,
+    deadline: float | None = None,
+) -> tuple[str | None, os.stat_result | None, bool]:
     for attempt in range(SOURCE_READ_ATTEMPTS):
+        _check_deadline(deadline)
         try:
             before = path.lstat()
             if not stat.S_ISREG(before.st_mode):
                 return None, None, True
-            value = _source_sha256(path)
+            value = _source_sha256(path, deadline=deadline)
             after = path.lstat()
         except (FileNotFoundError, NotADirectoryError):
             if attempt + 1 == SOURCE_READ_ATTEMPTS:
@@ -803,6 +871,7 @@ def _stable_raw_hash(path: Path) -> tuple[str | None, os.stat_result | None, boo
             if attempt + 1 == SOURCE_READ_ATTEMPTS:
                 return None, None, True
             continue
+        _check_deadline(deadline)
         return value, after, False
     # Son denemede her sapma kolu döngü içinde döner; kuyruk savunma hattı.
     return None, None, True  # pragma: no cover
@@ -812,6 +881,8 @@ def _stable_note_snapshot(
     vault_root: Path,
     path: Path,
     read_entry: Callable[[Path, Path], VaultEntry | None],
+    *,
+    deadline: float | None = None,
 ) -> tuple[
     VaultEntry | None,
     Path | None,
@@ -823,14 +894,30 @@ def _stable_note_snapshot(
 ]:
     """Bind entry, projected text and raw hash to one bounded source read."""
     for attempt in range(SOURCE_READ_ATTEMPTS):
+        _check_deadline(deadline)
         try:
             before = path.lstat()
             if not stat.S_ISREG(before.st_mode):
                 return None, None, None, None, None, before, True
-            before_hash = _source_sha256(path)
-            entry = read_entry(vault_root, path)
-            relative, text, content_sha256 = _source_snapshot(vault_root, path)
-            after_hash = _source_sha256(path)
+            before_hash = _source_sha256(path, deadline=deadline)
+            _check_deadline(deadline)
+            if read_entry is entry_from_file:
+                entry = read_entry(vault_root, path, deadline=deadline)
+            else:
+                entry = read_entry(vault_root, path)
+            _check_deadline(deadline)
+            if deadline is None:
+                relative, text, content_sha256 = _source_snapshot(
+                    vault_root,
+                    path,
+                )
+            else:
+                relative, text, content_sha256 = _source_snapshot(
+                    vault_root,
+                    path,
+                    deadline=deadline,
+                )
+            after_hash = _source_sha256(path, deadline=deadline)
             after = path.lstat()
         except (FileNotFoundError, NotADirectoryError):
             if attempt + 1 == SOURCE_READ_ATTEMPTS:
@@ -843,6 +930,7 @@ def _stable_note_snapshot(
             if attempt + 1 == SOURCE_READ_ATTEMPTS:
                 return None, None, None, None, None, None, True
             continue
+        _check_deadline(deadline)
         return entry, relative, text, content_sha256, after_hash, after, False
     # Son denemede her sapma kolu döngü içinde döner; kuyruk savunma hattı.
     return None, None, None, None, None, None, True  # pragma: no cover
@@ -853,15 +941,45 @@ def _entry_from_file_with_content(
     path: Path,
     *,
     memory: MemoryRead | None = None,
+    deadline: float | None = None,
 ) -> tuple[VaultEntry | None, str | None]:
-    relative, text, content_sha256 = _source_snapshot(vault_root, path, memory=memory)
+    if deadline is None:
+        relative, text, content_sha256 = _source_snapshot(
+            vault_root,
+            path,
+            memory=memory,
+        )
+    else:
+        relative, text, content_sha256 = _source_snapshot(
+            vault_root,
+            path,
+            memory=memory,
+            deadline=deadline,
+        )
     if relative is None or text is None:
         return None, content_sha256
-    return _entry_from_text(path, relative, text, memory=memory), content_sha256
+    return _entry_from_text(
+        path,
+        relative,
+        text,
+        memory=memory,
+        deadline=deadline,
+    ), content_sha256
 
 
-def entry_from_file(vault_root: Path, path: Path, *, memory: MemoryRead | None = None) -> VaultEntry | None:
-    entry, _content_sha256 = _entry_from_file_with_content(vault_root, path, memory=memory)
+def entry_from_file(
+    vault_root: Path,
+    path: Path,
+    *,
+    memory: MemoryRead | None = None,
+    deadline: float | None = None,
+) -> VaultEntry | None:
+    entry, _content_sha256 = _entry_from_file_with_content(
+        vault_root,
+        path,
+        memory=memory,
+        deadline=deadline,
+    )
     return entry
 
 
@@ -967,11 +1085,23 @@ def _entry_from_payload(payload: object) -> VaultEntry:
     )
 
 
-def _load_cache(path: Path) -> dict[str, object]:
+def _load_cache(
+    path: Path,
+    *,
+    deadline: float | None = None,
+) -> dict[str, object]:
+    _check_deadline(deadline)
     try:
-        if path.stat().st_size > MAX_CACHE_BYTES:
+        size = path.stat().st_size
+        _check_deadline(deadline)
+        if size > MAX_CACHE_BYTES:
             return {}
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        _check_deadline(deadline)
+        payload = json.loads(text)
+        _check_deadline(deadline)
+    except TimeoutError:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
     if not isinstance(payload, dict) or payload.get("version") != CACHE_VERSION:
@@ -979,19 +1109,29 @@ def _load_cache(path: Path) -> dict[str, object]:
     return payload
 
 
-def _save_cache(path: Path, payload: dict[str, object]) -> bool:
+def _save_cache(
+    path: Path,
+    payload: dict[str, object],
+    *,
+    deadline: float | None = None,
+) -> bool:
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     if len(encoded.encode("utf-8")) > MAX_CACHE_BYTES:
         return False
-    atomic_write_text(path, encoded, newline="\n")
+    atomic_write_text(path, encoded, newline="\n", deadline=deadline)
     return True
 
 
-def _source_sha256(path: Path) -> str:
+def _source_sha256(path: Path, *, deadline: float | None = None) -> str:
     digest = hashlib.sha256()
     with path.open('rb') as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+        while True:
+            _check_deadline(deadline)
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
             digest.update(chunk)
+        _check_deadline(deadline)
     return digest.hexdigest()
 
 
@@ -1068,15 +1208,22 @@ def _apply_memory_suppressions(
     vault_root: Path,
     entries: list[VaultEntry],
     memory: MemoryRead,
+    *,
+    deadline: float | None = None,
 ) -> VaultMap:
     if not memory.active:
         return entries if isinstance(entries, VaultMap) else VaultMap(entries, _document_frequency(entries))
     visible: list[VaultEntry] = []
     unstable_paths = set(getattr(entries, 'unstable_paths', frozenset()))
     for entry in entries:
+        _check_deadline(deadline)
         projected, _post_stat, unstable = _retrieval_entry_snapshot(
-            vault_root, vault_root / entry.path, memory
+            vault_root,
+            vault_root / entry.path,
+            memory,
+            deadline=deadline,
         )
+        _check_deadline(deadline)
         if unstable:
             unstable_paths.add(entry.path)
             continue
@@ -1095,8 +1242,10 @@ def build_vault_map(
     *,
     write_cache: bool = True,
     read_entry: Callable[[Path, Path], VaultEntry | None] = entry_from_file,
+    deadline: float | None = None,
 ) -> VaultMap:
     """Korpus indeksi; unstable sources are omitted and never cached."""
+    _check_deadline(deadline)
     vault_root = vault_root.resolve(strict=True)
     companion_names = (
         frozenset(companion_memory.VIEW_NAMES)
@@ -1116,11 +1265,16 @@ def build_vault_map(
         cache_write_allowed = write_cache
         if write_cache:
             try:
-                cache_lock.enter_context(locked(cache_path, timeout=0))
+                cache_lock.enter_context(
+                    locked(cache_path, timeout=timeout_for_deadline(deadline, cap=0))
+                )
             except (LockUnavailable, OSError):
                 cache_write_allowed = False
                 cache_result['status'] = 'locked'
-        cache = _load_cache(cache_path)
+        if deadline is None:
+            cache = _load_cache(cache_path)
+        else:
+            cache = _load_cache(cache_path, deadline=deadline)
         cached_files = cache.get('files')
         if not isinstance(cached_files, dict):
             cached_files = {}
@@ -1136,7 +1290,14 @@ def build_vault_map(
             excluded = frozenset({'sources'}) if root == vault_root / COMPANION_ROOT else frozenset()
             path_groups.append(markdown_paths(root, excluded_root_dirs=excluded))
         for paths in path_groups:
-            for path in sorted(paths):
+            _check_deadline(deadline)
+            collected_paths: list[Path] = []
+            for path in paths:
+                _check_deadline(deadline)
+                collected_paths.append(path)
+            _check_deadline(deadline)
+            for path in sorted(collected_paths):
+                _check_deadline(deadline)
                 if path.parent == vault_root / COMPANION_ROOT and path.name in companion_names:
                     continue
                 try:
@@ -1157,8 +1318,11 @@ def build_vault_map(
                     continue
 
                 source_relative, source_text, content_sha256, source_stat, unstable = _stable_source_snapshot(
-                    vault_root, path
+                    vault_root,
+                    path,
+                    deadline=deadline,
                 )
+                _check_deadline(deadline)
                 if unstable:
                     unstable_paths.add(relative)
                     changed = True
@@ -1180,7 +1344,10 @@ def build_vault_map(
                         and cached.get('content_sha256') == content_sha256
                     )
                     if signature_matches and isinstance(cached.get('source_sha256'), str):
-                        source_hash, raw_stat, raw_unstable = _stable_raw_hash(path)
+                        source_hash, raw_stat, raw_unstable = _stable_raw_hash(
+                            path,
+                            deadline=deadline,
+                        )
                         if raw_unstable:
                             unstable_paths.add(relative)
                             changed = True
@@ -1210,8 +1377,12 @@ def build_vault_map(
                         post_stat,
                         unstable,
                     ) = _stable_note_snapshot(
-                        vault_root, path, read_entry
+                        vault_root,
+                        path,
+                        read_entry,
+                        deadline=deadline,
                     )
+                    _check_deadline(deadline)
                     if unstable:
                         unstable_paths.add(relative)
                         changed = True
@@ -1261,7 +1432,8 @@ def build_vault_map(
             }
             if payload is not None:
                 try:
-                    if not _save_cache(cache_path, payload):
+                    _check_deadline(deadline)
+                    if not _save_cache(cache_path, payload, deadline=deadline):
                         cache_result['status'] = 'unavailable'
                     else:
                         cache_result['bytes'] = cache_path.stat().st_size
@@ -1286,12 +1458,24 @@ def build_vault_map(
     publication.check_knowledge_snapshot()
     if companion_names:
         memory = MemoryRead(vault_root, frozenset())
-        for name, text in companion_memory.render_views(vault_root, memory=memory).items():
+        for name, text in companion_memory.render_views(
+            vault_root,
+            memory=memory,
+            deadline=deadline,
+        ).items():
+            _check_deadline(deadline)
             path = vault_root / COMPANION_ROOT / name
-            entry = _entry_from_text(path, path.relative_to(vault_root), text, memory=memory)
+            entry = _entry_from_text(
+                path,
+                path.relative_to(vault_root),
+                text,
+                memory=memory,
+                deadline=deadline,
+            )
             if entry is not None:
                 entries.append(entry)
         document_frequency = _document_frequency(entries)
+    _check_deadline(deadline)
     publication.check_knowledge_snapshot()
     return VaultMap(
         entries,
@@ -2078,7 +2262,9 @@ def _rank_query(
     query: str,
     *,
     top_k: int = MAX_CANDIDATES,
+    deadline: float | None = None,
 ) -> list[VaultHit]:
+    _check_deadline(deadline)
     exclusion = _split_selection_exclusion(query)
     if exclusion is not None:
         query, _excluded_query, exclude_historical_material, exclude_current_material = exclusion
@@ -2092,7 +2278,13 @@ def _rank_query(
             "exclude_historical_material": exclude_historical_material,
             "exclude_current_material": exclude_current_material,
         }
-        current_hits = _rank(entries, current_query, top_k=top_k, **view_options)
+        current_hits = _rank(
+            entries,
+            current_query,
+            top_k=top_k,
+            deadline=deadline,
+            **view_options,
+        )
         current_paths = {hit.entry.path for hit in current_hits}
         current_keys = {
             _entry_content_key(
@@ -2103,25 +2295,32 @@ def _rank_query(
             for hit in current_hits
         } if top_k <= MAX_CANDIDATES else set()
         # Remove cross-scope duplicates before the history limit; excerpts stay bounded.
+        history_candidates: list[VaultEntry] = []
+        for entry in entries:
+            _check_deadline(deadline)
+            if entry.path in current_paths:
+                continue
+            if current_keys and _entry_content_key(
+                entry,
+                include_history=not exclude_historical_material,
+                **view_options,
+            ) in current_keys:
+                continue
+            history_candidates.append(entry)
         history_entries = VaultMap(
-            [
-                entry for entry in entries
-                if entry.path not in current_paths
-                and (
-                    not current_keys
-                    or _entry_content_key(
-                        entry,
-                        include_history=not exclude_historical_material,
-                        **view_options,
-                    ) not in current_keys
-                )
-            ],
+            history_candidates,
             entries.document_frequency,
             entries.corpus_size,
             cache_result=entries.cache_result,
             unstable_paths=entries.unstable_paths,
         )
-        history_hits = _rank(history_entries, history_query, top_k=top_k, **view_options)
+        history_hits = _rank(
+            history_entries,
+            history_query,
+            top_k=top_k,
+            deadline=deadline,
+            **view_options,
+        )
         return _merge_scoped_hits(current_hits, history_hits, top_k=top_k)
     terms = _retrieval_terms(query)
     preserve_current_stale_penalty = _should_preserve_current_stale_penalty(query, terms)
@@ -2129,6 +2328,7 @@ def _rank_query(
         entries,
         query,
         top_k=top_k,
+        deadline=deadline,
         preserve_current_stale_penalty=preserve_current_stale_penalty,
         exclude_historical_material=exclude_historical_material,
         exclude_current_material=exclude_current_material,
@@ -2173,10 +2373,12 @@ def _rank(
     query: str,
     *,
     top_k: int = MAX_CANDIDATES,
+    deadline: float | None = None,
     preserve_current_stale_penalty: bool = False,
     exclude_historical_material: bool = False,
     exclude_current_material: bool = False,
 ) -> list[VaultHit]:
+    _check_deadline(deadline)
     query_terms = _retrieval_terms(query)
     query_acronyms = frozenset(_normalize(value) for value in ACRONYM.findall(query))
     if not query_terms or not entries or top_k <= 0:
@@ -2198,6 +2400,7 @@ def _rank(
     })
     eligible_entries = []
     for entry in entries:
+        _check_deadline(deadline)
         if (
             (exclude_historical_material and _is_historical_preference_material(entry))
             or (exclude_current_material and _is_current_material(entry))
@@ -2211,6 +2414,7 @@ def _rank(
     if not include_history:
         document_frequency = Counter(document_frequency)
         for entry in entries:
+            _check_deadline(deadline)
             current_terms = _entry_terms(
                 entry,
                 include_history=False,
@@ -2218,21 +2422,25 @@ def _rank(
                 exclude_current_material=exclude_current_material,
             )
             for term in set(entry.historical_body_terms) - set(entry.body_terms):
+                _check_deadline(deadline)
                 if term not in current_terms and document_frequency[term] > 0:
                     document_frequency[term] -= 1
-    matching_entries = [
-        entry for entry in eligible_entries
+    matching_entries: list[VaultEntry] = []
+    for entry in eligible_entries:
+        _check_deadline(deadline)
         if query_terms & _entry_terms(
             entry,
             include_history=include_history,
             exclude_historical_material=exclude_historical_material,
             exclude_current_material=exclude_current_material,
-        )
-    ]
+        ):
+            matching_entries.append(entry)
     # IDF's population must match corpus document_frequency, including other routes.
     total = max(entries.corpus_size, 1)
-    average_length = sum(
-        sum(
+    total_matching_length = 0
+    for entry in matching_entries:
+        _check_deadline(deadline)
+        total_matching_length += sum(
             _entry_body_terms(
                 entry,
                 include_history=include_history,
@@ -2240,10 +2448,10 @@ def _rank(
                 exclude_current_material=exclude_current_material,
             ).values()
         )
-        for entry in matching_entries
-    ) / max(len(matching_entries), 1)
+    average_length = total_matching_length / max(len(matching_entries), 1)
     ranked: list[tuple[int, float, str, VaultEntry, tuple[str, ...]]] = []
     for entry in eligible_entries:
+        _check_deadline(deadline)
         matched = query_terms & _entry_terms(
             entry,
             include_history=include_history,
@@ -2252,6 +2460,7 @@ def _rank(
         )
         if not matched:
             continue
+        _check_deadline(deadline)
         acronym_anchor = query_acronyms & matched
         symbol_anchor = matched & entry.symbol_terms
         # A fully named note is evidence even when the rest is conversational.
@@ -2277,6 +2486,7 @@ def _rank(
         )
         length_ratio = sum(body_terms.values()) / max(average_length, 1)
         for term in matched:
+            _check_deadline(deadline)
             inverse_frequency = math.log((total + 1) / (document_frequency[term] + 1)) + 1
             frequency = body_terms.get(term, 0)
             weight = frequency * 2.2 / (frequency + 1.2 * (0.25 + 0.75 * length_ratio))
@@ -2316,16 +2526,19 @@ def _rank(
         priority += int(vault_system_query and ('vault' in matched or title_anchor))
         ranked.append((priority, score, entry.path, entry, tuple(sorted(matched))))
     # Excerpt render'ı sıralamadan SONRA: yalnız kazanan top_k dilimi ödenir.
+    _check_deadline(deadline)
     ranked.sort(key=lambda candidate: (
         -candidate[0],
         -candidate[1],
         -int(history_mode and _is_historical_preference_material(candidate[3])),
         candidate[2],
     ))
+    _check_deadline(deadline)
     selected = ranked[:top_k]
     if top_k <= MAX_CANDIDATES:
         unique: dict[str, tuple[int, float, str, VaultEntry, tuple[str, ...]]] = {}
         for candidate in ranked:
+            _check_deadline(deadline)
             content_key = _entry_content_key(
                 candidate[3],
                 include_history=include_history,
@@ -2349,21 +2562,24 @@ def _rank(
                 continue
             unique[content_key] = candidate
         selected = list(unique.values())
-    return [
-        VaultHit(
-            entry=entry,
-            score=score,
-            matched_terms=matched,
-            excerpt=_excerpt(
-                entry,
-                query_terms,
-                include_history=include_history,
-                exclude_historical_material=exclude_historical_material,
-                exclude_current_material=exclude_current_material,
-            ),
+    hits: list[VaultHit] = []
+    for _priority, score, _path, entry, matched in selected:
+        _check_deadline(deadline)
+        hits.append(
+            VaultHit(
+                entry=entry,
+                score=score,
+                matched_terms=matched,
+                excerpt=_excerpt(
+                    entry,
+                    query_terms,
+                    include_history=include_history,
+                    exclude_historical_material=exclude_historical_material,
+                    exclude_current_material=exclude_current_material,
+                ),
+            )
         )
-        for _priority, score, _path, entry, matched in selected
-    ]
+    return hits
 
 
 def _json_text(value: str) -> str:
@@ -2392,22 +2608,36 @@ def _context_item(
     )
 
 
-def _fresh_hits(vault_root: Path, candidates: VaultMap, query: str, top_k: int, memory: MemoryRead) -> list[VaultHit]:
+def _fresh_hits(
+    vault_root: Path,
+    candidates: VaultMap,
+    query: str,
+    top_k: int,
+    memory: MemoryRead,
+    *,
+    deadline: float | None = None,
+) -> list[VaultHit]:
     """Check selected sources before emission, including changes to cited daily proof."""
     checked: set[str] = set()
     unstable_paths = set(getattr(candidates, 'unstable_paths', frozenset()))
     while True:
-        hits = _rank_query(candidates, query, top_k=top_k)
+        _check_deadline(deadline)
+        hits = _rank_query(candidates, query, top_k=top_k, deadline=deadline)
         if not hits and unstable_paths:
             raise OSError('vault-retrieval-incomplete')
         replacements: dict[str, VaultEntry | None] = {}
         for hit in hits:
+            _check_deadline(deadline)
             if hit.entry.path in checked:
                 continue
             checked.add(hit.entry.path)
             current, _post_stat, unstable = _retrieval_entry_snapshot(
-                vault_root, vault_root / hit.entry.path, memory
+                vault_root,
+                vault_root / hit.entry.path,
+                memory,
+                deadline=deadline,
             )
+            _check_deadline(deadline)
             if unstable:
                 unstable_paths.add(hit.entry.path)
                 current = None
@@ -2419,6 +2649,7 @@ def _fresh_hits(vault_root: Path, candidates: VaultMap, query: str, top_k: int, 
         updated: list[VaultEntry] = []
         removed = 0
         for entry in candidates:
+            _check_deadline(deadline)
             current = replacements.get(entry.path, entry)
             if entry.path in replacements:
                 frequency.subtract(entry.all_terms)
@@ -2489,11 +2720,20 @@ def _required_view_sources(
     memory: MemoryRead,
     *,
     alias_entries: Sequence[VaultEntry] | None = None,
+    deadline: float | None = None,
 ) -> list[tuple[str, str]]:
     aliases = _view_aliases(candidates if alias_entries is None else alias_entries)
     selected: dict[str, VaultEntry] = {hit.entry.path: hit.entry for hit in hits}
     for hit in hits:
-        _relative, text = memory.read_source(vault_root / hit.entry.path)
+        _check_deadline(deadline)
+        if deadline is None:
+            _relative, text = memory.read_source(vault_root / hit.entry.path)
+        else:
+            _relative, text = memory.read_source(
+                vault_root / hit.entry.path,
+                deadline=deadline,
+            )
+        _check_deadline(deadline)
         if text is None:
             continue
         for entry in _linked_view_entries(text, aliases):
@@ -2510,21 +2750,42 @@ def retrieve_vault_context_detailed(
     route: str | None = None,
     write_cache: bool = True,
     write_views: bool = True,
+    deadline: float | None = None,
 ) -> VaultContextResult:
+    _check_deadline(deadline)
     if not _retrieval_terms(query):
         return VaultContextResult("skipped", "", 0, 0, (), max_chars)
-    with memory_read(vault_root) as memory:
+    memory_context = (
+        memory_read(vault_root)
+        if deadline is None
+        else memory_read(vault_root, deadline=deadline)
+    )
+    with memory_context as memory:
+        _check_deadline(deadline)
         memory.check_knowledge_snapshot()
         # Route filtresi sorgu başına TEK geçiş: sonuç hem aday havuzu hem sayaç.
         # Cache'lenen korpus document_frequency'si `_routed` üzerinden korunur.
         indexed = _apply_memory_suppressions(
             vault_root,
-            build_vault_map(vault_root, write_cache=write_cache),
+            build_vault_map(
+                vault_root,
+                write_cache=write_cache,
+                deadline=deadline,
+            ),
             memory,
+            deadline=deadline,
         )
+        _check_deadline(deadline)
         candidates = _routed(indexed, route)
         eligible = len(candidates)
-        hits = _fresh_hits(vault_root, candidates, query, top_k, memory)
+        hits = _fresh_hits(
+            vault_root,
+            candidates,
+            query,
+            top_k,
+            memory,
+            deadline=deadline,
+        )
         if not hits:
             return VaultContextResult(
                 "empty",
@@ -2558,6 +2819,7 @@ def retrieve_vault_context_detailed(
         parts = [header]
         emitted_hits: list[VaultHit] = []
         for hit in hits:
+            _check_deadline(deadline)
             view_path = (
                 memory_view_relative_path(hit.entry.path)
                 if memory.active
@@ -2588,16 +2850,19 @@ def retrieve_vault_context_detailed(
             emitted_hits,
             memory,
             alias_entries=indexed,
+            deadline=deadline,
         )
         if memory.active and write_views:
             views = memory.views(
                 view_sources,
                 alias_sources=[(entry.path, entry.title) for entry in indexed],
+                deadline=deadline,
             )
         elif memory.active:
             _rendered, views = memory.render_views(
                 view_sources,
                 alias_sources=[(entry.path, entry.title) for entry in indexed],
+                deadline=deadline,
             )
         else:
             views = {}
@@ -2605,6 +2870,7 @@ def retrieve_vault_context_detailed(
         emitted_paths: list[str] = []
         parts = [header]
         for hit in emitted_hits:
+            _check_deadline(deadline)
             expected_path = (
                 memory_view_relative_path(hit.entry.path)
                 if memory.active
@@ -2623,6 +2889,7 @@ def retrieve_vault_context_detailed(
             )
             emitted_paths.append(hit.entry.path)
         text = "\n".join(parts)
+        _check_deadline(deadline)
         return VaultContextResult(
             "emitted",
             text,
