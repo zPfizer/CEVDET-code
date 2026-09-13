@@ -144,7 +144,7 @@ class HookIntegrationTests(unittest.TestCase):
                     {
                         "session_id": session_id,
                         "cwd": str(vault),
-                        "prompt": "ok",
+                        "prompt": "devam et",
                     },
                     state,
                     vault_root=vault,
@@ -156,6 +156,7 @@ class HookIntegrationTests(unittest.TestCase):
 
         self.assertLess(elapsed, 0.45)
         self.assertIn("Profil kontrolü başarısız", context)
+        self.assertTrue(getattr(context, "deadline_expired", False))
 
     def test_session_start_propagates_one_deadline_to_context_queue_and_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

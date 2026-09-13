@@ -854,7 +854,14 @@ def handle_user_prompt(
             meaningful=meaningful_prompt,
             deadline=deadline,
         )
-    except (OSError, ValueError, LockUnavailable):
+    except TimeoutError:
+        deadline_expired = True
+        count = 0
+    except LockUnavailable:
+        if deadline is not None and time.monotonic() >= deadline:
+            deadline_expired = True
+        count = 0
+    except (OSError, ValueError):
         count = 0
     if count == 1 and meaningful_prompt and directive is not None and directive.kind in {'ordinary', 'correct', 'what-known', 'read-only'}:
         context.append(_memory_behavior_contract())
