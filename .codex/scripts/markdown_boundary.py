@@ -16,7 +16,7 @@ HTML_LITERAL_CLOSE = re.compile(
     r"</(?P<tag>pre|script|style|textarea)[ \t]*>",
     re.IGNORECASE,
 )
-HTML_CODE_OPEN = re.compile(r"<code(?:[ \t/>]|$)", re.IGNORECASE)
+HTML_CODE_OPEN = re.compile(r"<code(?:[ \t\r\n/>]|$)", re.IGNORECASE)
 HTML_CODE_CLOSE = re.compile(r"</code[ \t]*>", re.IGNORECASE)
 INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
 LIST_ITEM = re.compile(
@@ -198,6 +198,21 @@ def _container_body(
     return remainder
 
 
+def _continuation_fence_parts(
+    content: str,
+    list_contexts: list[tuple[int, int]],
+) -> tuple[tuple[tuple[str, int], ...], str, str] | None:
+    for _indentation, content_indent in reversed(list_contexts):
+        container = (("list", content_indent),)
+        remainder = _container_body(content, container)
+        if remainder is None:
+            continue
+        match = _fence_match(remainder)
+        if match is not None:
+            return container, match.group(1), match.group(2)
+    return None
+
+
 def _is_html_literal_open(content: str) -> bool:
     remainder, _container = _container_prefix(content)
     return HTML_LITERAL_OPEN.match(remainder) is not None
@@ -311,6 +326,10 @@ def markdown_body(
                 paragraph_active = False
                 continue
         fence = _fence_parts(content, container=fence_container)
+        if fence_container is None and fence is not None and not fence[0]:
+            continuation = _continuation_fence_parts(content, list_contexts)
+            if continuation is not None:
+                fence = continuation
         if fence_char is not None:
             if (
                 fence_container is not None

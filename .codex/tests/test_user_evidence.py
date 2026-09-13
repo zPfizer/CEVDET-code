@@ -245,6 +245,22 @@ class UserEvidenceTests(unittest.TestCase):
         self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
         self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
 
+    def test_multiline_inline_html_code_model_source_example_stays_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '<code\nclass="example">\n'
+            + decision('Kısa yanıt tercihi.', quote) + '\n'
+            '</code>'
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
     def test_source_marker_inside_html_attribute_is_not_provenance(self):
         quote = 'Bundan sonra kısa yanıt ver.'
         marker = decision('Kısa yanıt tercihi.', quote).split(' <!--', 1)[1]

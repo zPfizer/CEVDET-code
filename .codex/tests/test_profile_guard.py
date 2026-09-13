@@ -298,6 +298,7 @@ class ProfileGuardTests(unittest.TestCase):
         for example in (
             '> ~~~\n> model example\n\n[[missing-after-quote-fence]]',
             '- ```\n  model example\n\n[[missing-after-list-fence]]',
+            '- item\n  ```\n  model example\n\n[[missing-after-list-continuation-fence]]',
         ):
             with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
