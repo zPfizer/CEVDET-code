@@ -281,6 +281,19 @@ class ProfileGuardTests(unittest.TestCase):
 
         self.assertEqual(issues, ['profile-link-broken'])
 
+    def test_unclosed_container_fences_do_not_hide_following_links(self) -> None:
+        for example in (
+            '> ~~~\n> model example\n\n[[missing-after-quote-fence]]',
+            '- ```\n  model example\n\n[[missing-after-list-fence]]',
+        ):
+            with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                issues: list[str] = []
+
+                profile_guard._check_links(example, root, issues)
+
+            self.assertEqual(issues, ['profile-link-broken'])
+
     def test_broken_and_outside_links_are_rejected_without_echoing_content(self) -> None:
         broken = PROFILE_TEXT.replace("tercih-kisa#Kayıtlar", "kayip#Kayıtlar")
         outside = PROFILE_TEXT.replace(

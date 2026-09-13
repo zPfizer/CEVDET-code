@@ -126,6 +126,26 @@ def _is_html_pre_open(content: str) -> bool:
     return HTML_PRE_OPEN.match(remainder) is not None
 
 
+def _container_present(
+    content: str,
+    container: tuple[int, int | None],
+) -> bool:
+    remainder = content
+    quote_depth = 0
+    while (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
+        quote_depth += 1
+        remainder = remainder[prefix.end():]
+    expected_quote_depth, list_indent = container
+    if quote_depth < expected_quote_depth:
+        return False
+    if list_indent is None or quote_depth > expected_quote_depth:
+        return True
+    if not content.strip():
+        return True
+    prefix = remainder[:list_indent]
+    return len(prefix) == list_indent and all(char in " \t" for char in prefix)
+
+
 def _is_paragraph_line(content: str) -> bool:
     if not content.strip() or INDENTED_CODE_LINE.match(content):
         return False
@@ -186,7 +206,7 @@ def markdown_body(
     list_contexts: list[tuple[int, int]] = []
     paragraph_active = False
     for index, (start, end, _line_end, content) in enumerate(lines):
-        if index <= frontmatter_end:
+        if index <= frontmatter_end and mask_frontmatter:
             continue
         if html_pre:
             _blank(chars, start, end)
@@ -196,20 +216,29 @@ def markdown_body(
             continue
         fence = _fence_parts(content, container=fence_container)
         if fence_char is not None:
-            _blank(chars, start, end)
             if (
-                fence is not None
-                and fence_container is not None
-                and fence[0] == fence_container
-                and fence[1][0] == fence_char
-                and len(fence[1]) >= fence_length
-                and not fence[2].strip()
+                fence_container is not None
+                and not _container_present(content, fence_container)
             ):
                 fence_char = None
                 fence_length = 0
                 fence_container = None
-            paragraph_active = False
-            continue
+                fence = _fence_parts(content)
+            else:
+                _blank(chars, start, end)
+                if (
+                    fence is not None
+                    and fence_container is not None
+                    and fence[0] == fence_container
+                    and fence[1][0] == fence_char
+                    and len(fence[1]) >= fence_length
+                    and not fence[2].strip()
+                ):
+                    fence_char = None
+                    fence_length = 0
+                    fence_container = None
+                paragraph_active = False
+                continue
         if fence is not None:
             if fence[1][0] == "`" and "`" in fence[2]:
                 paragraph_active = False

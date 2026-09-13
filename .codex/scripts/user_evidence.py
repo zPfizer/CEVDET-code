@@ -221,7 +221,7 @@ def bind_evidence(
             # Models sometimes put the citation directly below its list item.
             # Never cross a blank line/section or silently choose among citations.
             if (SOURCE.fullmatch(visible_line.strip()) and logical_lines
-                    and logical_lines[-1][0].lstrip().startswith(('- ', '* ', '+ '))):
+                    and logical_lines[-1][1].lstrip().startswith(('- ', '* ', '+ '))):
                 raw, visible = logical_lines[-1]
                 logical_lines[-1] = (
                     raw + ' ' + line.strip(),
