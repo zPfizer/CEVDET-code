@@ -101,11 +101,31 @@ def _blank_inline_code(chars: list[str], text: str) -> None:
 def _blank_inline_html_code(chars: list[str], text: str) -> None:
     index = 0
     while (opening := HTML_CODE_OPEN.search(text, index)) is not None:
+        if is_escaped(text, opening.start()):
+            index = opening.end()
+            continue
         closing = HTML_CODE_CLOSE.search(text, opening.end())
         if closing is None:
             return
         _blank(chars, opening.start(), closing.end())
         index = closing.end()
+
+
+def _indented_content(content: str) -> str:
+    """Remove real quote/list containers before testing indented code."""
+    remainder = content
+    while True:
+        if (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
+            remainder = remainder[prefix.end():]
+            continue
+        list_item = LIST_ITEM.match(remainder)
+        if list_item is None:
+            return remainder
+        indent = _indent_columns(list_item.group("indent"))
+        _content_indent, gap_width = _list_content_indent(list_item)
+        if indent >= 4 or gap_width > 4:
+            return remainder
+        remainder = remainder[list_item.end():]
 
 
 def _fence_parts(
@@ -338,7 +358,41 @@ def markdown_body(
                 html_container = container
             paragraph_active = False
             continue
-        indentation = _indent_columns(content[: len(content) - len(content.lstrip(" \t"))])
+        indented_content = _indented_content(content)
+        indentation = _indent_columns(
+            indented_content[: len(indented_content) - len(indented_content.lstrip(" \t"))]
+        )
+        indented_list_item = LIST_ITEM.match(indented_content)
+        excessive_list_gap = (
+            indented_list_item is not None
+            and _list_content_indent(indented_list_item)[1] > 4
+        )
+        indented_code = (
+            INDENTED_CODE_LINE.match(indented_content) is not None
+            or excessive_list_gap
+        )
+        if indented_code:
+            if paragraph_active and indented_content == content and not excessive_list_gap:
+                continue
+            list_context = None
+            if indented_content == content:
+                list_context = next(
+                    (
+                        context
+                        for context in reversed(list_contexts)
+                        if indentation >= context[1]
+                    ),
+                    None,
+                )
+            if (
+                list_context is not None
+                and indentation < list_context[1] + 4
+            ):
+                continue
+            _blank(chars, start, end)
+            list_contexts = []
+            paragraph_active = False
+            continue
         list_item = LIST_ITEM.match(content)
         if list_item is not None:
             content_indent, gap_width = _list_content_indent(list_item)
@@ -359,25 +413,6 @@ def markdown_body(
                 continue
             _blank(chars, start, end)
             list_contexts = []
-            paragraph_active = False
-            continue
-        if INDENTED_CODE_LINE.match(content):
-            if paragraph_active:
-                continue
-            list_context = next(
-                (
-                    context
-                    for context in reversed(list_contexts)
-                    if indentation >= context[1]
-                ),
-                None,
-            )
-            if (
-                list_context is not None
-                and indentation < list_context[1] + 4
-            ):
-                continue
-            _blank(chars, start, end)
             paragraph_active = False
             continue
         if content.strip():

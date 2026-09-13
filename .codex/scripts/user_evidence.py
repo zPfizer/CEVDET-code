@@ -15,6 +15,7 @@ from quote_grammar import QUOTED_CONTENT
 
 SOURCE = re.compile(r'<!-- user-source:\s*(\{[^\n]*\})\s*-->')
 EVIDENCE = re.compile(r'<!-- user-evidence:\s*(\{[^\n]*\})\s*-->')
+HTML_TAG = re.compile(r'<(?:[^"\'>]|"[^"]*"|\'[^\']*\')*>', re.DOTALL)
 USER_ANCHOR = r'(?:#user-[a-f0-9]{64})?'
 USER_LINK = re.compile(r'\[\[daily/(\d{4}-\d{2}-\d{2})#user-([a-f0-9]{64})(?:\|[^\]]+)?\]\]')
 SCOPES = frozenset({'general', 'project', 'session', 'unspecified'})
@@ -144,6 +145,12 @@ def _visible_source_body(text: str) -> str:
     chars = list(masked)
     prefix = '<!-- user-source:'
     for match in SOURCE.finditer(text):
+        if any(
+            tag.start() < match.start() < tag.end()
+            for tag in HTML_TAG.finditer(text)
+        ):
+            chars[match.start():match.end()] = ' ' * (match.end() - match.start())
+            continue
         end = match.start() + len(prefix)
         if masked[match.start():end] == text[match.start():end]:
             chars[match.start():match.end()] = text[match.start():match.end()]
