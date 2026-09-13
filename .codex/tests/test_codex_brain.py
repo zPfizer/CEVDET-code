@@ -4167,6 +4167,35 @@ class HookTests(unittest.TestCase):
         self.assertEqual(enqueue.call_args.args, (payload, "precompact"))
         self.assertIn("deadline", enqueue.call_args.kwargs)
 
+    def test_expired_user_prompt_emits_timeout_context_before_flush_admission(self) -> None:
+        payload = {
+            "session_id": "expired-capture",
+            "cwd": str(CODEX_DIR.parent),
+            "prompt": "Kararım: haftalık planı pazartesi sabahı yapacağım.",
+            "transcript_path": str(CODEX_DIR / "tests" / "fixture.jsonl"),
+        }
+        deadline = time.monotonic() - 1
+
+        with (
+            mock.patch.object(hook, "_hook_deadline", return_value=deadline),
+            mock.patch.object(hook, "_validate_hook_scope"),
+            mock.patch.object(hook, "handle_user_prompt", return_value="[Vault Arama Süresi Doldu]"),
+            mock.patch.object(hook, "enqueue_flush") as enqueue,
+            mock.patch.object(hook, "record_hook_runtime"),
+            mock.patch.object(hook, "clear_hook_health"),
+            mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+            mock.patch.object(sys, "stdout", io.StringIO()) as stdout,
+        ):
+            exit_code = hook.main(["user-prompt"])
+
+        self.assertEqual(exit_code, 0)
+        enqueue.assert_not_called()
+        emitted = json.loads(stdout.getvalue())
+        self.assertIn(
+            "Vault Arama Süresi Doldu",
+            emitted["hookSpecificOutput"]["additionalContext"],
+        )
+
     def test_transient_user_prompt_does_not_start_conversation_flush(self) -> None:
         payload = {
             "session_id": "transient-capture",

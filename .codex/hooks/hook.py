@@ -1429,6 +1429,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 and not is_read_only_turn(STATE_DIR, session_id)
                 and isinstance(transcript_path, str)
                 and transcript_path
+                and (
+                    hook_deadline is None
+                    or timeout_for_deadline(hook_deadline) > 0
+                )
             ):
                 enqueue_flush(payload, "precompact", deadline=hook_deadline)
         elif args.event == "pre-compact":

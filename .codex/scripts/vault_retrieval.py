@@ -2104,7 +2104,9 @@ def _rank_query(
     query: str,
     *,
     top_k: int = MAX_CANDIDATES,
+    deadline: float | None = None,
 ) -> list[VaultHit]:
+    _check_deadline(deadline)
     exclusion = _split_selection_exclusion(query)
     if exclusion is not None:
         query, _excluded_query, exclude_historical_material, exclude_current_material = exclusion
@@ -2118,7 +2120,13 @@ def _rank_query(
             "exclude_historical_material": exclude_historical_material,
             "exclude_current_material": exclude_current_material,
         }
-        current_hits = _rank(entries, current_query, top_k=top_k, **view_options)
+        current_hits = _rank(
+            entries,
+            current_query,
+            top_k=top_k,
+            deadline=deadline,
+            **view_options,
+        )
         current_paths = {hit.entry.path for hit in current_hits}
         current_keys = {
             _entry_content_key(
@@ -2129,25 +2137,32 @@ def _rank_query(
             for hit in current_hits
         } if top_k <= MAX_CANDIDATES else set()
         # Remove cross-scope duplicates before the history limit; excerpts stay bounded.
+        history_candidates: list[VaultEntry] = []
+        for entry in entries:
+            _check_deadline(deadline)
+            if entry.path in current_paths:
+                continue
+            if current_keys and _entry_content_key(
+                entry,
+                include_history=not exclude_historical_material,
+                **view_options,
+            ) in current_keys:
+                continue
+            history_candidates.append(entry)
         history_entries = VaultMap(
-            [
-                entry for entry in entries
-                if entry.path not in current_paths
-                and (
-                    not current_keys
-                    or _entry_content_key(
-                        entry,
-                        include_history=not exclude_historical_material,
-                        **view_options,
-                    ) not in current_keys
-                )
-            ],
+            history_candidates,
             entries.document_frequency,
             entries.corpus_size,
             cache_result=entries.cache_result,
             unstable_paths=entries.unstable_paths,
         )
-        history_hits = _rank(history_entries, history_query, top_k=top_k, **view_options)
+        history_hits = _rank(
+            history_entries,
+            history_query,
+            top_k=top_k,
+            deadline=deadline,
+            **view_options,
+        )
         return _merge_scoped_hits(current_hits, history_hits, top_k=top_k)
     terms = _retrieval_terms(query)
     preserve_current_stale_penalty = _should_preserve_current_stale_penalty(query, terms)
@@ -2155,6 +2170,7 @@ def _rank_query(
         entries,
         query,
         top_k=top_k,
+        deadline=deadline,
         preserve_current_stale_penalty=preserve_current_stale_penalty,
         exclude_historical_material=exclude_historical_material,
         exclude_current_material=exclude_current_material,
@@ -2199,10 +2215,12 @@ def _rank(
     query: str,
     *,
     top_k: int = MAX_CANDIDATES,
+    deadline: float | None = None,
     preserve_current_stale_penalty: bool = False,
     exclude_historical_material: bool = False,
     exclude_current_material: bool = False,
 ) -> list[VaultHit]:
+    _check_deadline(deadline)
     query_terms = _retrieval_terms(query)
     query_acronyms = frozenset(_normalize(value) for value in ACRONYM.findall(query))
     if not query_terms or not entries or top_k <= 0:
@@ -2224,6 +2242,7 @@ def _rank(
     })
     eligible_entries = []
     for entry in entries:
+        _check_deadline(deadline)
         if (
             (exclude_historical_material and _is_historical_preference_material(entry))
             or (exclude_current_material and _is_current_material(entry))
@@ -2237,6 +2256,7 @@ def _rank(
     if not include_history:
         document_frequency = Counter(document_frequency)
         for entry in entries:
+            _check_deadline(deadline)
             current_terms = _entry_terms(
                 entry,
                 include_history=False,
@@ -2244,21 +2264,25 @@ def _rank(
                 exclude_current_material=exclude_current_material,
             )
             for term in set(entry.historical_body_terms) - set(entry.body_terms):
+                _check_deadline(deadline)
                 if term not in current_terms and document_frequency[term] > 0:
                     document_frequency[term] -= 1
-    matching_entries = [
-        entry for entry in eligible_entries
+    matching_entries: list[VaultEntry] = []
+    for entry in eligible_entries:
+        _check_deadline(deadline)
         if query_terms & _entry_terms(
             entry,
             include_history=include_history,
             exclude_historical_material=exclude_historical_material,
             exclude_current_material=exclude_current_material,
-        )
-    ]
+        ):
+            matching_entries.append(entry)
     # IDF's population must match corpus document_frequency, including other routes.
     total = max(entries.corpus_size, 1)
-    average_length = sum(
-        sum(
+    total_matching_length = 0
+    for entry in matching_entries:
+        _check_deadline(deadline)
+        total_matching_length += sum(
             _entry_body_terms(
                 entry,
                 include_history=include_history,
@@ -2266,10 +2290,10 @@ def _rank(
                 exclude_current_material=exclude_current_material,
             ).values()
         )
-        for entry in matching_entries
-    ) / max(len(matching_entries), 1)
+    average_length = total_matching_length / max(len(matching_entries), 1)
     ranked: list[tuple[int, float, str, VaultEntry, tuple[str, ...]]] = []
     for entry in eligible_entries:
+        _check_deadline(deadline)
         matched = query_terms & _entry_terms(
             entry,
             include_history=include_history,
@@ -2278,6 +2302,7 @@ def _rank(
         )
         if not matched:
             continue
+        _check_deadline(deadline)
         acronym_anchor = query_acronyms & matched
         symbol_anchor = matched & entry.symbol_terms
         # A fully named note is evidence even when the rest is conversational.
@@ -2303,6 +2328,7 @@ def _rank(
         )
         length_ratio = sum(body_terms.values()) / max(average_length, 1)
         for term in matched:
+            _check_deadline(deadline)
             inverse_frequency = math.log((total + 1) / (document_frequency[term] + 1)) + 1
             frequency = body_terms.get(term, 0)
             weight = frequency * 2.2 / (frequency + 1.2 * (0.25 + 0.75 * length_ratio))
@@ -2342,16 +2368,19 @@ def _rank(
         priority += int(vault_system_query and ('vault' in matched or title_anchor))
         ranked.append((priority, score, entry.path, entry, tuple(sorted(matched))))
     # Excerpt render'ı sıralamadan SONRA: yalnız kazanan top_k dilimi ödenir.
+    _check_deadline(deadline)
     ranked.sort(key=lambda candidate: (
         -candidate[0],
         -candidate[1],
         -int(history_mode and _is_historical_preference_material(candidate[3])),
         candidate[2],
     ))
+    _check_deadline(deadline)
     selected = ranked[:top_k]
     if top_k <= MAX_CANDIDATES:
         unique: dict[str, tuple[int, float, str, VaultEntry, tuple[str, ...]]] = {}
         for candidate in ranked:
+            _check_deadline(deadline)
             content_key = _entry_content_key(
                 candidate[3],
                 include_history=include_history,
@@ -2375,21 +2404,24 @@ def _rank(
                 continue
             unique[content_key] = candidate
         selected = list(unique.values())
-    return [
-        VaultHit(
-            entry=entry,
-            score=score,
-            matched_terms=matched,
-            excerpt=_excerpt(
-                entry,
-                query_terms,
-                include_history=include_history,
-                exclude_historical_material=exclude_historical_material,
-                exclude_current_material=exclude_current_material,
-            ),
+    hits: list[VaultHit] = []
+    for _priority, score, _path, entry, matched in selected:
+        _check_deadline(deadline)
+        hits.append(
+            VaultHit(
+                entry=entry,
+                score=score,
+                matched_terms=matched,
+                excerpt=_excerpt(
+                    entry,
+                    query_terms,
+                    include_history=include_history,
+                    exclude_historical_material=exclude_historical_material,
+                    exclude_current_material=exclude_current_material,
+                ),
+            )
         )
-        for _priority, score, _path, entry, matched in selected
-    ]
+    return hits
 
 
 def _json_text(value: str) -> str:
@@ -2432,7 +2464,7 @@ def _fresh_hits(
     unstable_paths = set(getattr(candidates, 'unstable_paths', frozenset()))
     while True:
         _check_deadline(deadline)
-        hits = _rank_query(candidates, query, top_k=top_k)
+        hits = _rank_query(candidates, query, top_k=top_k, deadline=deadline)
         if not hits and unstable_paths:
             raise OSError('vault-retrieval-incomplete')
         replacements: dict[str, VaultEntry | None] = {}
