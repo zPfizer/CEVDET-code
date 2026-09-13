@@ -18,6 +18,7 @@ from _fixtures import SCRIPTS_DIR
 import flush
 import hook
 import memory_ledger
+import state_store
 import worker_supervisor as workers
 
 
@@ -38,6 +39,52 @@ def _queue_report(*, pending: int = 0) -> dict[str, object]:
 
 
 class HookIntegrationTests(unittest.TestCase):
+    @unittest.skipUnless(state_store.os.name == "nt", "Windows sharing retry")
+    def test_reflection_conversation_write_bounds_sharing_retry_and_preserves_pending_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            session_id = "reflection-deadline"
+            conversation = state / f"conversation-{hook.session_key(session_id)}.json"
+            conversation.write_text(
+                json.dumps({"prompt_count": 5, "meaningful_prompt_seen": True}),
+                encoding="utf-8",
+            )
+            original = conversation.read_bytes()
+            attempts = 0
+            deadline = time.monotonic() + 0.2
+            real_replace = state_store.os.replace
+
+            def sharing_conflict(source: Path, destination: Path) -> None:
+                nonlocal attempts
+                if Path(destination) != conversation:
+                    real_replace(source, destination)
+                    return
+                attempts += 1
+                error = PermissionError("synthetic sharing conflict")
+                error.winerror = 32
+                raise error
+
+            started = time.monotonic()
+            with (
+                mock.patch.object(hook, "STATE_DIR", state),
+                mock.patch.object(state_store.os, "replace", side_effect=sharing_conflict),
+            ):
+                with self.assertRaisesRegex(PermissionError, "synthetic sharing conflict"):
+                    hook._mark_reflection_if_needed(
+                        {"session_id": session_id}, deadline=deadline
+                    )
+            elapsed = time.monotonic() - started
+
+            record = json.loads(conversation.read_text(encoding="utf-8"))
+            self.assertEqual(conversation.read_bytes(), original)
+            self.assertTrue(record["meaningful_prompt_seen"])
+            self.assertNotIn("reflection_checked", record)
+            self.assertTrue(any((state / "reflection-requests").glob("*.json")))
+            self.assertEqual(list(state.glob("*.tmp")), [])
+
+        self.assertGreaterEqual(attempts, 2)
+        self.assertLess(elapsed, 0.75)
+
     def test_session_start_propagates_one_deadline_to_context_queue_and_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

@@ -16,6 +16,7 @@ from _fixtures import CODEX_DIR  # noqa: F401
 import companion_memory as companion
 import flush
 from memory_ledger import load_suppressed_hashes, memory_read, suppress_derived_memory
+import state_store
 
 
 IDENTITY = "1" * 64
@@ -115,6 +116,42 @@ class ReflectionGuards(unittest.TestCase):
             )
             token = companion.capture_reflection(state, "oturum")
         self.assertIsNotNone(token.request_id)
+
+    @unittest.skipUnless(os.name == "nt", "Windows sharing retry")
+    def test_request_reflection_bounds_sharing_retry_and_preserves_pending_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            target = companion._reflection_path(state, "oturum")
+            target.parent.mkdir()
+            original = json.dumps(
+                {
+                    "schema": 1,
+                    "session_key": companion.session_scope("oturum"),
+                    "request_id": "a" * 32,
+                },
+                separators=(",", ":"),
+            ).encode("utf-8") + b"\n"
+            target.write_bytes(original)
+            attempts = 0
+            deadline = time.monotonic() + 0.2
+
+            def sharing_conflict(_source: Path, _destination: Path) -> None:
+                nonlocal attempts
+                attempts += 1
+                error = PermissionError("synthetic sharing conflict")
+                error.winerror = 32
+                raise error
+
+            started = time.monotonic()
+            with mock.patch.object(state_store.os, "replace", side_effect=sharing_conflict):
+                with self.assertRaisesRegex(PermissionError, "synthetic sharing conflict"):
+                    companion.request_reflection(state, "oturum", deadline=deadline)
+            elapsed = time.monotonic() - started
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual(list(target.parent.glob("*.tmp")), [])
+
+        self.assertGreaterEqual(attempts, 2)
+        self.assertLess(elapsed, 0.75)
 
 
 class SessionParsingGuards(unittest.TestCase):
