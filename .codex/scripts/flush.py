@@ -481,7 +481,7 @@ class SessionSummary:
         matches = markdown_headings(stripped)
         for index, (_, section, _start, heading_end) in enumerate(matches):
             end = matches[index + 1][2] if index + 1 < len(matches) else len(stripped)
-            bodies[section] = stripped[heading_end:end].strip()
+            bodies[section] = stripped[heading_end:end].strip("\r\n")
         return cls(bodies)
 
     @classmethod

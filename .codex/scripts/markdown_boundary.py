@@ -16,6 +16,8 @@ HTML_LITERAL_CLOSE = re.compile(
     r"</(?P<tag>pre|script|style|textarea)[ \t]*>",
     re.IGNORECASE,
 )
+HTML_CODE_OPEN = re.compile(r"<code(?:[ \t/>]|$)", re.IGNORECASE)
+HTML_CODE_CLOSE = re.compile(r"</code[ \t]*>", re.IGNORECASE)
 INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
 LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])(?P<gap>[ \t]+|$)"
@@ -46,11 +48,20 @@ def _blank(chars: list[str], start: int, end: int) -> None:
             chars[index] = " "
 
 
-def _indent_columns(value: str) -> int:
-    columns = 0
+def _indent_columns(value: str, start: int = 0) -> int:
+    columns = start
     for char in value:
         columns += 4 - (columns % 4) if char == "\t" else 1
-    return columns
+    return columns - start
+
+
+def _list_content_indent(list_item: re.Match[str]) -> tuple[int, int]:
+    indent = list_item.group("indent")
+    marker = list_item.group("marker")
+    gap = list_item.group("gap")
+    marker_end = _indent_columns(indent) + len(marker)
+    gap_width = _indent_columns(gap, marker_end) if gap else 0
+    return marker_end + (gap_width if gap else 1), gap_width
 
 
 def _fence_match(content: str) -> re.Match[str] | None:
@@ -87,6 +98,16 @@ def _blank_inline_code(chars: list[str], text: str) -> None:
         index = close + len(delimiter)
 
 
+def _blank_inline_html_code(chars: list[str], text: str) -> None:
+    index = 0
+    while (opening := HTML_CODE_OPEN.search(text, index)) is not None:
+        closing = HTML_CODE_CLOSE.search(text, opening.end())
+        if closing is None:
+            return
+        _blank(chars, opening.start(), closing.end())
+        index = closing.end()
+
+
 def _fence_parts(
     content: str,
     *,
@@ -120,14 +141,10 @@ def _container_prefix(
         list_item = LIST_ITEM.match(remainder)
         if list_item is None:
             break
-        gap = list_item.group("gap")
-        if gap and len(gap) > 4:
+        _content_indent, gap_width = _list_content_indent(list_item)
+        if gap_width > 4:
             return content, ()
-        content_indent = (
-            len(list_item.group("indent"))
-            + len(list_item.group("marker"))
-            + (len(gap) if gap else 1)
-        )
+        content_indent = _content_indent
         containers.append(("list", content_indent))
         remainder = remainder[list_item.end():]
     return remainder, tuple(containers)
@@ -147,12 +164,17 @@ def _container_body(
             if quote_depth != value:
                 return None
             continue
-        if len(remainder) < value:
+        columns = 0
+        index = 0
+        while index < len(remainder) and columns < value:
+            char = remainder[index]
+            if char not in " \t":
+                return None
+            columns += 4 - (columns % 4) if char == "\t" else 1
+            index += 1
+        if columns < value:
             return None
-        prefix = remainder[:value]
-        if not prefix or not all(char in " \t" for char in prefix):
-            return None
-        remainder = remainder[value:]
+        remainder = remainder[index:]
     return remainder
 
 
@@ -179,10 +201,17 @@ def _container_present(
             continue
         if not content.strip():
             return True
-        prefix = remainder[:value]
-        if len(prefix) != value or not all(char in " \t" for char in prefix):
+        columns = 0
+        index = 0
+        while index < len(remainder) and columns < value:
+            char = remainder[index]
+            if char not in " \t":
+                return False
+            columns += 4 - (columns % 4) if char == "\t" else 1
+            index += 1
+        if columns < value:
             return False
-        remainder = remainder[value:]
+        remainder = remainder[index:]
     return True
 
 
@@ -309,11 +338,11 @@ def markdown_body(
                 html_container = container
             paragraph_active = False
             continue
-        indentation = len(content) - len(content.lstrip(" \t"))
+        indentation = _indent_columns(content[: len(content) - len(content.lstrip(" \t"))])
         list_item = LIST_ITEM.match(content)
         if list_item is not None:
-            gap = list_item.group("gap")
-            if gap and len(gap) > 4:
+            content_indent, gap_width = _list_content_indent(list_item)
+            if gap_width > 4:
                 _blank(chars, start, end)
                 list_contexts = []
                 paragraph_active = False
@@ -325,11 +354,6 @@ def markdown_body(
                     for context in list_contexts
                     if context[0] < indentation
                 ]
-                content_indent = (
-                    indentation
-                    + len(list_item.group("marker"))
-                    + (len(gap) if gap else 1)
-                )
                 list_contexts.append((indentation, content_indent))
                 paragraph_active = False
                 continue
@@ -361,6 +385,7 @@ def markdown_body(
         paragraph_active = _is_paragraph_line(content)
     if mask_inline_code:
         _blank_inline_code(chars, "".join(chars))
+        _blank_inline_html_code(chars, "".join(chars))
     return "".join(chars)
 
 

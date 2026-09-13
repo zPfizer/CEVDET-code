@@ -2,6 +2,7 @@ import json
 import unittest
 
 from _fixtures import CODEX_DIR
+import flush
 import user_evidence as evidence
 
 
@@ -231,6 +232,48 @@ class UserEvidenceTests(unittest.TestCase):
                 self.assertEqual(output['Alınan Kararlar'], '')
                 self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
                 self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_inline_html_code_model_source_example_stays_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '<code>' + decision('Kısa yanıt tercihi.', quote) + '</code>'
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_tab_list_marker_gap_does_not_close_a_fenced_example(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '-\t~~~json\n'
+            '  model example\n'
+            '  ~~~\n'
+            + decision('Kısa yanıt tercihi.', quote)
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_session_summary_parse_preserves_indented_examples_before_binding(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '    ' + decision('Kısa yanıt tercihi.', quote)
+        parsed = flush.SessionSummary.parse(
+            flush.SessionSummary(sections(forged)).render()
+        ).sections
+
+        self.assertTrue(parsed['Alınan Kararlar'].startswith('    - '))
+        output = evidence.bind_evidence(parsed, [('user', quote)], STAMP)
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
 
     def test_pre_slash_opener_keeps_following_model_source_untrusted(self):
         quote = 'Bundan sonra kısa yanıt ver.'
