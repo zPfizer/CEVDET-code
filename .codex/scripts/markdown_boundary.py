@@ -65,22 +65,51 @@ def _blank_inline_code(chars: list[str], text: str) -> None:
         index = close + len(delimiter)
 
 
-def _fence_parts(content: str) -> tuple[int, str, str] | None:
-    match = FENCE_LINE.fullmatch(content)
-    if match is not None:
-        return 0, match.group(1), match.group(2)
-
+def _fence_parts(
+    content: str,
+    *,
+    container: tuple[int, int | None] | None = None,
+) -> tuple[tuple[int, int | None], str, str] | None:
     remainder = content
-    depth = 0
+    quote_depth = 0
     while (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
-        depth += 1
+        quote_depth += 1
         remainder = remainder[prefix.end():]
-    if depth == 0:
+
+    if container is not None:
+        expected_quote_depth, list_indent = container
+        if quote_depth != expected_quote_depth:
+            return None
+        if list_indent is not None:
+            if len(remainder) < list_indent:
+                return None
+            prefix = remainder[:list_indent]
+            if not prefix or not all(char in " \t" for char in prefix):
+                return None
+            remainder = remainder[list_indent:]
+        match = FENCE_LINE.fullmatch(remainder)
+        if match is None:
+            return None
+        return container, match.group(1), match.group(2)
+
+    match = FENCE_LINE.fullmatch(remainder)
+    if match is not None:
+        return (quote_depth, None), match.group(1), match.group(2)
+
+    list_item = LIST_ITEM.match(remainder)
+    if list_item is None:
         return None
+    remainder = remainder[list_item.end():]
     match = FENCE_LINE.fullmatch(remainder)
     if match is None:
         return None
-    return depth, match.group(1), match.group(2)
+    gap = list_item.group("gap")
+    content_indent = (
+        len(list_item.group("indent"))
+        + len(list_item.group("marker"))
+        + (len(gap) if gap else 1)
+    )
+    return (quote_depth, content_indent), match.group(1), match.group(2)
 
 
 def _is_paragraph_line(content: str) -> bool:
@@ -138,25 +167,26 @@ def markdown_body(
 
     fence_char: str | None = None
     fence_length = 0
-    fence_depth = 0
+    fence_container: tuple[int, int | None] | None = None
     list_contexts: list[tuple[int, int]] = []
     paragraph_active = False
     for index, (start, end, _line_end, content) in enumerate(lines):
         if index <= frontmatter_end:
             continue
-        fence = _fence_parts(content)
+        fence = _fence_parts(content, container=fence_container)
         if fence_char is not None:
             _blank(chars, start, end)
             if (
                 fence is not None
-                and fence[0] == fence_depth
+                and fence_container is not None
+                and fence[0] == fence_container
                 and fence[1][0] == fence_char
                 and len(fence[1]) >= fence_length
                 and not fence[2].strip()
             ):
                 fence_char = None
                 fence_length = 0
-                fence_depth = 0
+                fence_container = None
             paragraph_active = False
             continue
         if fence is not None:
@@ -165,7 +195,7 @@ def markdown_body(
                 continue
             fence_char = fence[1][0]
             fence_length = len(fence[1])
-            fence_depth = fence[0]
+            fence_container = fence[0]
             _blank(chars, start, end)
             paragraph_active = False
             continue
