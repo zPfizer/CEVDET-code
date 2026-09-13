@@ -224,7 +224,11 @@ HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY = (
     rf"(?=\s*(?:[,.!?;:\r\n]|$|(?:ve|ile)\s+{CURRENT_QUERY_CUE}\b))"
 )
 HISTORY_TURKISH_INTERNAL_DOT = re.compile(r"(?<=\w)\.(?=\w)|(?<=\b\w\.\w)\.(?=\s)")
-HISTORY_TURKISH_RELATIVE_PAST = re.compile(r"\w+[dt][iu](?:g(?:im(?:iz)?|in(?:iz)?|i)|k(?:lari|leri))")
+HISTORY_TURKISH_RELATIVE_PAST = re.compile(
+    r"\w+[dt][iu](?:g(?:im(?:iz)?|in(?:iz)?|i)|k(?:lar|ler)(?:im(?:iz)?|in(?:iz)?|i))"
+    r"(?:n?[dt][ae]n?|n?[aeiu]|n?[iu]n|y?[ae]|y?[iu]|y?l[ae])?"
+)
+HISTORY_TURKISH_COUNTERFACTUAL = re.compile(r"olsa(?:m|n|k|niz|lar|ydi(?:m|n|k|niz|lar)?)?")
 HISTORY_TURKISH_RELATIVE_QUESTION = r"hangi(?:si|leri)(?:dir)?"
 HISTORY_TURKISH_RETROSPECTIVE_ENDING = (
     rf"(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi|{HISTORY_TURKISH_RELATIVE_QUESTION})"
@@ -1639,6 +1643,9 @@ def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
     relative_positions = [
         word.start() for word in lexical_words if HISTORY_TURKISH_RELATIVE_PAST.fullmatch(word.group())
     ]
+    counterfactual_positions = [
+        word.start() for word in lexical_words if HISTORY_TURKISH_COUNTERFACTUAL.fullmatch(word.group())
+    ]
     question_positions = [
         word.start() for word in lexical_words if _retrospective_question_terms(word.group())
     ]
@@ -1658,11 +1665,15 @@ def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
         if index < 0 or starts[index] in accepted:
             continue
         start = starts[index]
+        conditional = bisect_left(counterfactual_positions, ending.start()) - 1
         if (
             HISTORY_TURKISH_DECISION_AORIST.match(ending.group())
-            and start in purpose_starts
+            and (
+                start in purpose_starts
+                or (conditional >= 0 and counterfactual_positions[conditional] >= start)
+            )
         ):
-            continue  # A conditional choice for an earlier-finish goal is prospective advice.
+            continue  # Explicit hypothetical choices are advice, not recalled decisions.
         clause_end = bisect_left(clause_ends, start)
         if clause_end < len(clause_ends) and clause_ends[clause_end] < ending.start():
             continue
