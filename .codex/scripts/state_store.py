@@ -320,6 +320,10 @@ def atomic_write_text(
     keep_mode: bool = False,
     deadline: float | None = None,
     overwrite: bool = True,
+    before_replace: Callable[[], object] | None = None,
+    expected_digest: str | None | object = _EXPECTED_DIGEST_UNSET,
+    backup: Path | None = None,
+    on_marker_created: Callable[[], object] | None = None,
 ) -> None:
     """Aynı dizinde temp + `os.replace`; temp adı daima `.{ad}.*.tmp`.
 
@@ -345,7 +349,15 @@ def atomic_write_text(
         if mode is not None:
             temporary.chmod(mode)
         if overwrite:
-            replace_with_retry(temporary, path, deadline=deadline)
+            replace_with_retry(
+                temporary,
+                path,
+                deadline=deadline,
+                before_replace=before_replace,
+                expected_digest=expected_digest,
+                backup=backup,
+                on_marker_created=on_marker_created,
+            )
         else:
             # The guarded create-only path is atomic on both platforms and
             # retries transient Windows sharing violations.
@@ -354,7 +366,10 @@ def atomic_write_text(
                     temporary,
                     path,
                     deadline=deadline,
+                    before_replace=before_replace,
                     expected_digest=None,
+                    backup=backup,
+                    on_marker_created=on_marker_created,
                 )
             except ReplacementConflict as exc:
                 if str(exc) == "replace-target-created":
@@ -369,6 +384,10 @@ def atomic_write_bytes(
     payload: bytes,
     *,
     deadline: float | None = None,
+    before_replace: Callable[[], object] | None = None,
+    expected_digest: str | None | object = _EXPECTED_DIGEST_UNSET,
+    backup: Path | None = None,
+    on_marker_created: Callable[[], object] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -382,7 +401,15 @@ def atomic_write_bytes(
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        replace_with_retry(temporary, path, deadline=deadline)
+        replace_with_retry(
+            temporary,
+            path,
+            deadline=deadline,
+            before_replace=before_replace,
+            expected_digest=expected_digest,
+            backup=backup,
+            on_marker_created=on_marker_created,
+        )
     finally:
         temporary.unlink(missing_ok=True)
 
