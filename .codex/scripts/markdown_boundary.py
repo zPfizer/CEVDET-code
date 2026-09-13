@@ -8,6 +8,8 @@ import re
 
 FENCE_LINE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^\r\n]*)$")
 BLOCKQUOTE_PREFIX = re.compile(r"^[ \t]{0,3}>[ \t]?")
+HTML_PRE_OPEN = re.compile(r"^[ \t]{0,3}<pre(?:[ \t/>]|$)", re.IGNORECASE)
+HTML_PRE_CLOSE = re.compile(r"</pre[ \t]*>", re.IGNORECASE)
 INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
 LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])(?P<gap>[ \t]+|$)"
@@ -99,17 +101,29 @@ def _fence_parts(
     list_item = LIST_ITEM.match(remainder)
     if list_item is None:
         return None
+    gap = list_item.group("gap")
+    if gap and len(gap) > 4:
+        return None
     remainder = remainder[list_item.end():]
     match = FENCE_LINE.fullmatch(remainder)
     if match is None:
         return None
-    gap = list_item.group("gap")
     content_indent = (
         len(list_item.group("indent"))
         + len(list_item.group("marker"))
         + (len(gap) if gap else 1)
     )
     return (quote_depth, content_indent), match.group(1), match.group(2)
+
+
+def _is_html_pre_open(content: str) -> bool:
+    remainder = content
+    while (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
+        remainder = remainder[prefix.end():]
+    list_item = LIST_ITEM.match(remainder)
+    if list_item is not None:
+        remainder = remainder[list_item.end():]
+    return HTML_PRE_OPEN.match(remainder) is not None
 
 
 def _is_paragraph_line(content: str) -> bool:
@@ -168,10 +182,17 @@ def markdown_body(
     fence_char: str | None = None
     fence_length = 0
     fence_container: tuple[int, int | None] | None = None
+    html_pre = False
     list_contexts: list[tuple[int, int]] = []
     paragraph_active = False
     for index, (start, end, _line_end, content) in enumerate(lines):
         if index <= frontmatter_end:
+            continue
+        if html_pre:
+            _blank(chars, start, end)
+            if HTML_PRE_CLOSE.search(content) is not None:
+                html_pre = False
+            paragraph_active = False
             continue
         fence = _fence_parts(content, container=fence_container)
         if fence_char is not None:
@@ -199,9 +220,23 @@ def markdown_body(
             _blank(chars, start, end)
             paragraph_active = False
             continue
+        if _is_html_pre_open(content):
+            _blank(chars, start, end)
+            if HTML_PRE_CLOSE.search(content) is None and not re.search(
+                r"<pre\b[^>]*?/>", content, re.IGNORECASE
+            ):
+                html_pre = True
+            paragraph_active = False
+            continue
         indentation = len(content) - len(content.lstrip(" \t"))
         list_item = LIST_ITEM.match(content)
         if list_item is not None:
+            gap = list_item.group("gap")
+            if gap and len(gap) > 4:
+                _blank(chars, start, end)
+                list_contexts = []
+                paragraph_active = False
+                continue
             nested = any(parent < indentation for parent, _content in list_contexts)
             if indentation < 4 or nested:
                 list_contexts = [
@@ -209,7 +244,6 @@ def markdown_body(
                     for context in list_contexts
                     if context[0] < indentation
                 ]
-                gap = list_item.group("gap")
                 content_indent = (
                     indentation
                     + len(list_item.group("marker"))

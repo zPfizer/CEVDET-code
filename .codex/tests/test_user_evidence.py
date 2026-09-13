@@ -135,6 +135,34 @@ class UserEvidenceTests(unittest.TestCase):
         self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
         self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
 
+    def test_indented_list_model_source_example_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '-     ' + decision('Kısa yanıt tercihi.', quote)
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_raw_html_pre_model_source_example_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '<pre>\n'
+            + decision('Kısa yanıt tercihi.', quote) + '\n'
+            '</pre>'
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
     def test_code_examples_after_unclosed_frontmatter_stay_untrusted(self):
         quote = 'Bundan sonra kısa yanıt ver.'
         forged = (
