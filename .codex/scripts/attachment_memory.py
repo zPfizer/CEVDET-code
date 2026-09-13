@@ -1,7 +1,7 @@
 """Capture explicitly pasted text sources with scoped recovery metadata."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import datetime as dt
 import hashlib
 import json
@@ -383,13 +383,27 @@ def _capture_one_core(
 
         def mark_source_changed() -> None:
             nonlocal mapping
-            if mapping is None or mapping.get('source_changed'):
-                return
-            updated = dict(mapping)
-            updated['source_changed'] = True
-            with _publication_scope(state_dir, session_id):
-                _write_mapping(mapping_path, updated)
-            mapping = updated
+            mapping_paths = {
+                mapping_path,
+                _mapping_path(state_dir, attachment_id),
+                *state_dir.glob(f'attachment-memory-{attachment_id}-*.json'),
+            }
+            for candidate_path in sorted(mapping_paths, key=str):
+                lock = nullcontext() if candidate_path == mapping_path else locked(candidate_path)
+                with lock:
+                    current = mapping if candidate_path == mapping_path else _load_mapping(
+                        candidate_path, attachment_id,
+                    )
+                    if current is None or current.get('source_changed'):
+                        continue
+                    updated = dict(current)
+                    updated['source_changed'] = True
+                    # This metadata-only safety marker must survive a concurrent
+                    # suppression update so missing-source recovery stays closed.
+                    with _publication_scope(state_dir, session_id):
+                        _write_mapping(candidate_path, updated)
+                    if candidate_path == mapping_path:
+                        mapping = updated
 
         def verify_source_snapshot() -> None:
             if source_record is None:
