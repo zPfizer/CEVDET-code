@@ -234,7 +234,9 @@ HISTORY_TURKISH_RETROSPECTIVE_END = re.compile(
     rf"(?ix)\b(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b{HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY}"
 )
 HISTORY_TURKISH_PURPOSE = re.compile(r"\b(?:daha\s+once|onceden)\s+\w+m[ae]k\s+icin\b")
-HISTORY_TURKISH_SELECTION_AORIST = re.compile(rf"secer{HISTORY_TURKISH_PAST_SUFFIX}\b")
+HISTORY_TURKISH_DECISION_AORIST = re.compile(
+    rf"(?:secer|eder|gorur|verir|benimser|kararlastirir){HISTORY_TURKISH_PAST_SUFFIX}\b"
+)
 HISTORY_TURKISH_CURRENT_SELECTION_OBJECT = re.compile(
     rf"\b(?P<current>{CURRENT_QUERY_CUE})\s+(?:\w+\s+)?(?P<relative>\w+)\s+"
     rf"(?P<which>hangi\w*)\s+sec\w*{HISTORY_TURKISH_PAST_SUFFIX}\b"
@@ -1608,7 +1610,6 @@ def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
     predicate_ends = [ending.end() for ending in endings]
     whitespace = re.compile(r"\s*")
     following = {end: whitespace.match(normalized, end).end() for end in predicate_ends}
-    current_positions = [match.start() for match in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized)]
     related_current = _current_selection_object_spans(normalized)
     current_boundaries = []
     for connector in re.finditer(
@@ -1648,14 +1649,11 @@ def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
         if index < 0 or starts[index] in accepted:
             continue
         start = starts[index]
-        current_index = bisect_left(current_positions, start)
         if (
-            HISTORY_TURKISH_SELECTION_AORIST.match(ending.group())
+            HISTORY_TURKISH_DECISION_AORIST.match(ending.group())
             and start in purpose_starts
-            and current_index < len(current_positions)
-            and current_positions[current_index] < ending.start()
         ):
-            continue  # A current choice for an earlier-finish goal is prospective advice.
+            continue  # A conditional choice for an earlier-finish goal is prospective advice.
         clause_end = bisect_left(clause_ends, start)
         if clause_end < len(clause_ends) and clause_ends[clause_end] < ending.start():
             continue
@@ -1987,15 +1985,17 @@ def _split_selection_exclusion(query: str) -> tuple[str, str, bool, bool] | None
 
 
 def _split_current_history_query(query: str) -> tuple[str, str] | None:
-    if not re.search(r"(?i)\b(?:current|güncel|guncel|latest|active|aktif)\b", query):
+    operative_query = _unquoted_request(query, preserve_positions=True)
+    if not re.search(r"(?i)\b(?:current|güncel|guncel|latest|active|aktif)\b", operative_query):
         return None
     # Keep terminal punctuation in its question; internal technical dots are not boundaries.
     sentence_boundaries = (
         match for match in re.finditer(r"(?<=[.!?])\s+", query)
-        if not HISTORY_TURKISH_INTERNAL_DOT.match(query, match.start() - 1)
+        if operative_query[match.start() - 1] in ".!?"
+        and not HISTORY_TURKISH_INTERNAL_DOT.match(operative_query, match.start() - 1)
     )
     raw_connectors = tuple(sorted(
-        [*CURRENT_HISTORY_CONNECTOR.finditer(query), *sentence_boundaries],
+        [*CURRENT_HISTORY_CONNECTOR.finditer(operative_query), *sentence_boundaries],
         key=lambda match: match.start(),
     ))
     if not raw_connectors:
@@ -2019,7 +2019,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
         normalized_cursor += len(normalized_connector)
         raw_cursor = connector.end()
     normalized_parts.append(_normalize(query[raw_cursor:]))
-    normalized = "".join(normalized_parts)
+    normalized = _unquoted_request("".join(normalized_parts), preserve_positions=True)
     related_current = _current_selection_object_spans(normalized)
     current_spans = tuple(
         (match.start(), match.end())
@@ -2184,7 +2184,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
 
 
 def _has_independent_current_cue(query: str) -> bool:
-    normalized = _normalize(query)
+    normalized = _unquoted_request(_normalize(query), preserve_positions=True)
     current_spans = tuple(
         match.span()
         for match in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized)

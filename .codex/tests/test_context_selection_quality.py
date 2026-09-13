@@ -1279,6 +1279,7 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                 "Daha önce veri saklama için hangi planı seçerdik?",
                 "Daha önce veri saklama için ne karar verdin?",
                 "Daha önce bitirmek için hangi veri saklama planını seçmiştik?",
+                "Daha önce bitirmek için veri saklama konusunda ne karar verdin?",
                 "Daha önce veri saklama seçeneklerini test ettik ve güncel kabul ettiklerimizden hangisini seçmiştik?",
                 "Daha önce Python 3.14 ile veri saklama için hangi seçeneği uygun görmüştük?",
                 "Daha önce Node.js ile veri saklama için hangi seçeneği uygun görmüştük?",
@@ -1372,6 +1373,12 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
     def test_past_background_before_current_request_does_not_enable_history(self) -> None:
         advice = "Daha önce bitirmek için hangi güncel planı seçerdin?"
         self.assertFalse(retrieval._is_history_query(retrieval._retrieval_terms(advice), advice))
+        for choice in ("seçerdin", "tercih ederdin", "benimserdin", "uygun görürdün", "kararlaştırırdın"):
+            advice = f"Daha önce bitirmek için hangi veri saklama planını {choice}?"
+            with self.subTest(choice=choice):
+                self.assertFalse(retrieval._is_history_query(retrieval._retrieval_terms(advice), advice))
+        advice = "Daha önce bitirmek için veri saklama konusunda ne karar verirdin?"
+        self.assertFalse(retrieval._is_history_query(retrieval._retrieval_terms(advice), advice))
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             current = "🧠 500-Knowledge/veri-saklama-guncel.md"
@@ -1429,6 +1436,36 @@ Geçmiş veri saklama kararı: uzun günlükler.
                     self.assertFalse(retrieval._is_history_query(terms, query))
                     hits = retrieval.search_vault(entries, query, top_k=2)
                     self.assertEqual([hit.entry.path for hit in hits], [current])
+
+    def test_quoted_current_label_does_not_demote_requested_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            historical = "🎯 100-Command-Center/record-old.md"
+            for number, variant in enumerate(("alfa", "beta", "gama", "eski")):
+                path = historical if number == 3 else f"🎯 100-Command-Center/record-{number}.md"
+                status = "completed" if number == 3 else "active"
+                _write(root, path, f"---\ntitle: Veri Saklama\nstatus: {status}\ntype: work-packet\n---\n"
+                       f"Güncel etiketiyle veri saklama kararı: {variant} günlükler.\n")
+            other_history = "🎯 100-Command-Center/backup-old.md"
+            _write(root, other_history, "---\ntitle: Yedekleme\nstatus: completed\ntype: work-packet\n---\nYedekleme için uzak kopya.\n")
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            quoted_topic = 'Güncel veri saklama kararı? "yedekleme" konusunda daha önce ne karar vermiştik?'
+            self.assertEqual(retrieval._split_current_history_query(quoted_topic), (
+                "Güncel veri saklama kararı?", '"yedekleme" konusunda daha önce ne karar vermiştik?',
+            ))
+            self.assertIn(other_history, {
+                hit.entry.path for hit in retrieval.search_vault(entries, quoted_topic, top_k=2)
+            })
+            for label in ('"güncel"', '`güncel`', '"güncel ve eski"'):
+                query = f"Daha önce {label} etiketiyle veri saklama konusunda ne karar vermiştik?"
+                with self.subTest(label=label):
+                    self.assertFalse(retrieval._should_preserve_current_stale_penalty(
+                        query, retrieval._retrieval_terms(query),
+                    ))
+                    self.assertIn(historical, {hit.entry.path for hit in retrieval.search_vault(entries, query)})
+                    mixed = query + " ve güncel karar nedir?"
+                    self.assertIsNotNone(retrieval._split_current_history_query(mixed))
+                    self.assertIn(historical, {hit.entry.path for hit in retrieval.search_vault(entries, mixed)})
 
     def test_mixed_topicless_retrospective_clause_inherits_current_subject(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
