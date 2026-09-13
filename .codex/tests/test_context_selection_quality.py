@@ -1285,6 +1285,7 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                 "Daha önce Node.js ile veri saklama için hangi seçeneği uygun görmüştük?",
                 "Daha önce config.active ile veri saklama için hangi seçeneği uygun görmüştük?",
                 "Daha önce veri saklama için pasif ve aktif depolama seçeneklerinden hangisini seçmiştik?",
+                "Daha önce veri saklama taslaklarını inceledik ve aktif planı seçmiştik?",
                 "Daha önce T.C. sınırında veri saklama için hangi seçeneği uygun görmüştük?",
                 *("Daha önce veri saklama konusunda ne karar vermiştik" + end for end in (".", "!", ";", ":", "\n")),
                 "Daha önce veri saklama konusunda ne karar vermiştik, hatırlıyor musun?",
@@ -1495,6 +1496,7 @@ Geçmiş veri saklama kararı: uzun günlükler.
                 *(f"Daha önce {label} etiketiyle veri saklama konusunda ne karar vermiştik?"
                   for label in ('"güncel"', '`güncel`', '"güncel ve eski"')),
                 "Daha önce veri saklama için pasif ve aktif depolama seçeneklerinden hangisini seçmiştik?",
+                "Daha önce veri saklama taslaklarını inceledik ve aktif planı seçmiştik?",
             ):
                 with self.subTest(query=query):
                     self.assertFalse(retrieval._should_preserve_current_stale_penalty(

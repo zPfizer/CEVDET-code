@@ -253,6 +253,9 @@ HISTORY_TURKISH_CURRENT_SELECTION_OBJECT = re.compile(
     rf"\b(?P<current>{CURRENT_QUERY_CUE})\s+(?:\w+\s+)?(?P<relative>\w+)\s+"
     rf"(?P<which>hangi\w*)\s+sec\w*{HISTORY_TURKISH_PAST_SUFFIX}\b"
 )
+HISTORY_TURKISH_CURRENT_DIRECT_OBJECT = re.compile(
+    rf"\b(?P<current>guncel|aktif)\s+\w+[iu]\s+sec\w*{HISTORY_TURKISH_PAST_SUFFIX}\b"
+)
 HISTORY_CHANGE_TAIL = (
     rf"(?:\s*(?:[?!.,;:]|$)|\s+{HISTORY_CHANGE_TEMPORAL}\b"
     r"|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
@@ -1602,15 +1605,17 @@ def _retrospective_question_terms(normalized: str) -> frozenset[str]:
 
 
 def _current_selection_object_spans(normalized: str) -> set[tuple[int, int]]:
-    # An ablative participial object before "which did we choose" qualifies
-    # the past selection; it does not introduce an independent current request.
-    return {
+    # Participial selection objects and an adjacent "active/current X we chose"
+    # qualify the past selection, rather than introducing a current request.
+    spans = {
         match.span("current")
         for match in HISTORY_TURKISH_CURRENT_SELECTION_OBJECT.finditer(normalized)
         if match["relative"].endswith(("dan", "den"))
         and re.search(r"[dt][iu][kg]", match["relative"])
         and _retrospective_question_terms(match["which"])
     }
+    spans.update(match.span("current") for match in HISTORY_TURKISH_CURRENT_DIRECT_OBJECT.finditer(normalized))
+    return spans
 
 
 def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
