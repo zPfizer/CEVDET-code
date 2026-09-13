@@ -26,7 +26,7 @@ HTML_START_TAG = re.compile(
     r"(?:[ \t\r\n\f]+[A-Za-z_:][A-Za-z0-9_.:-]*"
     r"(?:[ \t\r\n\f]*=[ \t\r\n\f]*"
     r"(?:\"[^\"]*\"|'[^']*'|[^ \t\r\n\f\"'=<>`]+))?"
-    r")?[ \t\r\n\f]*/?>"
+    r")*[ \t\r\n\f]*/?>"
 )
 HTML_LITERAL_TAGS = frozenset({"pre", "script", "style", "textarea"})
 INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")

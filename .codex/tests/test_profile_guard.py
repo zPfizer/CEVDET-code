@@ -432,6 +432,7 @@ class ProfileGuardTests(unittest.TestCase):
         for example in (
             '<code foo= "">[[../secret]]</code>',
             '<code title="x a= >">[[../secret]]</code>',
+            '<code class="x" title="y">[[../secret]]</code>',
         ):
             with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
