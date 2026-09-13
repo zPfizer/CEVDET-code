@@ -18,6 +18,7 @@ HTML_LITERAL_CLOSE = re.compile(
     re.IGNORECASE,
 )
 HTML_TAG = re.compile(r'<(?:[^"\'>]|"[^"]*"|\'[^\']*\')*>', re.DOTALL)
+HTML_LITERAL_TAGS = frozenset({"pre", "script", "style", "textarea"})
 INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
 LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])(?P<gap>[ \t]+|$)"
@@ -98,11 +99,13 @@ def _blank_inline_code(chars: list[str], text: str) -> None:
         index = close + len(delimiter)
 
 
-def _blank_inline_html_code(chars: list[str], text: str) -> None:
-    class CodeParser(HTMLParser):
+def _blank_inline_html_elements(
+    chars: list[str], text: str, tags: frozenset[str]
+) -> None:
+    class ElementParser(HTMLParser):
         def __init__(self) -> None:
             super().__init__(convert_charrefs=False)
-            self.open_codes: list[int] = []
+            self.open_tags: list[tuple[str, int]] = []
             self.spans: list[tuple[int, int]] = []
             self.line_starts = [0]
             self.line_starts.extend(
@@ -114,26 +117,40 @@ def _blank_inline_html_code(chars: list[str], text: str) -> None:
             return self.line_starts[line - 1] + column
 
         def handle_starttag(self, tag: str, _attrs: list[tuple[str, str | None]]) -> None:
-            if tag.casefold() != "code":
+            folded = tag.casefold()
+            if folded not in tags:
                 return
             start = self._offset()
             if not is_escaped(text, start):
-                self.open_codes.append(start)
+                self.open_tags.append((folded, start))
 
         def handle_endtag(self, tag: str) -> None:
-            if tag.casefold() != "code" or not self.open_codes:
+            folded = tag.casefold()
+            if folded not in tags:
                 return
-            start = self.open_codes.pop()
-            end = text.find(">", self._offset())
-            self.spans.append((start, len(text) if end < 0 else end + 1))
+            for index in range(len(self.open_tags) - 1, -1, -1):
+                if self.open_tags[index][0] != folded:
+                    continue
+                _tag, start = self.open_tags.pop(index)
+                end = text.find(">", self._offset())
+                self.spans.append((start, len(text) if end < 0 else end + 1))
+                break
 
-    parser = CodeParser()
+    parser = ElementParser()
     parser.feed(text)
     parser.close()
     for start, end in parser.spans:
         _blank(chars, start, end)
-    for start in parser.open_codes:
+    for _tag, start in parser.open_tags:
         _blank(chars, start, len(text))
+
+
+def _blank_inline_html_code(chars: list[str], text: str) -> None:
+    _blank_inline_html_elements(chars, text, frozenset({"code"}))
+
+
+def _blank_inline_html_literals(chars: list[str], text: str) -> None:
+    _blank_inline_html_elements(chars, text, HTML_LITERAL_TAGS)
 
 
 def _indented_content(content: str) -> str:
@@ -473,6 +490,7 @@ def markdown_body(
     if mask_inline_code:
         _blank_inline_code(chars, "".join(chars))
         _blank_inline_html_code(chars, "".join(chars))
+    _blank_inline_html_literals(chars, "".join(chars))
     return "".join(chars)
 
 

@@ -14,6 +14,9 @@ from markdown_boundary import (
     FENCE_LINE,
     HTML_LITERAL_OPEN,
     HTML_TAG,
+    LIST_ITEM,
+    _container_body,
+    _container_prefix,
     is_escaped,
     markdown_body,
 )
@@ -23,6 +26,7 @@ from quote_grammar import QUOTED_CONTENT
 SOURCE = re.compile(r'<!-- user-source:\s*(\{[^\n]*\})\s*-->')
 EVIDENCE = re.compile(r'<!-- user-evidence:\s*(\{[^\n]*\})\s*-->')
 LIST_PREFIX = re.compile(r'^[ \t]*(?:[-+*]|\d+[.)])(?:[ \t]+|$)')
+REFERENCE_DEFINITION = re.compile(r'(?m)^[ \t]{0,3}\[[^\]\r\n]+\]:[^\r\n]*$')
 USER_ANCHOR = r'(?:#user-[a-f0-9]{64})?'
 USER_LINK = re.compile(r'\[\[daily/(\d{4}-\d{2}-\d{2})#user-([a-f0-9]{64})(?:\|[^\]]+)?\]\]')
 SCOPES = frozenset({'general', 'project', 'session', 'unspecified'})
@@ -188,6 +192,10 @@ def _markdown_link_spans(text: str) -> tuple[tuple[int, int], ...]:
             cursor += 1
         else:
             index = label_end + 2
+    spans.extend(
+        (match.start(), match.end())
+        for match in REFERENCE_DEFINITION.finditer(text)
+    )
     return tuple(spans)
 
 
@@ -210,14 +218,36 @@ def _visible_source_body(text: str) -> str:
 
     lazy_blockquote_starts: set[int] = set()
     quote_paragraph = False
+    list_contexts: list[int] = []
     offset = 0
     for raw_line in text.splitlines(keepends=True):
         line = raw_line.rstrip('\r\n')
-        blockquote = BLOCKQUOTE_PREFIX.match(line)
-        if blockquote is not None:
-            remainder = line[blockquote.end():]
-            while (nested := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
-                remainder = remainder[nested.end():]
+        explicit_list = LIST_ITEM.match(line)
+        if explicit_list is not None:
+            remainder, containers = _container_prefix(line)
+            list_contexts = [
+                value for kind, value in containers if kind == 'list'
+            ]
+            in_blockquote = any(kind == 'quote' for kind, _value in containers)
+        else:
+            remainder = line
+            in_blockquote = False
+            for content_indent in reversed(list_contexts):
+                candidate = _container_body(
+                    line, (('list', content_indent),)
+                )
+                if candidate is None:
+                    continue
+                remainder, containers = _container_prefix(candidate)
+                in_blockquote = any(kind == 'quote' for kind, _value in containers)
+                break
+            else:
+                remainder, containers = _container_prefix(line)
+                in_blockquote = any(kind == 'quote' for kind, _value in containers)
+                list_contexts = [
+                    value for kind, value in containers if kind == 'list'
+                ]
+        if in_blockquote:
             quote_paragraph = is_lazy_paragraph(remainder)
         elif not line.strip():
             quote_paragraph = False
@@ -225,6 +255,8 @@ def _visible_source_body(text: str) -> str:
             lazy_blockquote_starts.add(offset)
         else:
             quote_paragraph = False
+        if line.strip() and not explicit_list and list_contexts and remainder == line:
+            list_contexts = []
         offset += len(raw_line)
     link_spans = _markdown_link_spans(text)
     for match in SOURCE.finditer(text):
