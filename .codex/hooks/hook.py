@@ -1417,6 +1417,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 STATE_DIR,
                 deadline=hook_deadline,
             )
+            _emit_user_prompt_result(emitted_context or "")
+            response_emitted = True
             transcript_path = payload.get("transcript_path")
             if (
                 not is_stop_message(emitted_context)
@@ -1488,9 +1490,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 state_dir=STATE_DIR,
                 deadline=hook_deadline,
             )
-        if args.event == "user-prompt":
-            _emit_user_prompt_result(emitted_context or "")
-            response_emitted = bool(emitted_context)
         record_hook_runtime(
             args.event,
             payload,

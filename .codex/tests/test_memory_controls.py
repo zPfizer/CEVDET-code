@@ -872,7 +872,7 @@ class SuppressionTests(unittest.TestCase):
         self.assertEqual(rendered['daily/one.md'], 'Bir kaynak.\n')
         self.assertIn('daily/one.md', paths)
         self.assertEqual(render.call_args.kwargs['deadline'], deadline)
-        with self.assertRaises(memory_ledger.MemoryPreferenceError):
+        with self.assertRaises(TimeoutError):
             memory.render_views(
                 [('daily/one.md', 'one')],
                 deadline=time.monotonic() - 1,

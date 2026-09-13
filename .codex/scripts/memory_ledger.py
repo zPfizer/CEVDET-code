@@ -1660,6 +1660,8 @@ class MemoryRead:
             return views
         except MemoryPreferenceError:
             raise
+        except TimeoutError:
+            raise
         except (OSError, ValueError) as exc:
             if str(exc) == 'memory-preferences-changed':
                 raise MemoryPreferenceError('memory-preferences-changed') from exc
@@ -1690,6 +1692,8 @@ class MemoryRead:
                 self.check_knowledge_snapshot()
             return views
         except MemoryPreferenceError:
+            raise
+        except TimeoutError:
             raise
         except (OSError, ValueError) as exc:
             raise MemoryPreferenceError('memory-view-unavailable') from exc
