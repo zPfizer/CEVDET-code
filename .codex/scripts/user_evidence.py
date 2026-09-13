@@ -155,25 +155,41 @@ def _authored_quote(message: str, quote: str) -> bool:
 def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
     spans: list[tuple[int, int]] = []
     for definition in REFERENCE_DEFINITION.finditer(text):
-        end = definition.end()
-        if text.startswith('\r\n', end):
-            next_start = end + 2
-        elif text.startswith('\n', end):
-            next_start = end + 1
+        definition_text = definition.group(0)
+        suffix_offset = definition_text.index(']:') + 2
+        same_line_title = re.search(
+            r'[ \t]+(["\'(])', definition_text[suffix_offset:]
+        )
+        if same_line_title is not None:
+            delimiter = {"(": ")"}.get(
+                same_line_title.group(1), same_line_title.group(1)
+            )
+            line_start = definition.start()
+            cursor = (
+                definition.start()
+                + suffix_offset
+                + same_line_title.end()
+            )
         else:
-            spans.append((definition.start(), definition.end()))
-            continue
-        next_end = text.find('\n', next_start)
-        if next_end < 0:
-            next_end = len(text)
-        continuation = text[next_start:next_end].rstrip('\r')
-        title = re.match(r'[ \t]{0,3}(["\'(])', continuation)
-        if title is None:
-            spans.append((definition.start(), definition.end()))
-            continue
-        delimiter = {"(": ")"}.get(title.group(1), title.group(1))
-        cursor = next_start + title.end()
-        line_start = next_start
+            end = definition.end()
+            if text.startswith('\r\n', end):
+                next_start = end + 2
+            elif text.startswith('\n', end):
+                next_start = end + 1
+            else:
+                spans.append((definition.start(), definition.end()))
+                continue
+            next_end = text.find('\n', next_start)
+            if next_end < 0:
+                next_end = len(text)
+            continuation = text[next_start:next_end].rstrip('\r')
+            title = re.match(r'[ \t]{0,3}(["\'(])', continuation)
+            if title is None:
+                spans.append((definition.start(), definition.end()))
+                continue
+            delimiter = {"(": ")"}.get(title.group(1), title.group(1))
+            line_start = next_start
+            cursor = next_start + title.end()
         depth = 1 if delimiter == ")" else 0
         span_end = len(text)
         while True:
