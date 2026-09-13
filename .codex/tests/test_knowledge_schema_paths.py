@@ -195,6 +195,25 @@ class KnowledgeSchemaPathTests(TestCase):
         self.assertIn("knowledge/index.md:row", report.issues)
         self.assertIn("knowledge/index.md:coverage", report.issues)
 
+    def test_backslash_in_index_link_title_is_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_control_tree(root)
+            index = root / "knowledge" / "index.md"
+            index.write_text(
+                index.read_text(encoding="utf-8").replace(
+                    "[[concepts/ikinci\\|İkinci]]",
+                    r"[[concepts/ikinci\|C:\Temp]]",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            report = knowledge_schema.validate_knowledge_tree(root)
+
+        self.assertEqual(report.issues, ())
+        self.assertEqual(report.index_rows, 2)
+
     def test_escaped_connection_links_are_not_canonical_targets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
