@@ -224,11 +224,14 @@ HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY = (
     rf"(?=\s*(?:[,.!?;:\r\n]|$|(?:ve|ile)\s+{CURRENT_QUERY_CUE}\b))"
 )
 HISTORY_TURKISH_INTERNAL_DOT = re.compile(r"(?<=\w)\.(?=\w)|(?<=\b\w\.\w)\.(?=\s)")
+HISTORY_TURKISH_INTERNAL_COLON = re.compile(r"(?<=\d):(?=\d)")
 HISTORY_TURKISH_RELATIVE_PAST = re.compile(
     r"\w+[dt][iu](?:g(?:im(?:iz)?|in(?:iz)?|i)|k(?:lar|ler)(?:im(?:iz)?|in(?:iz)?|i))"
     r"(?:n?[dt][ae]n?|n?[aeiu]|n?[iu]n|y?[ae]|y?[iu]|y?l[ae])?"
 )
-HISTORY_TURKISH_COUNTERFACTUAL = re.compile(r"olsa(?:m|n|k|niz|lar|ydi(?:m|n|k|niz|lar)?)?")
+HISTORY_TURKISH_COUNTERFACTUAL = re.compile(
+    r"(?:olsa(?:m|n|k|niz|lar)?|\w+s[ae]ydi(?:m|n|k|niz|lar|ler)?)"
+)
 HISTORY_TURKISH_RELATIVE_QUESTION = r"hangi(?:si|leri)(?:dir)?"
 HISTORY_TURKISH_RETROSPECTIVE_ENDING = (
     rf"(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi|{HISTORY_TURKISH_RELATIVE_QUESTION})"
@@ -236,7 +239,7 @@ HISTORY_TURKISH_RETROSPECTIVE_ENDING = (
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
     rf"(?ix)\b(?:daha\s+once|onceden)\b"
     # Dots inside identifiers/versions and dotted initials are not clause ends.
-    rf"(?:[^.!?;:\r\n]|{HISTORY_TURKISH_INTERNAL_DOT.pattern})*?\s+"
+    rf"(?:[^.!?;:\r\n]|{HISTORY_TURKISH_INTERNAL_DOT.pattern}|{HISTORY_TURKISH_INTERNAL_COLON.pattern})*?\s+"
     rf"{HISTORY_TURKISH_RETROSPECTIVE_ENDING}\b{HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY}"
 )
 HISTORY_TURKISH_RETROSPECTIVE_END = re.compile(
@@ -1635,6 +1638,7 @@ def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
     clause_ends = [
         mark.start() for mark in re.finditer(r"[.!?;:\r\n]", normalized)
         if not HISTORY_TURKISH_INTERNAL_DOT.match(normalized, mark.start())
+        and not HISTORY_TURKISH_INTERNAL_COLON.match(normalized, mark.start())
     ]
     words = list(re.finditer(r"\S+", normalized))
     word_starts = [word.start() for word in words]
