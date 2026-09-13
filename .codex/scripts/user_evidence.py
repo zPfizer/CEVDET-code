@@ -9,13 +9,18 @@ import json
 import re
 from typing import TypedDict
 
-from markdown_boundary import BLOCKQUOTE_PREFIX, markdown_body
+from markdown_boundary import (
+    BLOCKQUOTE_PREFIX,
+    FENCE_LINE,
+    HTML_LITERAL_OPEN,
+    HTML_TAG,
+    markdown_body,
+)
 from quote_grammar import QUOTED_CONTENT
 
 
 SOURCE = re.compile(r'<!-- user-source:\s*(\{[^\n]*\})\s*-->')
 EVIDENCE = re.compile(r'<!-- user-evidence:\s*(\{[^\n]*\})\s*-->')
-HTML_TAG = re.compile(r'<(?:[^"\'>]|"[^"]*"|\'[^\']*\')*>', re.DOTALL)
 LIST_PREFIX = re.compile(r'^[ \t]*(?:[-+*]|\d+[.)])(?:[ \t]+|$)')
 USER_ANCHOR = r'(?:#user-[a-f0-9]{64})?'
 USER_LINK = re.compile(r'\[\[daily/(\d{4}-\d{2}-\d{2})#user-([a-f0-9]{64})(?:\|[^\]]+)?\]\]')
@@ -145,6 +150,36 @@ def _visible_source_body(text: str) -> str:
     masked = markdown_body(text, mask_frontmatter=False)
     chars = list(masked)
     prefix = '<!-- user-source:'
+
+    def is_lazy_paragraph(line: str) -> bool:
+        stripped = line.lstrip(' \t')
+        return bool(stripped) and not (
+            FENCE_LINE.fullmatch(stripped) is not None
+            or LIST_PREFIX.match(line) is not None
+            or stripped.startswith('>')
+            or re.match(r'^#{1,6}(?:[ \t]+|$)', stripped) is not None
+            or re.fullmatch(r'(?:[-*_][ \t]*){3,}|=+[ \t]*', stripped) is not None
+            or HTML_LITERAL_OPEN.match(stripped) is not None
+        )
+
+    lazy_blockquote_starts: set[int] = set()
+    quote_paragraph = False
+    offset = 0
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip('\r\n')
+        blockquote = BLOCKQUOTE_PREFIX.match(line)
+        if blockquote is not None:
+            remainder = line[blockquote.end():]
+            while (nested := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
+                remainder = remainder[nested.end():]
+            quote_paragraph = is_lazy_paragraph(remainder)
+        elif not line.strip():
+            quote_paragraph = False
+        elif quote_paragraph and is_lazy_paragraph(line):
+            lazy_blockquote_starts.add(offset)
+        else:
+            quote_paragraph = False
+        offset += len(raw_line)
     for match in SOURCE.finditer(text):
         line_start = text.rfind('\n', 0, match.start()) + 1
         line_prefix = text[line_start:match.start()]
@@ -157,7 +192,7 @@ def _visible_source_body(text: str) -> str:
             if list_prefix is None:
                 break
             line_prefix = line_prefix[list_prefix.end():]
-        if in_blockquote or any(
+        if line_start in lazy_blockquote_starts or in_blockquote or any(
             tag.start() < match.start() < tag.end()
             for tag in HTML_TAG.finditer(text)
         ):

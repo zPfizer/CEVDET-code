@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from html.parser import HTMLParser
 import re
 
 
@@ -16,11 +17,7 @@ HTML_LITERAL_CLOSE = re.compile(
     r"</(?P<tag>pre|script|style|textarea)[ \t]*>",
     re.IGNORECASE,
 )
-HTML_CODE_OPEN = re.compile(
-    r"<code(?=[ \t\r\n/>])(?:[^\"'<>]|\"[^\"]*\"|'[^']*')*>",
-    re.IGNORECASE | re.DOTALL,
-)
-HTML_CODE_CLOSE = re.compile(r"</code[ \t]*>", re.IGNORECASE)
+HTML_TAG = re.compile(r'<(?:[^"\'>]|"[^"]*"|\'[^\']*\')*>', re.DOTALL)
 INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
 LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])(?P<gap>[ \t]+|$)"
@@ -102,17 +99,41 @@ def _blank_inline_code(chars: list[str], text: str) -> None:
 
 
 def _blank_inline_html_code(chars: list[str], text: str) -> None:
-    index = 0
-    while (opening := HTML_CODE_OPEN.search(text, index)) is not None:
-        if is_escaped(text, opening.start()):
-            index = opening.end()
-            continue
-        closing = HTML_CODE_CLOSE.search(text, opening.end())
-        if closing is None:
-            _blank(chars, opening.start(), len(text))
-            return
-        _blank(chars, opening.start(), closing.end())
-        index = closing.end()
+    class CodeParser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=False)
+            self.open_codes: list[int] = []
+            self.spans: list[tuple[int, int]] = []
+            self.line_starts = [0]
+            self.line_starts.extend(
+                index + 1 for index, char in enumerate(text) if char == "\n"
+            )
+
+        def _offset(self) -> int:
+            line, column = self.getpos()
+            return self.line_starts[line - 1] + column
+
+        def handle_starttag(self, tag: str, _attrs: list[tuple[str, str | None]]) -> None:
+            if tag.casefold() != "code":
+                return
+            start = self._offset()
+            if not is_escaped(text, start):
+                self.open_codes.append(start)
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag.casefold() != "code" or not self.open_codes:
+                return
+            start = self.open_codes.pop()
+            end = text.find(">", self._offset())
+            self.spans.append((start, len(text) if end < 0 else end + 1))
+
+    parser = CodeParser()
+    parser.feed(text)
+    parser.close()
+    for start, end in parser.spans:
+        _blank(chars, start, end)
+    for start in parser.open_codes:
+        _blank(chars, start, len(text))
 
 
 def _indented_content(content: str) -> str:
@@ -439,7 +460,11 @@ def markdown_body(
             paragraph_active = False
             continue
         if content.strip():
-            list_contexts = []
+            list_contexts = [
+                context
+                for context in list_contexts
+                if indentation >= context[1]
+            ]
         paragraph_active = _is_paragraph_line(content)
     if mask_inline_code:
         _blank_inline_code(chars, "".join(chars))
