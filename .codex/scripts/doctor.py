@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 from dataclasses import dataclass
 from functools import cached_property
 import json
@@ -712,10 +713,11 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
         return (
             isinstance(value, str)
             and re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{0,63}", value) is not None
-            and not value.startswith(("sk-", "pk-", "ghp_", "github_pat_", "xox"))
         )
 
     def is_coverage(value: object) -> bool:
+        if type(value) is int:
+            return value >= 0
         return isinstance(value, dict) and all(
             isinstance(key, str)
             and key.casefold() not in forbidden
@@ -725,12 +727,25 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
             for key, item in value.items()
         )
 
+    def is_event_iso(value: object) -> bool:
+        if not isinstance(value, str) or not value:
+            return False
+        try:
+            timestamp = dt.datetime.fromisoformat(value)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return (
+            timestamp.tzinfo is not None
+            and timestamp.utcoffset() is not None
+            and timestamp.isoformat() == value
+        )
+
     def is_continuation_field(field: str) -> bool:
         value = payload[field]
         if field == "continuation_reason":
             return is_token(value)
         if field == "continuation":
-            return type(value) is bool
+            return type(value) is bool or is_token(value)
         if field in {"coverage_count", "coverage_end"}:
             return type(value) is int and value >= 0
         if field == "coverage_digest":
@@ -747,8 +762,7 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
         and bool(payload["session_id"])
         and isinstance(payload.get("reason"), str)
         and payload["reason"] in FLUSH_REASON_PRIORITY
-        and isinstance(payload.get("event_iso"), str)
-        and bool(payload["event_iso"])
+        and is_event_iso(payload.get("event_iso"))
         and "transcript_path" in payload
         and (
             (

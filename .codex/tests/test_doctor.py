@@ -870,27 +870,37 @@ class DoctorTests(unittest.TestCase):
     def test_state_privacy_accepts_current_worker_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
+            supported = (
+                ("continuation", True),
+                ("continuation", "latest"),
+                ("continuation_reason", "tail"),
+                ("coverage", 3),
+                ("coverage", {"end": 42}),
+                ("coverage_count", 3),
+                ("coverage_end", 42),
+                ("coverage_digest", "a" * 64),
+            )
             with mock.patch.object(workers, "enqueue_job", return_value=None):
-                workers.enqueue_flush(
-                    state,
-                    {
-                        "session_id": "current-session",
-                        "transcript_path": "transcript.jsonl",
-                        "continuation": True,
-                        "continuation_reason": "tail",
-                        "coverage": {"start": 0, "end": 1},
-                        "coverage_count": 1,
-                        "coverage_end": 1,
-                        "coverage_digest": "a" * 64,
-                    },
-                    "turnend",
-                    vault_root=state,
-                )
-            path = next(state.glob("hookin-*.json"))
+                for field, value in supported:
+                    workers.enqueue_flush(
+                        state,
+                        {
+                            "session_id": "current-session",
+                            "transcript_path": "transcript.jsonl",
+                            field: value,
+                        },
+                        "turnend",
+                        vault_root=state,
+                    )
+            paths = tuple(state.glob("hookin-*.json"))
             check = doctor._state_privacy_check(
-                doctor.Context(state_dir=state, now=path.stat().st_mtime + 1)
+                doctor.Context(
+                    state_dir=state,
+                    now=max(path.stat().st_mtime for path in paths) + 1,
+                )
             )
 
+        self.assertEqual(len(paths), len(supported))
         self.assertEqual(check.status, "OK")
 
     def test_state_privacy_accepts_transcriptless_session_end_delivery(self) -> None:
@@ -931,9 +941,7 @@ class DoctorTests(unittest.TestCase):
                 ("continuation_reason", "private continuation reason"),
                 ("coverage", {"message": "private message"}),
                 ("continuation_reason", 7),
-                ("continuation", "true"),
                 ("continuation_reason", "a" * 65),
-                ("coverage", 3),
                 ("coverage_digest", "sk-proj-ABC123SECRET"),
                 ("coverage", {"api_key": "sk-proj-ABC123SECRET"}),
             ):
@@ -963,6 +971,7 @@ class DoctorTests(unittest.TestCase):
                 ("transcript_path", None),
                 ("reason", "unknown"),
                 ("event_iso", 7),
+                ("event_iso", "private prompt"),
             ):
                 with self.subTest(field=field):
                     path.write_text(
