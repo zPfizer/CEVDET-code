@@ -178,6 +178,139 @@ class DigestAndRootTests(unittest.TestCase):
 
 
 class HealthPayloadTests(unittest.TestCase):
+    def test_load_health_rejects_invalid_current_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "health.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": state_store.HEALTH_SCHEMA_VERSION,
+                        "generation": None,
+                        "components": {
+                            "flush:global": {
+                                "status": "error",
+                                "error": "önceki",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "health-generation-invalid"):
+                state_store._load_health(path)
+
+            before = path.read_bytes()
+            with self.assertRaisesRegex(ValueError, "health-generation-invalid"):
+                state_store.write_health(
+                    Path(temporary), component="compile", error="yeni"
+                )
+            with self.assertRaisesRegex(ValueError, "health-generation-invalid"):
+                state_store.clear_health(Path(temporary), component="flush")
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_best_effort_health_helpers_preserve_corrupt_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            path = state / "health.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": state_store.HEALTH_SCHEMA_VERSION,
+                        "generation": "bozuk",
+                        "components": {
+                            "flush:global": {
+                                "status": "error",
+                                "error": "flush-eski",
+                            },
+                            "compile:global": {
+                                "status": "error",
+                                "error": "compile-eski",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = path.read_bytes()
+
+            state_store.report_health(
+                state, component="flush", error="flush-yeni"
+            )
+            state_store.discard_health(state, component="compile")
+
+            self.assertEqual(path.read_bytes(), before)
+
+            with self.assertRaisesRegex(ValueError, "health-identity-invalid"):
+                state_store.report_health(state, component="", error="hata")
+
+    def test_invalid_health_status_types_fail_closed_without_loss(self) -> None:
+        for status in ([], {}):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                path = state / "health.json"
+                path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": state_store.HEALTH_SCHEMA_VERSION,
+                            "generation": 7,
+                            "components": {
+                                "flush:global": {
+                                    "status": status,
+                                    "error": "bozuk-status",
+                                },
+                                "compile:global": {
+                                    "status": "error",
+                                    "error": "korunacak",
+                                },
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                before = path.read_bytes()
+
+                with self.assertRaisesRegex(ValueError, "health-status-invalid"):
+                    state_store._load_health(path)
+                with self.assertRaisesRegex(ValueError, "health-status-invalid"):
+                    state_store.write_health(
+                        state, component="flush", error="yeni"
+                    )
+                with self.assertRaisesRegex(ValueError, "health-status-invalid"):
+                    state_store.clear_health(state, component="flush")
+
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_best_effort_health_helpers_preserve_invalid_status_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            path = state / "health.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": state_store.HEALTH_SCHEMA_VERSION,
+                        "generation": 1,
+                        "components": {
+                            "flush:global": {
+                                "status": [],
+                                "error": "bozuk-status",
+                            },
+                            "compile:global": {
+                                "status": "error",
+                                "error": "korunacak",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = path.read_bytes()
+
+            state_store.report_health(state, component="flush", error="yeni")
+            state_store.discard_health(state, component="compile")
+
+            self.assertEqual(path.read_bytes(), before)
+
     def test_load_health_returns_empty_payload_for_missing_or_broken_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

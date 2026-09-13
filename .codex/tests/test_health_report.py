@@ -59,6 +59,55 @@ def _pending_record(job_id: str) -> dict[str, object]:
 
 
 class HealthReportTests(unittest.TestCase):
+    def test_invalid_health_generation_is_reported_as_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = _seed_state(Path(temporary))
+            (state / "health.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": health_report.HEALTH_SCHEMA_VERSION,
+                        "generation": None,
+                        "components": {
+                            "flush:global": {
+                                "status": "error",
+                                "error": "flush-eski",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(health_report.health_summary(state), "okunamadı")
+
+    def test_invalid_health_status_types_are_reported_as_unreadable(self) -> None:
+        for status in ([], {}):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                state = _seed_state(Path(temporary))
+                (state / "health.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": health_report.HEALTH_SCHEMA_VERSION,
+                            "generation": 1,
+                            "components": {
+                                "flush:global": {
+                                    "status": status,
+                                    "error": "bozuk-status",
+                                },
+                                "compile:global": {
+                                    "status": "error",
+                                    "error": "korunacak",
+                                },
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                self.assertEqual(
+                    health_report.health_summary(state), "okunamadı"
+                )
+
     def test_oversized_compiler_state_is_not_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = _seed_state(Path(temporary))

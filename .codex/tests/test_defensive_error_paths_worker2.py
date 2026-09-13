@@ -524,6 +524,38 @@ class MigrationAndInspectionArms(unittest.TestCase):
 
 
 class RecoveryAndFinishArms(unittest.TestCase):
+    def test_terminal_maintenance_health_failure_does_not_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = _state(Path(temporary))
+            health = state.parent / "health.json"
+            health.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "generation": None,
+                        "components": {
+                            "flush:global": {
+                                "status": "error",
+                                "error": "flush-eski",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = health.read_bytes()
+
+            workers._report_terminal_maintenance(
+                state,
+                {
+                    "kind": "maintenance",
+                    "status": "dead-letter",
+                    "last_error": "worker-failed",
+                },
+            )
+
+            self.assertEqual(health.read_bytes(), before)
+
     def test_transition_target_occupied_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = _state(Path(temporary))

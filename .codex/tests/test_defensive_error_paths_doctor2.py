@@ -281,6 +281,38 @@ class HookHealthArms(unittest.TestCase):
 
 
 class BrainHealthArms(unittest.TestCase):
+    def test_invalid_current_health_generation_is_not_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            ctx = _ctx(Path(temporary))
+            health = ctx.state_dir / "health.json"
+            for generation in (-1, True, 1.5):
+                with self.subTest(generation=generation):
+                    health.write_text(
+                        json.dumps(
+                            {
+                                "schema_version": 2,
+                                "generation": generation,
+                                "components": {},
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    self.assertNotEqual(
+                        doctor._brain_health_check(ctx).status, "OK"
+                    )
+
+            health.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "generation": 0,
+                        "components": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(doctor._brain_health_check(ctx).status, "OK")
+
     def test_read_and_shape_failures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             ctx = _ctx(Path(temporary))

@@ -24,7 +24,12 @@ from process_control import (
     run_with_tree_timeout,
     spawn_detached,
 )
-from state_store import atomic_write_bytes, atomic_write_json, vault_root_of, write_health
+from state_store import (
+    atomic_write_bytes,
+    atomic_write_json,
+    report_health,
+    vault_root_of,
+)
 
 
 JOB_SCHEMA_VERSION = 1
@@ -323,8 +328,11 @@ def _job_lease_seconds(kind: str) -> int:
 
 def _report_terminal_maintenance(state_dir: Path, job: dict[str, Any]) -> None:
     if job.get('kind') == 'maintenance' and job.get('status') == 'dead-letter':
-        write_health(state_dir.parent, component='compile',
-                     error='maintenance:' + str(job.get('last_error', 'worker-failed')))
+        report_health(
+            state_dir.parent,
+            component='compile',
+            error='maintenance:' + str(job.get('last_error', 'worker-failed')),
+        )
 
 
 def _managed_hook_input(path: Path, state_dir: Path) -> bool:

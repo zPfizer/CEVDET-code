@@ -35,6 +35,10 @@ class _RetryableGuardOpen(OSError):
     """The guarded target handle could not be acquired yet."""
 
 
+class _HealthStateError(ValueError):
+    """The current health record cannot be safely updated."""
+
+
 def _windows_api() -> Any:
     from ctypes import wintypes
 
@@ -418,6 +422,17 @@ def atomic_write_json(
     )
 
 
+def _health_generation(payload: Mapping[str, Any]) -> int:
+    generation = payload.get("generation", 0)
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+    ):
+        raise _HealthStateError("health-generation-invalid")
+    return generation
+
+
 def _load_health(path: Path) -> dict[str, Any]:
     empty = {"schema_version": HEALTH_SCHEMA_VERSION, "generation": 0, "components": {}}
     try:
@@ -426,16 +441,17 @@ def _load_health(path: Path) -> dict[str, Any]:
         return empty
     if not isinstance(loaded, dict):
         return empty
-    if loaded.get("schema_version") == HEALTH_SCHEMA_VERSION and isinstance(
-        loaded.get("components"),
-        dict,
-    ):
+    if loaded.get("schema_version") == HEALTH_SCHEMA_VERSION:
+        _health_generation(loaded)
+        if not isinstance(loaded.get("components"), dict):
+            return empty
         for key, entry in loaded["components"].items():
-            if (
-                not isinstance(key, str)
-                or not isinstance(entry, dict)
-                or entry.get("status") not in {"error", "warning"}
-            ):
+            if not isinstance(key, str) or not isinstance(entry, dict):
+                return empty
+            status = entry.get("status")
+            if not isinstance(status, str):
+                raise _HealthStateError("health-status-invalid")
+            if status not in {"error", "warning"}:
                 return empty
         return loaded
     components: dict[str, Any] = {}
@@ -512,7 +528,7 @@ def write_health(
             "warnings": warnings[-20:],
         }
         payload["schema_version"] = HEALTH_SCHEMA_VERSION
-        payload["generation"] = int(payload.get("generation", 0)) + 1
+        payload["generation"] = _health_generation(payload) + 1
         _summarize_health(payload)
         atomic_write_json(path, payload)
         return payload
@@ -540,7 +556,7 @@ def clear_health(
             return payload
         components.pop(key, None)
         payload["schema_version"] = HEALTH_SCHEMA_VERSION
-        payload["generation"] = int(payload.get("generation", 0)) + 1
+        payload["generation"] = _health_generation(payload) + 1
         _summarize_health(payload)
         atomic_write_json(path, payload)
         return payload
@@ -563,7 +579,7 @@ def report_health(
             warning=warning,
             scope_key=scope_key,
         )
-    except OSError:
+    except (OSError, _HealthStateError):
         pass
 
 
@@ -582,5 +598,5 @@ def discard_health(
             scope_key=scope_key,
             expected_error=expected_error,
         )
-    except OSError:
+    except (OSError, _HealthStateError):
         pass
