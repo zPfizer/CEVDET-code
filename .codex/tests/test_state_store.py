@@ -244,6 +244,73 @@ class HealthPayloadTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "health-identity-invalid"):
                 state_store.report_health(state, component="", error="hata")
 
+    def test_invalid_health_status_types_fail_closed_without_loss(self) -> None:
+        for status in ([], {}):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                path = state / "health.json"
+                path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": state_store.HEALTH_SCHEMA_VERSION,
+                            "generation": 7,
+                            "components": {
+                                "flush:global": {
+                                    "status": status,
+                                    "error": "bozuk-status",
+                                },
+                                "compile:global": {
+                                    "status": "error",
+                                    "error": "korunacak",
+                                },
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                before = path.read_bytes()
+
+                with self.assertRaisesRegex(ValueError, "health-status-invalid"):
+                    state_store._load_health(path)
+                with self.assertRaisesRegex(ValueError, "health-status-invalid"):
+                    state_store.write_health(
+                        state, component="flush", error="yeni"
+                    )
+                with self.assertRaisesRegex(ValueError, "health-status-invalid"):
+                    state_store.clear_health(state, component="flush")
+
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_best_effort_health_helpers_preserve_invalid_status_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            path = state / "health.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": state_store.HEALTH_SCHEMA_VERSION,
+                        "generation": 1,
+                        "components": {
+                            "flush:global": {
+                                "status": [],
+                                "error": "bozuk-status",
+                            },
+                            "compile:global": {
+                                "status": "error",
+                                "error": "korunacak",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = path.read_bytes()
+
+            state_store.report_health(state, component="flush", error="yeni")
+            state_store.discard_health(state, component="compile")
+
+            self.assertEqual(path.read_bytes(), before)
+
     def test_load_health_returns_empty_payload_for_missing_or_broken_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

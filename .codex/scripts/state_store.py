@@ -446,11 +446,12 @@ def _load_health(path: Path) -> dict[str, Any]:
         if not isinstance(loaded.get("components"), dict):
             return empty
         for key, entry in loaded["components"].items():
-            if (
-                not isinstance(key, str)
-                or not isinstance(entry, dict)
-                or entry.get("status") not in {"error", "warning"}
-            ):
+            if not isinstance(key, str) or not isinstance(entry, dict):
+                return empty
+            status = entry.get("status")
+            if not isinstance(status, str):
+                raise _HealthStateError("health-status-invalid")
+            if status not in {"error", "warning"}:
                 return empty
         return loaded
     components: dict[str, Any] = {}
