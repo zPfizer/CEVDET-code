@@ -314,6 +314,50 @@ class SuppressionEdges(unittest.TestCase):
                     capture_output=True,
                 )
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows directory handle guard")
+    def test_replaced_suppression_directory_fails_before_handle_use(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary) / "private-memory"
+            controls = private / "controls"
+            controls.mkdir(parents=True)
+            (controls / "suppressions.jsonl").write_text("", encoding="utf-8")
+            real_pin = memory_ledger._pinned_windows_directory
+
+            for operation in (
+                lambda: memory_ledger.load_suppressed_hashes(private),
+                lambda: memory_ledger.suppress_derived_memory(
+                    private, "hedef", now=1.0
+                ),
+            ):
+                replacement = private / "controls-replacement"
+                injected = False
+
+                def replace_before_pin(path: Path):
+                    nonlocal injected
+                    if path == controls and not injected:
+                        injected = True
+                        controls.rename(replacement)
+                        controls.mkdir()
+                    return real_pin(path)
+
+                try:
+                    with mock.patch.object(
+                        memory_ledger,
+                        "_pinned_windows_directory",
+                        side_effect=replace_before_pin,
+                    ):
+                        with self.assertRaisesRegex(
+                            memory_ledger.MemoryPreferenceError,
+                            "memory-suppression-path-invalid",
+                        ):
+                            operation()
+                    self.assertTrue(injected)
+                finally:
+                    if controls.exists():
+                        controls.rmdir()
+                    if replacement.exists():
+                        replacement.rename(controls)
+
     def test_invalid_and_unreadable_suppression_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             private = Path(temporary)

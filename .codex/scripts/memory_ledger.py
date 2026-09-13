@@ -1539,13 +1539,23 @@ def _suppression_existing_ancestor(path: Path) -> Path:
     return candidate
 
 
-def _pin_suppression_directory(stack: ExitStack, path: Path) -> None:
+def _pin_suppression_directory(
+    stack: ExitStack,
+    path: Path,
+    *,
+    expected: os.stat_result | None = None,
+) -> None:
     opened = stack.enter_context(_pinned_windows_directory(path))
     current = _suppression_lstat(path)
     if current is None or not stat.S_ISDIR(current.st_mode):
         raise MemoryPreferenceError("memory-suppression-path-invalid")
     if opened is not None and (
-        (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        (
+            expected is not None
+            and (opened.st_dev, opened.st_ino, opened.st_nlink)
+            != (expected.st_dev, expected.st_ino, expected.st_nlink)
+        )
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
         or opened.st_nlink != 1
         or current.st_nlink != 1
     ):
@@ -1557,6 +1567,7 @@ def _ensure_pinned_suppression_directory(
     target: Path,
     ancestor: Path,
     private_root: Path,
+    expected: os.stat_result | None = None,
 ) -> None:
     pending: list[Path] = []
     current = Path(target).absolute()
@@ -1575,7 +1586,8 @@ def _ensure_pinned_suppression_directory(
         except OSError as exc:
             raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
         _checked_suppression_path(private_root)
-        _pin_suppression_directory(stack, candidate)
+        _pin_suppression_directory(stack, candidate, expected=expected)
+        expected = None
         _checked_suppression_path(private_root)
 
 
@@ -1586,21 +1598,46 @@ def _suppression_controls_scope(
     pin_directory: bool = True,
     ensure_directory: bool = False,
 ) -> Iterator[Path]:
-    path = _checked_suppression_path(private_root)
-    controls = path.parent
     private = Path(private_root).absolute()
+    path = _suppression_path(private)
+    controls = path.parent
+    pre_private_metadata = _suppression_lstat(private)
+    pre_controls_metadata = _suppression_lstat(controls)
+    pre_ancestor = (
+        _suppression_existing_ancestor(private)
+        if os.name == "nt"
+        else None
+    )
+    pre_ancestor_metadata = (
+        _suppression_lstat(pre_ancestor) if pre_ancestor is not None else None
+    )
+    path = _checked_suppression_path(private_root)
 
     if ensure_directory:
         with ExitStack() as stack:
             try:
                 ancestor = _suppression_existing_ancestor(private)
-                _pin_suppression_directory(stack, ancestor)
+                if (
+                    pre_ancestor is None
+                    or _suppression_path_key(ancestor)
+                    != _suppression_path_key(pre_ancestor)
+                ):
+                    raise MemoryPreferenceError("memory-suppression-path-invalid")
+                _pin_suppression_directory(
+                    stack,
+                    ancestor,
+                    expected=pre_ancestor_metadata,
+                )
                 _checked_suppression_path(private_root)
                 _ensure_pinned_suppression_directory(
                     stack, private, ancestor, private_root
                 )
                 _ensure_pinned_suppression_directory(
-                    stack, controls, private, private_root
+                    stack,
+                    controls,
+                    private,
+                    private_root,
+                    pre_controls_metadata,
                 )
                 path = _checked_suppression_path(private_root)
             except MemoryPreferenceError:
@@ -1623,13 +1660,22 @@ def _suppression_controls_scope(
     if not pin_directory or os.name != "nt" or controls_metadata is None:
         if pin_directory and os.name == "nt" and private_metadata is not None:
             pin_target = private
+            expected_metadata = pre_private_metadata
         elif pin_directory and os.name == "nt":
             pin_target = _suppression_existing_ancestor(private)
+            if (
+                pre_ancestor is None
+                or _suppression_path_key(pin_target)
+                != _suppression_path_key(pre_ancestor)
+            ):
+                raise MemoryPreferenceError("memory-suppression-path-invalid")
+            expected_metadata = pre_ancestor_metadata
         else:
             yield path
             return
     else:
         pin_target = controls
+        expected_metadata = pre_controls_metadata
     # An absent controls entry has no handle of its own; keep its existing
     # private-memory parent pinned and reject changes observed across the read.
     with ExitStack() as stack:
@@ -1642,7 +1688,17 @@ def _suppression_controls_scope(
                 stack.enter_context(_pinned_windows_directory(controls))
             current = pin_target.lstat()
             if opened is not None and (
-                (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+                (
+                    expected_metadata is not None
+                    and (opened.st_dev, opened.st_ino, opened.st_nlink)
+                    != (
+                        expected_metadata.st_dev,
+                        expected_metadata.st_ino,
+                        expected_metadata.st_nlink,
+                    )
+                )
+                or (opened.st_dev, opened.st_ino)
+                != (current.st_dev, current.st_ino)
                 or opened.st_nlink != 1
                 or current.st_nlink != 1
             ):
