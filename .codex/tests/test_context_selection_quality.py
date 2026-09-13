@@ -1276,6 +1276,10 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                 "Daha önce veri saklama için hangi güvenli yerel depolama seçeneğini seçmiştik",
                 "Daha önce veri saklama sorumlusu olarak kimi seçmiştik",
                 "Daha önce veri saklama sorumluları olarak kimleri seçmiştik",
+                "Daha önce veri saklama için hangi planı seçerdik?",
+                "Daha önce veri saklama için ne karar verdin?",
+                "Daha önce bitirmek için hangi veri saklama planını seçmiştik?",
+                "Daha önce veri saklama seçeneklerini test ettik ve güncel kabul ettiklerimizden hangisini seçmiştik?",
                 "Daha önce Python 3.14 ile veri saklama için hangi seçeneği uygun görmüştük?",
                 "Daha önce Node.js ile veri saklama için hangi seçeneği uygun görmüştük?",
                 "Daha önce config.active ile veri saklama için hangi seçeneği uygun görmüştük?",
@@ -1353,15 +1357,21 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
             "kodu, " * 2560,
             "karar verdik, " * 1280,
             "metin " * 2000 + ". " + "hangi secenegi sectik, " * 1000,
+            "a" * 7000 + "mek icin guncel " + "secerdin, " * 700,
         ):
             with self.subTest(body_start=body[:30]), mock.patch.object(
                 retrieval, "HISTORY_TURKISH_RETROSPECTIVE_QUERY",
                 wraps=retrieval.HISTORY_TURKISH_RETROSPECTIVE_QUERY,
-            ) as matcher:
+            ) as matcher, mock.patch.object(
+                retrieval, "HISTORY_TURKISH_PURPOSE", wraps=retrieval.HISTORY_TURKISH_PURPOSE,
+            ) as purpose:
                 self.assertEqual(retrieval._retrospective_question_matches("daha once " + body), [])
                 self.assertLessEqual(matcher.fullmatch.call_count, 1)
+                self.assertLessEqual(purpose.match.call_count, 1)
 
     def test_past_background_before_current_request_does_not_enable_history(self) -> None:
+        advice = "Daha önce bitirmek için hangi güncel planı seçerdin?"
+        self.assertFalse(retrieval._is_history_query(retrieval._retrieval_terms(advice), advice))
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             current = "🧠 500-Knowledge/veri-saklama-guncel.md"
@@ -1393,6 +1403,7 @@ Geçmiş veri saklama kararı: uzun günlükler.
             entries = retrieval.build_vault_map(root, write_cache=False)
             for query in (
                 "Daha önce veri saklama kararı vermiştik, şimdi nasıl değiştirelim?",
+                "Daha önce bitirmek için hangi güncel veri saklama planını seçerdin?",
                 "Daha önce veri saklama için bunu kararlaştırmıştık; güncel seçeneği öner",
                 "Daha önce veri saklama kararı vermiştik.Güncel olarak hangi seçeneği uygun gördük?",
                 *("Daha önce veri saklama kararı vermiştik" + end + " güncel olarak hangi seçeneği uygun gördük?" for end in (".", "!", ";", ":", "\n")),
@@ -1468,6 +1479,18 @@ Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun 
                 )
             entries = retrieval.build_vault_map(root, write_cache=False)
             history_first = "Daha önce veri saklama konusunda ne karar vermiştik ve güncel karar nedir?"
+            relative_choice = "Daha önce veri saklama seçeneklerini test ettik ve güncel kabul ettiklerimizden hangisini seçmiştik?"
+            self.assertFalse(retrieval._should_preserve_current_stale_penalty(
+                relative_choice, retrieval._retrieval_terms(relative_choice),
+            ))
+            self.assertIn(historical, {
+                hit.entry.path for hit in retrieval.search_vault(entries, relative_choice, top_k=2)
+            })
+            relative_mixed = relative_choice + " ve güncel karar nedir?"
+            self.assertIsNotNone(retrieval._split_current_history_query(relative_mixed))
+            self.assertEqual({current, historical}, {
+                hit.entry.path for hit in retrieval.search_vault(entries, relative_mixed, top_k=2)
+            })
             for separator in ("? ", ". ", "! ", "?\n", "?\t", "?\r\n"):
                 sentence_query = history_first.replace(" ve ", separator)
                 with self.subTest(separator=separator):

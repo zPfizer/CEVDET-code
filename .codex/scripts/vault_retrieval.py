@@ -233,6 +233,12 @@ HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
 HISTORY_TURKISH_RETROSPECTIVE_END = re.compile(
     rf"(?ix)\b(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b{HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY}"
 )
+HISTORY_TURKISH_PURPOSE = re.compile(r"\b(?:daha\s+once|onceden)\s+\w+m[ae]k\s+icin\b")
+HISTORY_TURKISH_SELECTION_AORIST = re.compile(rf"secer{HISTORY_TURKISH_PAST_SUFFIX}\b")
+HISTORY_TURKISH_CURRENT_SELECTION_OBJECT = re.compile(
+    rf"\b(?P<current>{CURRENT_QUERY_CUE})\s+(?:\w+\s+)?(?P<relative>\w+)\s+"
+    rf"(?P<which>hangi\w*)\s+sec\w*{HISTORY_TURKISH_PAST_SUFFIX}\b"
+)
 HISTORY_CHANGE_TAIL = (
     rf"(?:\s*(?:[?!.,;:]|$)|\s+{HISTORY_CHANGE_TEMPORAL}\b"
     r"|\s+(?:in|to|from|with|about|between|since|after|over|for)\b)"
@@ -1580,19 +1586,36 @@ def _retrospective_question_terms(normalized: str) -> frozenset[str]:
     )
 
 
+def _current_selection_object_spans(normalized: str) -> set[tuple[int, int]]:
+    # An ablative participial object before "which did we choose" qualifies
+    # the past selection; it does not introduce an independent current request.
+    return {
+        match.span("current")
+        for match in HISTORY_TURKISH_CURRENT_SELECTION_OBJECT.finditer(normalized)
+        if match["relative"].endswith(("dan", "den"))
+        and re.search(r"[dt][iu][kg]", match["relative"])
+        and _retrospective_question_terms(match["which"])
+    }
+
+
 def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
     normalized = _unquoted_request(normalized, preserve_positions=True)
     starts = [match.start() for match in re.finditer(r"\b(?:daha\s+once|onceden)\b", normalized)]
     if not starts:
         return []
+    purpose_starts = {start for start in starts if HISTORY_TURKISH_PURPOSE.match(normalized, start)}
     endings = list(HISTORY_TURKISH_RETROSPECTIVE_END.finditer(normalized))
     predicate_ends = [ending.end() for ending in endings]
     whitespace = re.compile(r"\s*")
     following = {end: whitespace.match(normalized, end).end() for end in predicate_ends}
+    current_positions = [match.start() for match in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized)]
+    related_current = _current_selection_object_spans(normalized)
     current_boundaries = []
     for connector in re.finditer(
-        rf"(?:\b(?:ve|ile)\b\s+|[,.!?;:\r\n]\s*){CURRENT_QUERY_CUE}\b", normalized,
+        rf"(?:\b(?:ve|ile)\b\s+|[,.!?;:\r\n]\s*)(?P<current>{CURRENT_QUERY_CUE})\b", normalized,
     ):
+        if connector.span("current") in related_current:
+            continue
         previous = bisect_right(predicate_ends, connector.start()) - 1
         # A coordinated adjective is not a new clause. Require a preceding
         # predicate, immediately followed by this connector.
@@ -1625,6 +1648,14 @@ def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
         if index < 0 or starts[index] in accepted:
             continue
         start = starts[index]
+        current_index = bisect_left(current_positions, start)
+        if (
+            HISTORY_TURKISH_SELECTION_AORIST.match(ending.group())
+            and start in purpose_starts
+            and current_index < len(current_positions)
+            and current_positions[current_index] < ending.start()
+        ):
+            continue  # A current choice for an earlier-finish goal is prospective advice.
         clause_end = bisect_left(clause_ends, start)
         if clause_end < len(clause_ends) and clause_ends[clause_end] < ending.start():
             continue
@@ -1989,9 +2020,11 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
         raw_cursor = connector.end()
     normalized_parts.append(_normalize(query[raw_cursor:]))
     normalized = "".join(normalized_parts)
+    related_current = _current_selection_object_spans(normalized)
     current_spans = tuple(
         (match.start(), match.end())
         for match in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized)
+        if match.span() not in related_current
     )
     if not current_spans:
         return None
@@ -2088,8 +2121,8 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     right = query[connector_end:].strip(" ,;:()[]")
     left_terms = _retrieval_terms(left)
     right_terms = _retrieval_terms(right)
-    left_current = bool(left_terms & CURRENT_QUERY_TERMS)
-    right_current = bool(right_terms & CURRENT_QUERY_TERMS)
+    left_current = _has_independent_current_cue(left)
+    right_current = _has_independent_current_cue(right)
     left_history = _is_history_query(left_terms, left)
     right_history = _is_history_query(right_terms, right)
     if left_current and right_history and not right_current and not left_history:
@@ -2138,7 +2171,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     if current_topic_terms and not history_topic_terms:
         history_scope = f"{history_scope} {' '.join(current_topic_terms)}"
         history_terms = _retrieval_terms(history_scope)
-        if history_terms & CURRENT_QUERY_TERMS or not _is_history_query(history_terms, history_scope):
+        if _has_independent_current_cue(history_scope) or not _is_history_query(history_terms, history_scope):
             return None
     elif history_topic_terms and not current_topic_terms:
         current_scope = f"{current_scope} {' '.join(history_topic_terms)}"
@@ -2162,6 +2195,7 @@ def _has_independent_current_cue(query: str) -> bool:
         match.span("current")
         for match in HISTORY_OBJECT_CURRENT_CUE.finditer(normalized)
     }
+    related_current_spans.update(_current_selection_object_spans(normalized))
     words = tuple(re.finditer(r"(?<!\w)[\w]+(?!\w)", normalized))
     genitive_suffixes = {"in", "nin", "un", "nun"}
     for current_index, current_word in enumerate(words):
