@@ -1516,9 +1516,24 @@ def _suppression_controls_scope(
     private_root: Path,
     *,
     pin_directory: bool = True,
+    ensure_directory: bool = False,
 ) -> Iterator[Path]:
     path = _checked_suppression_path(private_root)
     controls = path.parent
+    if (
+        ensure_directory
+        and os.name == "nt"
+        and private_root.exists()
+        and not controls.exists()
+    ):
+        try:
+            controls.mkdir(parents=True, exist_ok=True)
+            path = _checked_suppression_path(private_root)
+            controls = path.parent
+        except MemoryPreferenceError:
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
     if not pin_directory or os.name != "nt" or not controls.exists():
         yield path
         return
@@ -1663,6 +1678,7 @@ def load_suppressed_hashes(private_root: Path) -> frozenset[str]:
                 _suppression_controls_scope(
                     private_root,
                     pin_directory=pin_directory,
+                    ensure_directory=pin_directory,
                 )
             )
         except _SuppressionDirectoryBusy:
