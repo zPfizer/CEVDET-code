@@ -19,11 +19,31 @@ from graph_integrity import (  # noqa: E402
     graph_summary,
     normalize_connection_links,
 )
-from markdown_boundary import markdown_body  # noqa: E402
+from markdown_boundary import markdown_body, markdown_link_spans  # noqa: E402
 from vault_corpus import vault_notes  # noqa: E402
 
 
 class GraphIntegrityTests(unittest.TestCase):
+    def test_inline_link_metadata_uses_destination_and_title_boundaries(self) -> None:
+        for text in (
+            '[x](url "title ) value")',
+            "[x](url 'title ( value')",
+            '[x](url (parenthesized title))',
+            '[x](<a)b> "title")',
+            '[x](a(b)c "title")',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(markdown_link_spans(text), ((0, len(text)),))
+                self.assertEqual(markdown_link_spans(text, include_labels=False), ((3, len(text)),))
+        for text in (
+            "[x](url 'title\n\nvisible')",
+            "[x](url 'title'\n\n)",
+            '[x](<a<b> "title")',
+            "[x](url 'unterminated)",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(markdown_link_spans(text), ())
+
     def test_unmatched_inline_backtick_is_literal_and_does_not_hang(self) -> None:
         text = "# Günlük Log: 2026-09-08\ntext`"
         code = (

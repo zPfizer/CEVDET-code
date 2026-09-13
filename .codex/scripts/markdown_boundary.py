@@ -210,22 +210,60 @@ def markdown_link_spans(
         if label_end is None or label_end + 1 >= len(text) or text[label_end + 1] != '(':
             index = max(cursor, index + 1)
             continue
-        depth = 1
         cursor = label_end + 2
+        while cursor < len(text) and text[cursor] in ' \t\r\n':
+            cursor += 1
+        depth = 1
+        angle_destination = cursor < len(text) and text[cursor] == '<'
+        if angle_destination:
+            cursor += 1
+        title = None
+        span_end = None
         while cursor < len(text):
             if text[cursor] == '\\':
                 cursor += 2
                 continue
+            if angle_destination:
+                if text[cursor] == '>':
+                    angle_destination = False
+                elif text[cursor] in '<\r\n':
+                    break
+                cursor += 1
+                continue
+            if title is not None:
+                if text[cursor] == title:
+                    cursor += 1
+                    while cursor < len(text) and text[cursor] in ' \t\r\n':
+                        cursor += 1
+                    if cursor >= len(text) or text[cursor] != ')':
+                        break
+                    span_end = cursor + 1
+                    break
+                if title == ')' and text[cursor] == '(':
+                    break
+                cursor += 1
+                continue
+            if depth == 1 and text[cursor] in ' \t\r\n':
+                while cursor < len(text) and text[cursor] in ' \t\r\n':
+                    cursor += 1
+                if cursor < len(text) and text[cursor] in "\"'(":
+                    title = ')' if text[cursor] == '(' else text[cursor]
+                    cursor += 1
+                    continue
+                if cursor >= len(text) or text[cursor] != ')':
+                    break
             if text[cursor] == '(':
                 depth += 1
             elif text[cursor] == ')':
                 depth -= 1
                 if depth == 0:
-                    start = index if include_labels else label_end + 1
-                    spans.append((start, cursor + 1))
-                    index = cursor + 1
+                    span_end = cursor + 1
                     break
             cursor += 1
+        if span_end is not None and not _crosses_inline_block(text, index, span_end - 1):
+            start = index if include_labels else label_end + 1
+            spans.append((start, span_end))
+            index = span_end
         else:
             index = label_end + 2
     spans.extend(_reference_definition_spans(text))
@@ -735,7 +773,7 @@ def markdown_body(
                     if context[0] < indentation
                 ]
                 list_contexts.append((indentation, content_indent))
-                paragraph_active = False
+                paragraph_active = _is_paragraph_line(content[list_item.end():])
                 continue
             _blank(chars, start, end)
             list_contexts = []

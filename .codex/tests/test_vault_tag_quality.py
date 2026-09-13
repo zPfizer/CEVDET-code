@@ -189,6 +189,23 @@ class VaultTagQualityTests(unittest.TestCase):
             ['indented-rule'],
         )
 
+    def test_indentation_cannot_interrupt_a_list_paragraph(self) -> None:
+        for prefix, expected in (
+            ('- paragraph\n', ['bad']),
+            ('- paragraph\n\n', []),
+            ('- # Heading\n', []),
+            ('1. paragraph\n', ['bad']),
+        ):
+            with self.subTest(prefix=prefix):
+                note = tag_taxonomy.NoteIndex(
+                    Path('list.md'), PurePosixPath('list.md'),
+                    prefix + '       Visible #bad\n',
+                )
+                self.assertEqual(
+                    [item.tag for item in tag_taxonomy._inline_tag_violations(note)],
+                    expected,
+                )
+
     def test_migration_patch_only_changes_tags_and_dry_run_keeps_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
