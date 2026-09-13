@@ -19,10 +19,59 @@ from graph_integrity import (  # noqa: E402
     graph_summary,
     normalize_connection_links,
 )
+from markdown_boundary import markdown_body, markdown_link_spans  # noqa: E402
 from vault_corpus import vault_notes  # noqa: E402
 
 
 class GraphIntegrityTests(unittest.TestCase):
+    def test_list_block_owners_and_tab_columns_preserve_visible_links(self) -> None:
+        for text in (
+            '- - ```\n    x\n    ```\n    Visible [[real]]',
+            '> - ```\n> \t  ```\n>   Visible [[real]]',
+            '- item\n\n  > ```\n  > x\n  > ```\n  Visible [[real]]',
+            '10. ```\n    x\n    ```\n    Visible [[real]]',
+            '- - <pre>\n    x\n    </pre>\n    Visible [[real]]',
+        ):
+            with self.subTest(text=text):
+                visible = markdown_body(text)
+                self.assertEqual(len(visible), len(text))
+                self.assertEqual(visible.index('[[real]]'), text.index('[[real]]'))
+        for block in ('```\nx\n```', '<pre>\nx\n</pre>'):
+            text = '- item\n\n' + block + '\n    Hidden [[real]]'
+            self.assertNotIn('[[real]]', markdown_body(text))
+
+    def test_reference_offsets_preserve_original_tabbed_source_positions(self) -> None:
+        for newline in ('\n', '\r\n'):
+            text = newline.join(('before [[visible]]', '', '- item', '', '\t[a\\]b]: url "title"', ''))
+            spans = markdown_link_spans(text)
+            self.assertEqual(spans, ((text.index('[a'), text.index('"title"') + len('"title"')),))
+            self.assertEqual(text[spans[0][0]:spans[0][1]], '[a\\]b]: url "title"')
+        text = '[first]:\n  destination\n[second]: url "title\ncontinued"\n'
+        self.assertEqual(
+            [text[start:end] for start, end in markdown_link_spans(text)],
+            ['[first]:\n  destination', '[second]: url "title\ncontinued"'],
+        )
+
+    def test_inline_link_metadata_uses_destination_and_title_boundaries(self) -> None:
+        for text in (
+            '[x](url "title ) value")',
+            "[x](url 'title ( value')",
+            '[x](url (parenthesized title))',
+            '[x](<a)b> "title")',
+            '[x](a(b)c "title")',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(markdown_link_spans(text), ((0, len(text)),))
+                self.assertEqual(markdown_link_spans(text, include_labels=False), ((3, len(text)),))
+        for text in (
+            "[x](url 'title\n\nvisible')",
+            "[x](url 'title'\n\n)",
+            '[x](<a<b> "title")',
+            "[x](url 'unterminated)",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(markdown_link_spans(text), ())
+
     def test_unmatched_inline_backtick_is_literal_and_does_not_hang(self) -> None:
         text = "# Günlük Log: 2026-09-08\ntext`"
         code = (
@@ -44,7 +93,7 @@ class GraphIntegrityTests(unittest.TestCase):
         self.assertIn("text`", result.stdout)
         self.assertIn(DAILY_GRAPH_LINK, result.stdout)
 
-    def test_multiline_inline_code_cannot_supply_connection_heading(self) -> None:
+    def test_multiline_inline_code_does_not_hide_block_connection_heading(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             concepts = root / "knowledge" / "concepts"
@@ -61,12 +110,47 @@ class GraphIntegrityTests(unittest.TestCase):
             )
             connection.write_text(original, encoding="utf-8")
 
-            with self.assertRaisesRegex(
-                GraphPolicyError, "connection-heading-missing:alpha--beta.md"
-            ):
-                normalize_connection_links(root)
+            self.assertEqual(normalize_connection_links(root), 1)
+            updated = connection.read_text(encoding="utf-8")
+            self.assertIn("[[knowledge/concepts/alpha|alpha]]", updated)
+            self.assertIn("[[knowledge/concepts/beta|beta]]", updated)
 
-            self.assertEqual(connection.read_text(encoding="utf-8"), original)
+    def test_multiline_inline_code_does_not_hide_a_block_heading_link(self) -> None:
+        for example in (
+            "`\n## [[../secret]]\n`",
+            "> `\n> ## [[../secret]]\n> `",
+        ):
+            with self.subTest(example=example):
+                body = markdown_body(example)
+
+                self.assertIn("[[../secret]]", body)
+
+        paragraph = markdown_body("> `foo\n> bar`")
+        self.assertNotIn("foo", paragraph)
+        self.assertNotIn("bar", paragraph)
+
+    def test_inline_code_cannot_cross_into_a_new_blockquote(self) -> None:
+        for example in ('`open\n> [[../secret]]`', '> `open\n> > [[../secret]]`'):
+            with self.subTest(example=example):
+                self.assertIn('[[../secret]]', markdown_body(example))
+        for example in ('> `open\n> [[inside]]`', '- `open\n  [[inside]]`'):
+            with self.subTest(example=example):
+                self.assertNotIn('[[inside]]', markdown_body(example))
+
+    def test_compact_self_closing_literal_tag_does_not_start_a_raw_block(self) -> None:
+        for tag in ('pre', 'script', 'style', 'textarea'):
+            with self.subTest(tag=tag):
+                self.assertIn('[[../secret]]', markdown_body('<' + tag + '/>\n\n[[../secret]]'))
+                self.assertNotIn('[[../secret]]', markdown_body('<' + tag + ' />\n\n[[../secret]]'))
+
+    def test_deeper_quote_cannot_bypass_a_remaining_list_container(self) -> None:
+        for opener in ('```', '<pre>'):
+            for following in ('>> [[../secret]]', '>>   [[../secret]]'):
+                with self.subTest(opener=opener, following=following):
+                    self.assertIn('[[../secret]]', markdown_body('> - ' + opener + '\n' + following))
+            with self.subTest(opener=opener, retained=True):
+                self.assertNotIn('[[inside]]', markdown_body('> - ' + opener + '\n>   > [[inside]]'))
+                self.assertNotIn('[[inside]]', markdown_body('> ' + opener + '\n>> [[inside]]'))
 
     def test_graph_summary_keeps_observable_property_wikilinks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

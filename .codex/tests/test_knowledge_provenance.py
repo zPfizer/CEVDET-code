@@ -151,6 +151,14 @@ Bağ.
             [("##", "Görünür")],
         )
 
+    def test_multiline_backticks_do_not_hide_a_block_heading(self) -> None:
+        text = "`\n## Önemli Noktalar\n`\n"
+
+        self.assertEqual(
+            [(level, title) for level, title, _start, _end in knowledge_schema.markdown_headings(text)],
+            [("##", "Önemli Noktalar")],
+        )
+
     def test_heading_schema_ignores_fenced_headings_and_inline_tokens(self) -> None:
         fenced = "```markdown\n" + "\n".join(knowledge_schema.CONCEPT_HEADINGS) + "\n```\n"
         self.assertFalse(knowledge_schema._ordered(fenced, knowledge_schema.CONCEPT_HEADINGS))
@@ -168,6 +176,91 @@ Bağ.
 
         self.assertIn("Metin içinde ## İlgili Kavramlar ifadesi.", details)
         self.assertIn("[[sahte]]", details)
+
+    def test_link_rules_ignore_fenced_and_inline_examples_but_keep_real_links(self) -> None:
+        concept = _concept().replace(
+            "- [[bir]] ilişkisi.\n- [[iki]] ilişkisi.",
+            "````markdown\n- [[sahte-bir]]\n- [[sahte-iki]]\n````\n"
+            "`[[sahte-inline]]`",
+        )
+        self.assertTrue(knowledge_schema._concept_related_ok(Path('ornek.md'), _concept()))
+        self.assertFalse(
+            knowledge_schema._concept_related_ok(Path('ornek.md'), concept)
+        )
+
+        source_section = (
+            '```markdown\n[[daily/2026-09-01|Kaynak]]\n```\n'
+            '[[daily/2026-09-02|Kaynak]]'
+        )
+        self.assertEqual(
+            knowledge_schema._source_links(source_section),
+            {'2026-09-02.md'},
+        )
+
+        connection = (
+            '---\nconnects: [ornek, ikinci]\n---\n'
+            '## Bağlantı\n\n````markdown\n'
+            '[[knowledge/concepts/ornek|Örnek]]\n'
+            '[[knowledge/concepts/ikinci|İkinci]]\n````\n'
+            '## Ana Fikir\n\nBağ.\n'
+        )
+        self.assertFalse(
+            knowledge_schema._connection_links_ok(
+                Path('ornek--ikinci.md'), connection
+            )
+        )
+
+    def test_reference_metadata_cannot_satisfy_derived_connection_sources(self):
+        for footer, accepted in (
+            ('[hidden]: [[daily/2026-09-01|Kaynak]]', False),
+            ('[hidden]: /url "[[daily/2026-09-01|Kaynak]]"', False),
+            ('[label](url "[[daily/2026-09-01|Kaynak]]")', False),
+            ('[[daily/2026-09-01|Kaynak]]', True),
+        ):
+            with self.subTest(footer=footer):
+                text = ('---\nschema: knowledge-v2\nsources: [2026-09-01.md]\n'
+                        'updated: 2026-09-01\n---\n## Kaynaklar\n\n' + footer)
+                issues = []
+                knowledge_schema._validate_derived_connection(
+                    Path('knowledge/connections/bir--iki.md'), text, None, issues
+                )
+                self.assertEqual(any(item.endswith(':source-links') for item in issues), not accepted)
+                if not accepted:
+                    normalized = knowledge_schema.normalize_source_links(text)
+                    self.assertIn(footer, normalized)
+                    issues = []
+                    knowledge_schema._validate_derived_connection(
+                        Path('knowledge/connections/bir--iki.md'), normalized, None, issues
+                    )
+                    self.assertFalse(any(item.endswith(':source-links') for item in issues))
+
+    def test_link_targets_ignore_metadata_and_preserve_visible_labels(self):
+        body = ('[hidden]: [[knowledge/concepts/hidden]]\n\n'
+                '[[knowledge/concepts/real]]\n'
+                '[label [[knowledge/concepts/label]]](url "[[knowledge/concepts/title]]")')
+        self.assertEqual(
+            knowledge_schema._link_slugs(body),
+            {'knowledge/concepts/real', 'knowledge/concepts/label'},
+        )
+        hidden_related = _concept().replace(
+            '- [[bir]] ilişkisi.\n- [[iki]] ilişkisi.',
+            '[one]: [[bir]]\n[two]: [[iki]]',
+        )
+        self.assertFalse(knowledge_schema._concept_related_ok(Path('ornek.md'), hidden_related))
+        self.assertTrue(knowledge_schema._concept_related_ok(Path('ornek.md'), _concept()))
+
+    def test_reference_like_text_cannot_interrupt_a_paragraph(self):
+        source = '[[daily/2026-09-01|Kaynak]]'
+        for prefix in (
+            'paragraph\n', '10. item\n    paragraph\n    ',
+            '[bad]: <broken\n', '[bad]: url trailing\n',
+            '[bad]: url "unfinished\n', '[bad]: url "title" trailing\n',
+        ):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(knowledge_schema._source_links(prefix + '[hidden]: ' + source), {'2026-09-01.md'})
+        for prefix in ('paragraph\n\n', '10. item\n\n    ', '```\nx\n```\n', '<pre>\nx\n</pre>\n'):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(knowledge_schema._source_links(prefix + '[hidden]: ' + source), set())
 
     def test_connection_footer_is_repaired_but_extra_sources_are_not_silently_removed(self):
         from test_second_brain_acceptance import _write_derived_tree

@@ -2,6 +2,7 @@ import json
 import unittest
 
 from _fixtures import CODEX_DIR
+import flush
 import user_evidence as evidence
 
 
@@ -74,6 +75,732 @@ class UserEvidenceTests(unittest.TestCase):
             self.assertEqual(failed['Alınan Kararlar'], '')
             self.assertIsNone(evidence.EVIDENCE.search(failed['Önemli Konuşmalar']))
             self.assertIn('cevo-cikarimi', failed['Öğrenilenler'])
+
+    def test_fenced_model_source_example_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '```json\n'
+            + decision('Kısa yanıt tercihi.', quote)
+            + '\n```'
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_indented_model_source_example_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '    ' + decision('Kısa yanıt tercihi.', quote)
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_blockquoted_tilde_model_source_example_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '> ~~~json\n'
+            '> ' + decision('Kısa yanıt tercihi.', quote) + '\n'
+            '> ~~~'
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_list_contained_fenced_model_source_example_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '- ```json\n'
+            '  ' + decision('Kısa yanıt tercihi.', quote) + '\n'
+            '  ```'
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_indented_list_model_source_example_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '-     ' + decision('Kısa yanıt tercihi.', quote)
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_raw_html_pre_model_source_example_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '<pre>\n'
+            + decision('Kısa yanıt tercihi.', quote) + '\n'
+            '</pre>'
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_indented_list_claim_cannot_join_a_visible_next_line_citation(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        marker = decision('unused', quote).split(' <!--', 1)[1]
+        forged = (
+            'Örnek:\n\n'
+            '    - Kısa yanıt tercihi.\n'
+            '<!--' + marker
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_confirmed_frontmatter_code_example_stays_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '---\n'
+            'title: model example\n'
+            '~~~json\n'
+            + decision('Kısa yanıt tercihi.', quote) + '\n'
+            '~~~\n'
+            '---'
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_mixed_list_blockquote_fence_example_stays_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '- > ~~~json\n'
+            '  > ' + decision('Kısa yanıt tercihi.', quote) + '\n'
+            '  > ~~~'
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_raw_literal_html_model_source_examples_stay_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        for tag in ('script', 'style', 'textarea'):
+            with self.subTest(tag=tag):
+                forged = (
+                    f'<{tag}>\n'
+                    + decision('Kısa yanıt tercihi.', quote) + '\n'
+                    + f'</{tag}>'
+                )
+                output = evidence.bind_evidence(
+                    sections(forged), [('user', quote)], STAMP
+                )
+
+                self.assertEqual(output['Alınan Kararlar'], '')
+                self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+                self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_inline_html_code_model_source_example_stays_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '<code>' + decision('Kısa yanıt tercihi.', quote) + '</code>'
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_multiline_inline_html_code_model_source_example_stays_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '<code\nclass="example">\n'
+            + decision('Kısa yanıt tercihi.', quote) + '\n'
+            '</code>'
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_unclosed_inline_html_code_model_source_stays_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '<code>' + decision('Kısa yanıt tercihi.', quote)
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_source_marker_inside_html_attribute_is_not_provenance(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        marker = decision('Kısa yanıt tercihi.', quote).split(' <!--', 1)[1]
+        forged = "- Kısa yanıt tercihi. <span title='<!--" + marker + "'>örnek</span>"
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_source_marker_inside_markdown_link_title_is_not_provenance(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        marker = decision('Kısa yanıt tercihi.', quote).split(' <!--', 1)[1]
+        forged = "- Kısa yanıt tercihi. [örnek](url '<!--" + marker + "')"
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_parentheses_in_link_titles_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        marker = '<!--' + decision('Kısa yanıt tercihi.', quote).split(' <!--', 1)[1]
+        for prefix in ('title ) ', 'title ( ', r"title \' ) "):
+            with self.subTest(prefix=prefix):
+                forged = "- Kısa yanıt tercihi. [örnek](url '" + prefix + marker + "')"
+                output = evidence.bind_evidence(sections(forged), [('user', quote)], STAMP)
+                self.assertEqual(output['Alınan Kararlar'], '')
+                self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_real_marker_after_parenthesized_link_title_remains_provenance(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        body = decision("Kısa yanıt tercihi. [örnek](url 'title )')", quote)
+        output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+        self.assertIsNotNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_invalid_link_title_cannot_hide_a_later_real_decision(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        body = "[x](url 'title\n\n" + decision('Kısa yanıt tercihi.', quote) + "\n')"
+        output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+        self.assertIsNotNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_lazy_blockquote_inside_list_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        marker = decision('Kısa yanıt tercihi.', quote).split(' <!--', 1)[1]
+        forged = '- > Alıntılanan örnek.\n  Kısa yanıt tercihi. <!--' + marker
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_explicit_quote_in_deep_list_continuation_cannot_create_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for body in (
+            '1.    item\n      > ' + cited,
+            '1.    item\n      > Alıntı\n      ' + cited.removeprefix('- '),
+        ):
+            with self.subTest(body=body):
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(output['Alınan Kararlar'], '')
+                self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+        output = evidence.bind_evidence(
+            sections('1.    item\n      ' + cited), [('user', quote)], STAMP
+        )
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+
+    def test_escaped_html_code_closer_cannot_expose_source_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for slashes, trusted in (('\\', False), ('\\\\', True)):
+            with self.subTest(slashes=slashes):
+                body = '<code>example ' + slashes + '</code>\n' + cited
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
+    def test_escaped_reference_labels_keep_title_sources_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for label in (r'foo\]', r'foo\]:bar'):
+            for separator in (' ', '\n'):
+                with self.subTest(label=label, separator=separator):
+                    body = '[' + label + ']: /url' + separator + "'" + cited + "'"
+                    output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                    self.assertEqual(output['Alınan Kararlar'], '')
+                    self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_escaped_source_comment_is_literal_but_even_slashes_keep_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        for slashes, trusted in (('\\', False), ('\\\\', True)):
+            with self.subTest(slashes=slashes):
+                body = decision('Kısa yanıt tercihi.', quote).replace('<!--', slashes + '<!--')
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
+    def test_list_first_reference_definition_cannot_create_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for prefix in ('- ', '1. ', '1.    ', '- - '):
+            for separator in (' ', '\n      '):
+                with self.subTest(prefix=prefix, separator=separator):
+                    body = prefix + "[label]: /url" + separator + "'" + cited + "'"
+                    output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                    self.assertEqual(output['Alınan Kararlar'], '')
+                    self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+        body = "- [label]: /url 'title'\n\n" + cited
+        output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+
+    def test_continued_list_reference_definition_cannot_create_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for opening, indent in (('10. item', '    '), ('1.    item', '      ')):
+            with self.subTest(opening=opening):
+                body = opening + '\n\n' + indent + "[label]: /url '" + cited + "'"
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(output['Alınan Kararlar'], '')
+                self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+        body = "10. item\n\n    [label]: /url 'title'\n\n" + cited
+        output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+
+    def test_literal_html_block_requires_exact_closing_token(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for tag in ('pre', 'script', 'style', 'textarea'):
+            for gap, trusted in ((' ', False), ('\t', False), ('', True)):
+                with self.subTest(tag=tag, gap=gap):
+                    body = '<' + tag + '>\nexample\n</' + tag + gap + '>\n' + cited
+                    output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                    self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                    self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
+    def test_mixed_thematic_markers_cannot_end_a_lazy_quote(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote).removeprefix('- ')
+        for markers, trusted in (('-*_*', False), ('_*_-', False), ('* - _', True), ('***', True), ('- - -', True), ('_ _ _', True)):
+            with self.subTest(markers=markers):
+                body = '> quoted lead\n' + markers + '\n' + cited
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
+    def test_tab_indented_pseudoheading_cannot_split_inline_code(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote).removeprefix('- ')
+        for indent, trusted in (('\t', False), (' \t', False), ('  \t', False), ('   ', True)):
+            with self.subTest(indent=indent):
+                body = '`open\n' + indent + '## ' + cited + '\n`'
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
+    def test_indented_pseudoheading_preserves_an_active_lazy_quote(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote).removeprefix('- ')
+        for lead, trusted in (
+            ('> quoted lead\n    ## example\n', False),
+            ('> quoted lead\n\t## example\n', False),
+            ('> quoted lead\n>     ## example\n', False),
+            ('> quoted lead\n   ## example\n', True),
+            ('>     code\n', True),
+            ('> quoted lead\n\n', True),
+        ):
+            with self.subTest(lead=lead):
+                output = evidence.bind_evidence(sections(lead + cited), [('user', quote)], STAMP)
+                self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
+    def test_list_context_survives_blank_before_a_quoted_paragraph(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote).removeprefix('- ')
+        body = '10. item\n\n    > quoted\n    ' + cited
+        output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_top_level_blocks_release_old_list_indentation(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for block in ('```\nx\n```', '<pre>\nx\n</pre>'):
+            with self.subTest(block=block):
+                body = '- item\n\n' + block + '\n    ' + cited
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(output['Alınan Kararlar'], '')
+                self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+        body = '- item\n\n  ```\n  x\n  ```\n  ' + cited
+        output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+
+    def test_partial_tab_in_list_cannot_close_a_fence_early(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for closer, trusted in (('\t  ```', False), ('  ```', True)):
+            with self.subTest(closer=closer):
+                body = '- ```\n' + closer + '\n  ' + cited
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
+    def test_mixed_space_tab_code_indentation_cannot_create_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for indent in (' \t', '  \t', '   \t'):
+            for lead, trusted in (('', False), ('Paragraph\n', True), ('Paragraph\n\n', False)):
+                with self.subTest(indent=indent, lead=lead):
+                    output = evidence.bind_evidence(sections(lead + indent + cited), [('user', quote)], STAMP)
+                    self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                    self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
+    def test_invalid_inline_html_closer_cannot_expose_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for tag in ('code', 'pre', 'script', 'style', 'textarea'):
+            for closer, trusted in (
+                ('</' + tag + ' foo>', False),
+                ('</' + tag + '/>', False),
+                ('</ ' + tag + '>', False),
+                ('</' + tag.upper() + ' \t>', True),
+            ):
+                with self.subTest(tag=tag, closer=closer):
+                    body = 'prefix <' + tag + '>example' + closer + '\n' + cited
+                    output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                    self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                    self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
+    def test_ordered_list_after_blockquote_is_real_source_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        body = '> quoted lead\n2. ' + decision('Kısa yanıt tercihi.', quote).removeprefix('- ')
+        output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+        self.assertIsNotNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_inline_literal_html_closer_escapes_do_not_change_block_html_rules(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for tag in ('pre', 'script', 'style', 'textarea'):
+            for prefix, trusted in (('prefix ', False), ('', True)):
+                with self.subTest(tag=tag, prefix=prefix):
+                    body = prefix + '<' + tag + '>example \\</' + tag + '>\n' + cited
+                    output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                    self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                    self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
+    def test_source_marker_inside_reference_definition_title_is_not_provenance(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        marker = decision('Kısa yanıt tercihi.', quote).split(' <!--', 1)[1]
+        forged = "[Use Python]: /url '<!--" + marker + "'"
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_source_marker_inside_reference_continuation_title_is_not_provenance(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        marker = decision('Kısa yanıt tercihi.', quote).split(' <!--', 1)[1]
+        forged = "[Use Python]: /url\n  'Claim <!--" + marker + "'"
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_source_marker_inside_multiline_reference_title_is_not_provenance(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        marker = decision('Kısa yanıt tercihi.', quote).split(' <!--', 1)[1]
+        forged = "[Use Python]: /url\n'heading\nClaim <!--" + marker + "\n'"
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_source_marker_inside_same_line_multiline_reference_title_is_not_provenance(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        marker = decision('Kısa yanıt tercihi.', quote).split(' <!--', 1)[1]
+        forged = "[Use Python]: /url 'heading\nClaim <!--" + marker + "\n'"
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_source_marker_inside_split_reference_title_is_not_provenance(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        marker = decision('Kısa yanıt tercihi.', quote).split(' <!--', 1)[1]
+        for forged in (
+            "[Use Python]:\n/url\n'heading\nClaim <!--" + marker + "\n'\n\n[Use Python]",
+            "[Use Python]: /url\n    'heading\nClaim <!--" + marker + "\n'\n\n[Use Python]",
+        ):
+            with self.subTest(forged=forged):
+                output = evidence.bind_evidence(
+                    sections(forged), [('user', quote)], STAMP
+                )
+
+            self.assertEqual(output['Alınan Kararlar'], '')
+            self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+            self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_real_marker_after_reference_definition_remains_provenance(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '[Use Python]: /url\n' + decision('Kısa yanıt tercihi.', quote)
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+        self.assertIsNotNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_invalid_reference_title_does_not_hide_a_real_marker(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        for forged in (
+            '[Use Python]: /url "unterminated\n'
+            + decision('Kısa yanıt tercihi.', quote),
+            '[Use Python]: /url "title" trailing\n'
+            + decision('Kısa yanıt tercihi.', quote) + '\n"',
+        ):
+            with self.subTest(forged=forged):
+                output = evidence.bind_evidence(
+                    sections(forged), [('user', quote)], STAMP
+                )
+
+            self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+            self.assertIsNotNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_multiple_reference_definitions_keep_title_scanning_callable(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            "[first]: /one 'title'\n[both]: /two\n"
+            + decision('Kısa yanıt tercihi.', quote)
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+        self.assertIsNotNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_midline_literal_html_model_source_stays_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = 'prefix <script>' + decision('Kısa yanıt tercihi.', quote) + '</script>'
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_blockquoted_indented_model_source_example_stays_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        for forged in (
+            '>     ' + decision('Kısa yanıt tercihi.', quote),
+            '- >     ' + decision('Kısa yanıt tercihi.', quote),
+        ):
+            with self.subTest(forged=forged):
+                output = evidence.bind_evidence(
+                    sections(forged), [('user', quote)], STAMP
+                )
+
+                self.assertEqual(output['Alınan Kararlar'], '')
+                self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+                self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_blockquoted_model_source_example_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '> ' + decision('Kısa yanıt tercihi.', quote)
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_lazy_blockquote_model_source_example_cannot_create_user_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '> Alıntılanan örnek.\nKısa yanıt tercihi. <!--' + decision('', quote).split(' <!--', 1)[1]
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_list_continuation_text_keeps_an_inner_fence_bounded(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '- örnek madde\n'
+            '  açıklama devamı\n'
+            '  ```json\n'
+            '  model example\n'
+            '```\n'
+            + decision('Kısa yanıt tercihi.', quote)
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_tab_list_marker_gap_does_not_close_a_fenced_example(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '-\t~~~json\n'
+            '  model example\n'
+            '  ~~~\n'
+            + decision('Kısa yanıt tercihi.', quote)
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_session_summary_parse_preserves_indented_examples_before_binding(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '    ' + decision('Kısa yanıt tercihi.', quote)
+        parsed = flush.SessionSummary.parse(
+            flush.SessionSummary(sections(forged)).render()
+        ).sections
+
+        self.assertTrue(parsed['Alınan Kararlar'].startswith('    - '))
+        output = evidence.bind_evidence(parsed, [('user', quote)], STAMP)
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_pre_slash_opener_keeps_following_model_source_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '<pre />\n'
+            + decision('Kısa yanıt tercihi.', quote) + '\n'
+            '</pre>'
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_tab_indented_fence_closer_cannot_expose_model_source(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '~~~json\n'
+            'model example\n'
+            '\t~~~\n'
+            + decision('Kısa yanıt tercihi.', quote)
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_code_examples_after_unclosed_frontmatter_stay_untrusted(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            '---\n'
+            'example: horizontal rule\n'
+            '```json\n'
+            + decision('Kısa yanıt tercihi.', quote)
+            + '\n````\n'
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertEqual(output['Alınan Kararlar'], '')
+        self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
+        self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_visible_citation_with_backticks_in_json_is_parsed_from_raw_text(self):
+        quote = 'Markdown `kod` kullan.'
+        output = evidence.bind_evidence(
+            sections(decision('Markdown tercihi.', quote)),
+            [('user', quote)],
+            STAMP,
+        )
+
+        record = json.loads(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])[1])
+        self.assertEqual(record['quote'], quote)
 
     def test_missing_citation_preserves_content_as_uncertain_not_user_decision(self):
         output = evidence.bind_evidence(sections('- Kaynaksız bir karar.'), [('user', 'Merhaba.')], STAMP)

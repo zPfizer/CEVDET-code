@@ -89,6 +89,35 @@ class VaultIngestionSliceATests(unittest.TestCase):
         self.assertIn("image-unprovided-section-missing", invalid)
         self.assertIn("upper-index-link-missing", invalid)
 
+    def test_markdown_examples_cannot_supply_intake_links_or_images(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            path = vault / "🏰 300-Projects" / "Demo" / "örnek.md"
+            path.parent.mkdir(parents=True)
+            self._taxonomy(vault, {"canonical": ["vault"], "scoped": {}, "aliases": {}})
+            text = (
+                self._note("source-note", ("vault",), upper_link=False)
+                .replace(
+                    "status: active\n",
+                    "status: active\n"
+                    "dedupe_key: ornek-kaydi\n"
+                    "source_type: user-provided-text\n",
+                )
+                + "\n```markdown\n"
+                + "Üst kayıt: [[Proje İndeksi]]\n"
+                + "![Örnek görsel](not-assets/example.png)\n"
+                + "## Görselde açıkça görülenler\n"
+                + "## Görselde verilmeyenler\n"
+                + "```\n"
+            )
+
+            issues = intake_contract.validate_note(vault, path, text)
+
+        self.assertEqual(
+            issues,
+            ("upper-index-link-missing",),
+        )
+
     def test_type_routes_and_project_marker_fields_are_enforced(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
