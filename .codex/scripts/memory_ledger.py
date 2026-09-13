@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 import datetime as dt
 import hashlib
 import io
@@ -1442,6 +1443,15 @@ def _suppression_path(private_root: Path) -> Path:
     return private_root / "controls" / "suppressions.jsonl"
 
 
+def _suppression_path_key(path: Path) -> str:
+    value = os.path.normcase(os.path.normpath(os.fspath(path)))
+    if value.startswith("\\\\?\\unc\\"):
+        return "\\\\" + value[8:]
+    if value.startswith("\\\\?\\"):
+        return value[4:]
+    return value
+
+
 def _checked_suppression_path(private_root: Path) -> Path:
     """Keep the suppression ledger and its lock inside private memory."""
     private = Path(private_root)
@@ -1461,8 +1471,12 @@ def _checked_suppression_path(private_root: Path) -> Path:
         controls_resolved = controls.resolve(strict=False)
         path_resolved = absolute_path.resolve(strict=False)
         if (
-            controls_resolved != private_resolved / "controls"
-            or path_resolved != private_resolved / "controls" / "suppressions.jsonl"
+            _suppression_path_key(controls_resolved)
+            != _suppression_path_key(private_resolved / "controls")
+            or _suppression_path_key(path_resolved)
+            != _suppression_path_key(
+                private_resolved / "controls" / "suppressions.jsonl"
+            )
             or (absolute_private.exists() and not absolute_private.is_dir())
             or (controls.exists() and not controls.is_dir())
         ):
@@ -1472,7 +1486,10 @@ def _checked_suppression_path(private_root: Path) -> Path:
                 metadata = candidate.lstat()
                 candidate_resolved = candidate.resolve(strict=False)
                 if (
-                    candidate_resolved != private_resolved / "controls" / candidate.name
+                    _suppression_path_key(candidate_resolved)
+                    != _suppression_path_key(
+                        private_resolved / "controls" / candidate.name
+                    )
                     or not candidate.is_file()
                     or metadata.st_nlink != 1
                 ):
@@ -1486,6 +1503,12 @@ def _checked_suppression_path(private_root: Path) -> Path:
 
 class _SuppressionDirectoryBusy(OSError):
     """Another writer still holds the checked directory entry."""
+
+
+_SUPPRESSION_DIRECTORY_PINNED: ContextVar[str | None] = ContextVar(
+    "suppression_directory_pinned",
+    default=None,
+)
 
 
 @contextmanager
@@ -1519,7 +1542,13 @@ def _suppression_controls_scope(
             raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
         except (RuntimeError, ValueError) as exc:
             raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
-        yield path
+        pin_token = _SUPPRESSION_DIRECTORY_PINNED.set(
+            _suppression_path_key(Path(private_root).absolute())
+        )
+        try:
+            yield path
+        finally:
+            _SUPPRESSION_DIRECTORY_PINNED.reset(pin_token)
 
 
 @contextmanager
@@ -1579,6 +1608,7 @@ def _read_suppression_lines(private_root: Path, path: Path) -> list[str]:
     try:
         handle = path.open("r", encoding="utf-8")
     except FileNotFoundError:
+        _checked_suppression_path(private_root)
         return []
     except (OSError, UnicodeError) as exc:
         raise MemoryPreferenceError("memory-suppression-unreadable") from exc
@@ -1594,6 +1624,9 @@ def _read_suppression_lines(private_root: Path, path: Path) -> list[str]:
             ):
                 raise MemoryPreferenceError("memory-suppression-path-invalid")
             return handle.read().splitlines()
+    except FileNotFoundError:
+        _checked_suppression_path(private_root)
+        return []
     except MemoryPreferenceError:
         raise
     except (OSError, UnicodeError) as exc:
@@ -1619,11 +1652,28 @@ def _suppression_hashes_from_lines(lines: Sequence[str]) -> frozenset[str]:
 
 
 def load_suppressed_hashes(private_root: Path) -> frozenset[str]:
-    with _suppression_controls_scope(private_root, pin_directory=False) as path:
-        # Writers atomically replace the file; read-only callers need no lock file.
-        return _suppression_hashes_from_lines(
-            _read_suppression_lines(private_root, path)
-        )
+    pin_directory = (
+        _SUPPRESSION_DIRECTORY_PINNED.get()
+        != _suppression_path_key(Path(private_root).absolute())
+    )
+    while True:
+        stack = ExitStack()
+        try:
+            path = stack.enter_context(
+                _suppression_controls_scope(
+                    private_root,
+                    pin_directory=pin_directory,
+                )
+            )
+        except _SuppressionDirectoryBusy:
+            stack.close()
+            time.sleep(0.05)
+            continue
+        with stack:
+            # Writers atomically replace the file; read-only callers need no lock file.
+            return _suppression_hashes_from_lines(
+                _read_suppression_lines(private_root, path)
+            )
 
 
 def memory_syntactic_units(value: str) -> Iterator[str]:
