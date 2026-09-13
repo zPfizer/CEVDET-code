@@ -370,7 +370,11 @@ class SuppressionEdges(unittest.TestCase):
 
             def replace_before_pin(path: Path):
                 nonlocal injected
-                if path == controls and not injected:
+                same_path = (
+                    os.path.normcase(os.path.abspath(os.fspath(path)))
+                    == os.path.normcase(os.path.abspath(os.fspath(controls)))
+                )
+                if same_path and not injected:
                     injected = True
                     controls.rename(replacement)
                     controls.mkdir()
@@ -394,8 +398,14 @@ class SuppressionEdges(unittest.TestCase):
                 self.assertFalse((replacement / "suppressions.lock").exists())
             finally:
                 if controls.exists():
+                    for child in controls.iterdir():
+                        if child.is_file():
+                            child.unlink()
                     controls.rmdir()
                 if replacement.exists():
+                    for child in replacement.iterdir():
+                        if child.is_file():
+                            child.unlink()
                     replacement.rmdir()
 
     def test_invalid_and_unreadable_suppression_records(self) -> None:

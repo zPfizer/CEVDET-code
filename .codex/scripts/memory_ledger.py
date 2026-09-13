@@ -1586,8 +1586,15 @@ def _ensure_pinned_suppression_directory(
             pass
         except OSError as exc:
             raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
+        created_metadata = _suppression_lstat(candidate)
+        if created_metadata is None or not stat.S_ISDIR(created_metadata.st_mode):
+            raise MemoryPreferenceError("memory-suppression-path-invalid")
         _checked_suppression_path(private_root)
-        _pin_suppression_directory(stack, candidate, expected=expected)
+        _pin_suppression_directory(
+            stack,
+            candidate,
+            expected=expected if expected is not None else created_metadata,
+        )
         expected = None
         _checked_suppression_path(private_root)
 
