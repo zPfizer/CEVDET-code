@@ -762,21 +762,29 @@ def _retrieval_entry_snapshot(
     """Read a disk note or a canonical-backed Companion view without writing."""
     _check_deadline(deadline)
     if _is_virtual_companion_view(vault_root, path):
+        if deadline is None:
+            return entry_from_file(vault_root, path, memory=memory), None, False
         return entry_from_file(
             vault_root,
             path,
             memory=memory,
             deadline=deadline,
         ), None, False
-    return _stable_entry_snapshot(
-        vault_root,
-        path,
-        lambda root, source: entry_from_file(
+
+    def read_entry(root: Path, source: Path) -> VaultEntry | None:
+        if deadline is None:
+            return entry_from_file(root, source, memory=memory)
+        return entry_from_file(
             root,
             source,
             memory=memory,
             deadline=deadline,
-        ),
+        )
+
+    return _stable_entry_snapshot(
+        vault_root,
+        path,
+        read_entry,
         deadline=deadline,
     )
 
@@ -798,12 +806,19 @@ def _stable_source_snapshot(
         if before is not None and not stat.S_ISREG(before.st_mode):
             return None, None, None, before, True
         try:
-            relative, text, content_sha256 = _source_snapshot(
-                vault_root,
-                path,
-                memory=memory,
-                deadline=deadline,
-            )
+            if deadline is None:
+                relative, text, content_sha256 = _source_snapshot(
+                    vault_root,
+                    path,
+                    memory=memory,
+                )
+            else:
+                relative, text, content_sha256 = _source_snapshot(
+                    vault_root,
+                    path,
+                    memory=memory,
+                    deadline=deadline,
+                )
         except (FileNotFoundError, NotADirectoryError):
             if attempt + 1 == SOURCE_READ_ATTEMPTS:
                 return None, None, None, None, True
@@ -888,11 +903,17 @@ def _stable_note_snapshot(
             else:
                 entry = read_entry(vault_root, path)
             _check_deadline(deadline)
-            relative, text, content_sha256 = _source_snapshot(
-                vault_root,
-                path,
-                deadline=deadline,
-            )
+            if deadline is None:
+                relative, text, content_sha256 = _source_snapshot(
+                    vault_root,
+                    path,
+                )
+            else:
+                relative, text, content_sha256 = _source_snapshot(
+                    vault_root,
+                    path,
+                    deadline=deadline,
+                )
             after_hash = _source_sha256(path, deadline=deadline)
             after = path.lstat()
         except (FileNotFoundError, NotADirectoryError):
@@ -919,12 +940,19 @@ def _entry_from_file_with_content(
     memory: MemoryRead | None = None,
     deadline: float | None = None,
 ) -> tuple[VaultEntry | None, str | None]:
-    relative, text, content_sha256 = _source_snapshot(
-        vault_root,
-        path,
-        memory=memory,
-        deadline=deadline,
-    )
+    if deadline is None:
+        relative, text, content_sha256 = _source_snapshot(
+            vault_root,
+            path,
+            memory=memory,
+        )
+    else:
+        relative, text, content_sha256 = _source_snapshot(
+            vault_root,
+            path,
+            memory=memory,
+            deadline=deadline,
+        )
     if relative is None or text is None:
         return None, content_sha256
     return _entry_from_text(
