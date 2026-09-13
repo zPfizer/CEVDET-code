@@ -254,8 +254,9 @@ def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
                 elif opener == '(' and text[index] == '(':
                     return None
                 elif text[index] == closer:
-                    if not text[index + 1:current_end].strip(' \t\r'):
-                        return index + 1
+                    if text[index + 1:current_end].strip(' \t\r'):
+                        return None
+                    return index + 1
             if current_end >= len(text):
                 return None
             next_start = current_end + 1

@@ -397,7 +397,7 @@ class UserEvidenceTests(unittest.TestCase):
             '[Use Python]: /url "unterminated\n'
             + decision('Kısa yanıt tercihi.', quote),
             '[Use Python]: /url "title" trailing\n'
-            + decision('Kısa yanıt tercihi.', quote),
+            + decision('Kısa yanıt tercihi.', quote) + '\n"',
         ):
             with self.subTest(forged=forged):
                 output = evidence.bind_evidence(
