@@ -1534,43 +1534,35 @@ def _suppression_controls_scope(
     private_root: Path,
     *,
     pin_directory: bool = True,
-    ensure_directory: bool = True,
 ) -> Iterator[Path]:
     path = _checked_suppression_path(private_root)
     controls = path.parent
     private = Path(private_root).absolute()
     private_metadata = _suppression_lstat(private)
     controls_metadata = _suppression_lstat(controls)
-    if (
-        ensure_directory
-        and os.name == "nt"
-        and private_metadata is not None
-        and controls_metadata is None
-    ):
-        try:
-            controls.mkdir(parents=True, exist_ok=True)
-            path = _checked_suppression_path(private_root)
-            controls = path.parent
-            controls_metadata = _suppression_lstat(controls)
-        except MemoryPreferenceError:
-            raise
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
     if not pin_directory or os.name != "nt" or controls_metadata is None:
-        yield path
-        return
+        if pin_directory and os.name == "nt" and private_metadata is not None:
+            pin_target = private
+        else:
+            yield path
+            return
+    else:
+        pin_target = controls
     with ExitStack() as stack:
         try:
-            opened = stack.enter_context(_pinned_windows_directory(controls))
+            opened = stack.enter_context(_pinned_windows_directory(pin_target))
             path = _checked_suppression_path(private_root)
-            if opened is not None:
-                current = controls.lstat()
-                if (
-                    (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
-                    or opened.st_nlink != 1
-                    or current.st_nlink != 1
-                ):
-                    raise ValueError("suppression directory identity changed")
+            controls_metadata = _suppression_lstat(controls)
+            parent_snapshot = pin_target == private and controls_metadata is None
+            if pin_target == private and controls_metadata is not None:
+                stack.enter_context(_pinned_windows_directory(controls))
+            current = pin_target.lstat()
+            if opened is not None and (
+                (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+                or opened.st_nlink != 1
+                or current.st_nlink != 1
+            ):
+                raise ValueError("suppression directory identity changed")
         except MemoryPreferenceError:
             raise
         except OSError as exc:
@@ -1586,6 +1578,16 @@ def _suppression_controls_scope(
             yield path
         finally:
             _SUPPRESSION_DIRECTORY_PINNED.reset(pin_token)
+        if parent_snapshot:
+            current = _suppression_lstat(private)
+            if current is None or opened is None or (
+                (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+                or opened.st_nlink != 1
+                or current.st_nlink != 1
+                or opened.st_mtime_ns != current.st_mtime_ns
+                or opened.st_ctime_ns != current.st_ctime_ns
+            ):
+                raise MemoryPreferenceError("memory-suppression-path-invalid")
 
 
 @contextmanager
@@ -1642,10 +1644,13 @@ def _checked_suppression_lock_handle(private_root: Path, handle: object) -> None
 
 
 def _read_suppression_lines(private_root: Path, path: Path) -> list[str]:
+    ledger_metadata = _suppression_lstat(path)
     try:
         handle = path.open("r", encoding="utf-8")
     except FileNotFoundError:
         _checked_suppression_path(private_root)
+        if ledger_metadata is not None:
+            raise MemoryPreferenceError("memory-suppression-path-invalid")
         return []
     except (OSError, UnicodeError) as exc:
         raise MemoryPreferenceError("memory-suppression-unreadable") from exc
@@ -1663,6 +1668,8 @@ def _read_suppression_lines(private_root: Path, path: Path) -> list[str]:
             return handle.read().splitlines()
     except FileNotFoundError:
         _checked_suppression_path(private_root)
+        if ledger_metadata is not None:
+            raise MemoryPreferenceError("memory-suppression-path-invalid")
         return []
     except MemoryPreferenceError:
         raise
@@ -1700,7 +1707,6 @@ def load_suppressed_hashes(private_root: Path) -> frozenset[str]:
                 _suppression_controls_scope(
                     private_root,
                     pin_directory=pin_directory,
-                    ensure_directory=pin_directory,
                 )
             )
         except _SuppressionDirectoryBusy:
