@@ -486,6 +486,33 @@ class AttachmentMemoryTests(unittest.TestCase):
             self.assertEqual(list((root / attachment_memory.SOURCE_DIR).glob('*.md')), [])
             self.assertEqual(list(root.rglob('*.staging')), [])
 
+    def test_stale_note_staging_is_removed_before_retry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            destination = root / attachment_memory._note_relative(
+                source.parent.name, attachment_memory._attachment_digest('Stable source.'),
+            )
+            staging = destination.with_suffix('.staging')
+            staging.parent.mkdir(parents=True)
+            staging.write_text('abandoned staging', encoding='utf-8')
+
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                result = attachment_memory.capture_sources(
+                    [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                )
+
+            self.assertTrue(result)
+            self.assertFalse(staging.exists())
+            self.assertTrue(destination.is_file())
+
     def test_source_change_marker_survives_session_only_gate(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

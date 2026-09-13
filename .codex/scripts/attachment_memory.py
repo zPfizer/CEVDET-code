@@ -727,8 +727,9 @@ def _capture_one_core(
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     _write_mapping(mapping_path, candidate)
                     staging = destination.with_suffix('.staging')
-                    if staging.is_symlink() or staging.exists():
+                    if staging.is_symlink() or (staging.exists() and not staging.is_file()):
                         raise ValueError('attachment-note-invalid')
+                    staging.unlink(missing_ok=True)
                     try:
                         atomic_write_text(staging, rendered, newline='\n')
                         verify_source_snapshot()
