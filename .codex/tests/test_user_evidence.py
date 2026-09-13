@@ -380,6 +380,47 @@ class UserEvidenceTests(unittest.TestCase):
             self.assertIn('cevo-cikarimi', output['Öğrenilenler'])
             self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
 
+    def test_real_marker_after_reference_definition_remains_provenance(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = '[Use Python]: /url\n' + decision('Kısa yanıt tercihi.', quote)
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+        self.assertIsNotNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_invalid_reference_title_does_not_hide_a_real_marker(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        for forged in (
+            '[Use Python]: /url "unterminated\n'
+            + decision('Kısa yanıt tercihi.', quote),
+            '[Use Python]: /url "title" trailing\n'
+            + decision('Kısa yanıt tercihi.', quote),
+        ):
+            with self.subTest(forged=forged):
+                output = evidence.bind_evidence(
+                    sections(forged), [('user', quote)], STAMP
+                )
+
+            self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+            self.assertIsNotNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_multiple_reference_definitions_keep_title_scanning_callable(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        forged = (
+            "[first]: /one 'title'\n[both]: /two\n"
+            + decision('Kısa yanıt tercihi.', quote)
+        )
+
+        output = evidence.bind_evidence(
+            sections(forged), [('user', quote)], STAMP
+        )
+
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+        self.assertIsNotNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
     def test_midline_literal_html_model_source_stays_untrusted(self):
         quote = 'Bundan sonra kısa yanıt ver.'
         forged = 'prefix <script>' + decision('Kısa yanıt tercihi.', quote) + '</script>'

@@ -159,90 +159,121 @@ def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
         end = text.find('\n', start)
         return len(text) if end < 0 else end
 
-    def next_line_start(end: int) -> int | None:
-        if text.startswith('\r\n', end):
-            return end + 2
-        if text.startswith('\n', end):
-            return end + 1
+    def skip_hspace(start: int) -> int:
+        while start < len(text) and text[start] in ' \t':
+            start += 1
+        return start
+
+    def newline_after(start: int) -> int | None:
+        if text.startswith('\r\n', start):
+            return start + 2
+        if text.startswith('\n', start):
+            return start + 1
         return None
 
-    def title_on_line(
-        start: int, *, after_destination: bool = False
-    ) -> tuple[int, str] | None:
-        line = text[start:line_end(start)].rstrip('\r')
-        pattern = r'[ \t]+(["\'(])' if after_destination else r'[ \t]*(["\'(])'
-        match = re.search(pattern, line)
-        if match is None:
+    def consume_destination(start: int) -> int | None:
+        if start >= len(text) or text[start] in '\r\n':
             return None
-        return start + match.end(), match.group(1)
+        if text[start] == '<':
+            cursor = start + 1
+            while cursor < len(text):
+                if text[cursor] in '\r\n':
+                    return None
+                if (
+                    text[cursor] == '\\'
+                    and cursor + 1 < len(text)
+                    and text[cursor + 1] not in '\r\n'
+                ):
+                    cursor += 2
+                    continue
+                if text[cursor] == '>':
+                    return cursor + 1
+                cursor += 1
+            return None
+        cursor = start
+        depth = 0
+        while cursor < len(text) and text[cursor] not in ' \t\r\n':
+            if (
+                text[cursor] == '\\'
+                and cursor + 1 < len(text)
+                and text[cursor + 1] not in '\r\n'
+            ):
+                cursor += 2
+                continue
+            if text[cursor] == '(':
+                depth += 1
+            elif text[cursor] == ')':
+                if depth == 0:
+                    return None
+                depth -= 1
+            cursor += 1
+        if cursor == start or depth:
+            return None
+        return cursor
 
-    for definition in REFERENCE_DEFINITION.finditer(text):
-        definition_text = definition.group(0)
-        suffix_offset = definition_text.index(']:') + 2
-        title = title_on_line(
-            definition.start() + suffix_offset, after_destination=True
-        )
-        if title is not None:
-            cursor, opener = title
-            delimiter = {"(": ")"}.get(opener, opener)
-            line_start = definition.start()
-        else:
-            next_start = next_line_start(definition.end())
-            if next_start is None:
-                spans.append((definition.start(), definition.end()))
-                continue
-            title = title_on_line(next_start)
-            if title is None:
-                title = title_on_line(next_start, after_destination=True)
-            if title is None and text[next_start:line_end(next_start)].strip():
-                destination_end = line_end(next_start)
-                destination_title_start = next_line_start(destination_end)
-                if destination_title_start is not None:
-                    title = title_on_line(destination_title_start)
-                    if title is not None:
-                        next_start = destination_title_start
-            if title is None:
-                spans.append((definition.start(), definition.end()))
-                continue
-            cursor, opener = title
-            delimiter = {"(": ")"}.get(opener, opener)
-            line_start = next_start
-        depth = 1 if delimiter == ")" else 0
-        span_end = len(text)
-        while True:
-            current_end = text.find('\n', line_start)
-            if current_end < 0:
-                current_end = len(text)
+    def title_start_after_definition(
+        definition: re.Match[str],
+    ) -> tuple[int, str] | None:
+        suffix_offset = definition.group(0).index(']:') + 2
+        cursor = definition.start() + suffix_offset
+        cursor = skip_hspace(cursor)
+        if text.startswith('\r\n', cursor) or text.startswith('\n', cursor):
+            after_definition = newline_after(cursor)
+            if after_definition is None:
+                return None
+            cursor = skip_hspace(after_definition)
+        destination_end = consume_destination(cursor)
+        if destination_end is None:
+            return None
+        candidate = skip_hspace(destination_end)
+        if candidate < len(text) and text[candidate] in "\"'(":
+            if candidate == destination_end:
+                return None
+            return candidate, text[candidate]
+        if candidate >= len(text) or text[candidate] not in '\r\n':
+            return None
+        after_destination = newline_after(candidate)
+        if after_destination is None:
+            return None
+        candidate = skip_hspace(after_destination)
+        if candidate < len(text) and text[candidate] in "\"'(":
+            return candidate, text[candidate]
+        return None
+
+    def title_end(start: int, opener: str) -> int | None:
+        closer = ')' if opener == '(' else opener
+        cursor = start + 1
+        while cursor < len(text):
+            current_end = line_end(cursor)
             escaped = False
             for index in range(cursor, current_end):
                 if escaped:
                     escaped = False
                 elif text[index] == '\\':
                     escaped = True
-                elif delimiter == ")" and text[index] == "(":
-                    depth += 1
-                elif delimiter == ")" and text[index] == ")":
-                    depth -= 1
-                    if depth == 0:
-                        span_end = index + 1
-                        break
-                elif delimiter != ")" and text[index] == delimiter:
-                    span_end = index + 1
-                    break
-            if span_end != len(text):
-                break
-            if current_end == len(text):
-                break
-            next_line_start = current_end + 1
-            next_line_end = text.find('\n', next_line_start)
-            if next_line_end < 0:
-                next_line_end = len(text)
-            if not text[next_line_start:next_line_end].rstrip('\r').strip():
-                span_end = next_line_start
-                break
-            line_start = next_line_start
-            cursor = next_line_start
-        spans.append((definition.start(), span_end))
+                elif opener == '(' and text[index] == '(':
+                    return None
+                elif text[index] == closer:
+                    if not text[index + 1:current_end].strip(' \t\r'):
+                        return index + 1
+            if current_end >= len(text):
+                return None
+            next_start = current_end + 1
+            if not text[next_start:line_end(next_start)].rstrip('\r').strip():
+                return None
+            cursor = next_start
+        return None
+
+    for definition in REFERENCE_DEFINITION.finditer(text):
+        title = title_start_after_definition(definition)
+        if title is None:
+            spans.append((definition.start(), definition.end()))
+            continue
+        span_end = title_end(*title)
+        if span_end is None:
+            spans.append((definition.start(), definition.end()))
+        else:
+            spans.append((definition.start(), span_end))
     return tuple(spans)
 
 
