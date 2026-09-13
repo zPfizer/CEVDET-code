@@ -703,22 +703,6 @@ def _capture_one_core(
         if destination.is_symlink():
             raise ValueError('attachment-destination-link-rejected')
         with verified_publication():
-            created_destination = False
-            created_destination_signature = None
-
-            def remove_created_destination() -> None:
-                if not created_destination or created_destination_signature is None:
-                    return
-                try:
-                    if (
-                        destination.is_symlink()
-                        or _source_signature(destination.lstat()) != created_destination_signature
-                    ):
-                        return
-                    destination.unlink(missing_ok=True)
-                except OSError:
-                    pass
-
             if destination.exists():
                 if not destination.is_file():
                     raise ValueError('attachment-note-invalid')
@@ -741,26 +725,16 @@ def _capture_one_core(
                 try:
                     atomic_write_text(staging, rendered, newline='\n')
                     verify_source_snapshot()
-                    staging_signature = _source_signature(staging.lstat())
                     replace_with_retry(
                         staging, destination, before_replace=verify_source_snapshot,
                     )
-                    created_destination = True
-                    created_destination_signature = staging_signature
                     verify_source_snapshot()
-                except Exception:
-                    remove_created_destination()
-                    raise
                 finally:
                     staging.unlink(missing_ok=True)
             candidate['status'] = 'committed'
-            try:
-                _write_mapping(mapping_path, candidate)
-                mapping = candidate
-                clear_source_changed_marker()
-            except Exception:
-                remove_created_destination()
-                raise
+            _write_mapping(mapping_path, candidate)
+            mapping = candidate
+            clear_source_changed_marker()
         return destination.relative_to(vault_root).with_suffix('').as_posix(), summary
 
 
