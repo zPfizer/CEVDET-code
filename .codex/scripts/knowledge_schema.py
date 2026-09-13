@@ -21,9 +21,10 @@ CONNECTION_HEADINGS = ("## Bağlantı", "## Ana Fikir")
 IMPORTANT_POINTS = (3, 5)
 RELATED_LINKS_MIN = 2
 INDEX_HEADER = "| Makale | Özet | Kaynak | Güncellendi |"
-_INDEX_CELL = r"(?:\\\||[^|\r\n])*"
+_INDEX_CELL = r"(?=[^|\r\n]*[^\s|])(?:\\\||[^|\r\n])*"
+_INDEX_LINK_TITLE = r"(?=[^\]\r\n]*[^\s\]])(?:\\\||[^\\|\]\r\n])+"
 INDEX_ROW = re.compile(
-    r"\| \[\[concepts/([^\\|\]]+)\\\|[^\]\r\n]+\]\] "
+    rf"\| \[\[concepts/([^\\|\]]+)\\\|{_INDEX_LINK_TITLE}\]\] "
     rf"\| {_INDEX_CELL} \| {_INDEX_CELL} \| {_INDEX_CELL} \|"
 )
 LOG_HEADER = "# Derleme Günlüğü"
