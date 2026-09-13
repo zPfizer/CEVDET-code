@@ -45,6 +45,8 @@ class SessionSnapshotTests(unittest.TestCase):
                 ('> quoted lead\n' + claim, False),
                 ('1.    item\n      > quoted lead\n      ' + claim, False),
                 ('```\n' + claim + '\n```', False),
+                ("[hidden]: /url 'title\n" + claim + "\n'", False),
+                ('<span title="\n' + claim + '\n">label</span>', False),
                 ('- ' + claim, True),
             ):
                 with self.subTest(body=body):

@@ -15,6 +15,7 @@ from markdown_boundary import (
     HTML_TAG,
     LIST_ITEM,
     THEMATIC_BREAK,
+    _blank,
     _container_body,
     _container_prefix,
     is_escaped,
@@ -214,16 +215,16 @@ def _visible_source_body(text: str) -> str:
             chars[offset:offset + len(line)] = ' ' * len(line)
         offset += len(raw_line)
     link_spans = markdown_link_spans(text)
+    html_spans = tuple((tag.start(), tag.end()) for tag in HTML_TAG.finditer(text))
+    for start, end in link_spans + html_spans:
+        _blank(chars, start, end)
     for match in SOURCE.finditer(text):
         line_start = text.rfind('\n', 0, match.start()) + 1
         if (
             line_start in blockquote_starts
             or is_escaped(text, match.start())
             or any(start < match.start() < end for start, end in link_spans)
-            or any(
-                tag.start() < match.start() < tag.end()
-                for tag in HTML_TAG.finditer(text)
-            )
+            or any(start < match.start() < end for start, end in html_spans)
         ):
             chars[match.start():match.end()] = ' ' * (match.end() - match.start())
             continue
