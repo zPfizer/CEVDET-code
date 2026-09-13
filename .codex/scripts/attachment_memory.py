@@ -1,7 +1,7 @@
 """Capture explicitly pasted text sources with scoped recovery metadata."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import datetime as dt
 import hashlib
 import json
@@ -9,6 +9,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import tempfile
 from typing import Any, Callable, Iterator, Sequence
 
 from file_lock import locked
@@ -21,7 +22,7 @@ from memory_ledger import (
     sanitize_text,
     suppression_guard,
 )
-from state_store import atomic_write_json, atomic_write_text
+from state_store import atomic_write_json, atomic_write_text, replace_with_retry
 
 
 SOURCE_DIR = Path('📥 000-Inbox/Paylaşılan Kaynaklar')
@@ -54,6 +55,17 @@ def _attachment_digest(value: str) -> str:
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
 
 
+def _source_signature(file_stat: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_mode,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+    )
+
+
 def _mapping_path(state_dir: Path, attachment_id: str, envelope_digest: str | None = None) -> Path:
     if not ATTACHMENT_ID.fullmatch(attachment_id):
         raise ValueError('attachment-id-invalid')
@@ -61,6 +73,12 @@ def _mapping_path(state_dir: Path, attachment_id: str, envelope_digest: str | No
         raise ValueError('attachment-envelope-invalid')
     suffix = f'-{envelope_digest}' if envelope_digest else ''
     return state_dir / f'attachment-memory-{attachment_id}{suffix}.json'
+
+
+def _source_changed_marker_path(state_dir: Path, attachment_id: str) -> Path:
+    if not ATTACHMENT_ID.fullmatch(attachment_id):
+        raise ValueError('attachment-id-invalid')
+    return state_dir / f'attachment-memory-source-changed-{attachment_id}'
 
 
 def _note_relative(attachment_id: str, digest: str) -> Path:
@@ -145,17 +163,34 @@ def _validate_destination_parent(vault_root: Path, destination: Path) -> None:
 
 
 def _read_source(source: Path, attachment_root: Path, hashes: frozenset[str]) -> dict[str, Any]:
-    _regular_path(source, attachment_root)
-    with source.open('rb') as handle:
-        data = handle.read(MAX_SOURCE_BYTES + 1)
+    try:
+        _regular_path(source, attachment_root)
+    except ValueError as exc:
+        if str(exc) == 'attachment-not-regular' and not source.exists():
+            raise ValueError('attachment-content-changed') from exc
+        raise
+    before = source.lstat()
+    try:
+        with source.open('rb') as handle:
+            data = handle.read(MAX_SOURCE_BYTES + 1)
+    except FileNotFoundError as exc:
+        raise ValueError('attachment-content-changed') from exc
     if len(data) > MAX_SOURCE_BYTES:
         raise ValueError('attachment-byte-budget-exceeded')
+    try:
+        after = source.lstat()
+    except FileNotFoundError as exc:
+        raise ValueError('attachment-content-changed') from exc
+    if _source_signature(before) != _source_signature(after):
+        raise ValueError('attachment-content-changed')
     original = data.decode('utf-8-sig')
     if len(original) > MAX_SOURCE_CHARS:
         raise ValueError('attachment-char-budget-exceeded')
     sanitized, redactions = sanitize_text(original, max_chars=MAX_SOURCE_CHARS)
     return {
         'visible': filter_suppressed_text(sanitized, hashes),
+        'source_bytes_sha256': hashlib.sha256(data).hexdigest(),
+        'source_identity': _source_signature(after),
         'source_sanitized_sha256': _attachment_digest(sanitized),
         'redactions': redactions,
     }
@@ -358,36 +393,144 @@ def _capture_one_core(
             raise ValueError('attachment-mapping-scope-invalid')
         source_record = preloaded_source
 
+        def mark_source_changed() -> None:
+            nonlocal mapping
+            marker_path = _source_changed_marker_path(state_dir, attachment_id)
+            if marker_path.is_symlink():
+                raise ValueError('attachment-mapping-link-rejected')
+            if not marker_path.exists():
+                atomic_write_text(marker_path, 'source_changed\n', newline='\n')
+            mapping_paths = {
+                mapping_path,
+                _mapping_path(state_dir, attachment_id),
+                *state_dir.glob(f'attachment-memory-{attachment_id}-*.json'),
+            }
+            for candidate_path in sorted(mapping_paths, key=str):
+                lock = nullcontext() if candidate_path == mapping_path else locked(candidate_path)
+                with lock:
+                    current = mapping if candidate_path == mapping_path else _load_mapping(
+                        candidate_path, attachment_id,
+                    )
+                    if current is None or current.get('source_changed'):
+                        continue
+                    updated = dict(current)
+                    updated['source_changed'] = True
+                    # This metadata-only safety marker must survive a concurrent
+                    # suppression update so missing-source recovery stays closed.
+                    _write_mapping(candidate_path, updated)
+                    if candidate_path == mapping_path:
+                        mapping = updated
+
+        def clear_source_changed_marker() -> None:
+            if mapping is None:
+                return
+            verify_source_snapshot()
+            marker_path = _source_changed_marker_path(state_dir, attachment_id)
+            if marker_path.is_symlink():
+                raise ValueError('attachment-mapping-link-rejected')
+            if not marker_path.exists():
+                return
+            expected = mapping['source_sanitized_sha256']
+            mapping_paths = {
+                mapping_path,
+                _mapping_path(state_dir, attachment_id),
+                *state_dir.glob(f'attachment-memory-{attachment_id}-*.json'),
+            }
+            for candidate_path in sorted(mapping_paths, key=str):
+                lock = nullcontext() if candidate_path == mapping_path else locked(candidate_path)
+                with lock:
+                    current = mapping if candidate_path == mapping_path else _load_mapping(
+                        candidate_path, attachment_id,
+                    )
+                    if (
+                        current is not None
+                        and (
+                            current.get('source_changed')
+                            or current['source_sanitized_sha256'] != expected
+                        )
+                    ):
+                        return
+            marker_path.unlink(missing_ok=True)
+
+        def verify_source_snapshot() -> None:
+            if source_record is None:
+                return
+            try:
+                current = _read_source(source, attachment_root, hashes)
+            except (FileNotFoundError, OSError, UnicodeError, ValueError) as exc:
+                mark_source_changed()
+                raise ValueError('attachment-content-changed') from exc
+            if (
+                current['source_identity'] != source_record['source_identity']
+                or current['source_bytes_sha256'] != source_record['source_bytes_sha256']
+                or current['source_sanitized_sha256'] != source_record['source_sanitized_sha256']
+            ):
+                mark_source_changed()
+                raise ValueError('attachment-content-changed')
+
+        @contextmanager
+        def verified_publication() -> Iterator[None]:
+            publication_entered = False
+            try:
+                with _publication_scope(state_dir, session_id):
+                    publication_entered = True
+                    verify_source_snapshot()
+                    suppression_entered = False
+                    try:
+                        with suppression_guard(vault_root / '.codex/private-memory', hashes):
+                            suppression_entered = True
+                            verify_source_snapshot()
+                            try:
+                                yield
+                            finally:
+                                verify_source_snapshot()
+                    except Exception:
+                        if not suppression_entered:
+                            verify_source_snapshot()
+                        raise
+            except Exception:
+                if not publication_entered:
+                    verify_source_snapshot()
+                raise
+
+        if source_record is not None and source_record.get('_source_changed'):
+            mark_source_changed()
+            raise ValueError('attachment-content-changed')
         if source_record is not None:
+            verify_source_snapshot()
             raw_digest = source_record['source_sanitized_sha256']
             visible = source_record['visible']
             redactions = source_record['redactions']
             if mapping is not None:
                 changed = mapping['source_sanitized_sha256'] != raw_digest
-                if changed or mapping.get('source_changed'):
+                if changed:
+                    mark_source_changed()
+                elif mapping.get('source_changed'):
                     updated = dict(mapping)
-                    if changed:
-                        updated['source_changed'] = True
-                    else:
-                        updated.pop('source_changed')
+                    updated.pop('source_changed')
                     if updated != mapping:
-                        with _publication_scope(state_dir, session_id):
-                            with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                                _write_mapping(mapping_path, updated)
+                        with verified_publication():
+                            _write_mapping(mapping_path, updated)
                         mapping = updated
                 if changed:
                     raise ValueError('attachment-content-changed')
+            if mapping is not None and not mapping.get('source_changed'):
+                clear_source_changed_marker()
         else:
+            marker_path = _source_changed_marker_path(state_dir, attachment_id)
+            if marker_path.is_symlink() or marker_path.exists():
+                raise ValueError('attachment-content-changed')
             if mapping is None:
                 raise ValueError('attachment-recovery-unavailable')
             if mapping.get('source_changed'):
                 raise ValueError('attachment-content-changed')
+            if mapping['status'] == 'prepared':
+                raise ValueError('attachment-recovery-unavailable')
             if mapping['status'] == 'empty':
                 if mapping['suppression_revision'] != _suppression_revision(hashes):
                     raise ValueError('attachment-recovery-unavailable')
-                with _publication_scope(state_dir, session_id):
-                    with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                        return None
+                with verified_publication():
+                    return None
             mapped_path = _note_path(
                 vault_root, mapping['note_relative'], attachment_id, mapping['source_sha256']
             )
@@ -425,30 +568,32 @@ def _capture_one_core(
                 )
 
         def retain_empty_result() -> None:
-            with _publication_scope(state_dir, session_id):
-                with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                    if (
-                        mapping is None
-                        or mapping['status'] == 'empty'
-                        or (mapping['status'] == 'prepared' and mapped_note is None)
-                    ):
-                        updated = _empty_mapping(
-                            attachment_id=attachment_id,
-                            source_attachment=source_attachment,
-                            envelope_digest=envelope_digest,
-                            source_sanitized_digest=raw_digest,
-                            source_digest=source_digest,
-                            suppression_revision=revision,
-                            event_date=mapping['event_date'] if mapping is not None else event_time.date().isoformat(),
-                            redactions=redactions,
-                        )
-                    else:
-                        updated = dict(mapping)
-                        updated['empty_result'] = {
-                            'source_sha256': source_digest, 'suppression_revision': revision,
-                        }
-                    if updated != mapping:
-                        _write_mapping(mapping_path, updated)
+            nonlocal mapping
+            with verified_publication():
+                if (
+                    mapping is None
+                    or mapping['status'] == 'empty'
+                    or (mapping['status'] == 'prepared' and mapped_note is None)
+                ):
+                    updated = _empty_mapping(
+                        attachment_id=attachment_id,
+                        source_attachment=source_attachment,
+                        envelope_digest=envelope_digest,
+                        source_sanitized_digest=raw_digest,
+                        source_digest=source_digest,
+                        suppression_revision=revision,
+                        event_date=mapping['event_date'] if mapping is not None else event_time.date().isoformat(),
+                        redactions=redactions,
+                    )
+                else:
+                    updated = dict(mapping)
+                    updated['empty_result'] = {
+                        'source_sha256': source_digest, 'suppression_revision': revision,
+                    }
+                if updated != mapping:
+                    _write_mapping(mapping_path, updated)
+                mapping = updated
+                clear_source_changed_marker()
 
         if not visible.strip():
             retain_empty_result()
@@ -460,16 +605,14 @@ def _capture_one_core(
             and mapping['source_sha256'] == source_digest
             and mapping['suppression_revision'] == revision
         ):
-            with _publication_scope(state_dir, session_id):
-                with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                    return None
+            with verified_publication():
+                return None
 
         if mapped_note is not None and mapping.get('empty_result') == {
             'source_sha256': source_digest, 'suppression_revision': revision,
         }:
-            with _publication_scope(state_dir, session_id):
-                with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                    return None
+            with verified_publication():
+                return None
 
         if mapping is not None and mapping['source_sha256'] == source_digest:
             if mapped_note is not None:
@@ -480,11 +623,11 @@ def _capture_one_core(
                     updated['envelope_sha256'] = envelope_digest
                     updated['suppression_revision'] = revision
                     updated['redactions'] = list(redactions)
-                    with _publication_scope(state_dir, session_id):
-                        with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                            if updated != mapping:
-                                _write_mapping(mapping_path, updated)
-                            return mapped_path.relative_to(vault_root).with_suffix('').as_posix(), summary
+                    with verified_publication():
+                        if updated != mapping:
+                            _write_mapping(mapping_path, updated)
+                        mapping = updated
+                        return mapped_path.relative_to(vault_root).with_suffix('').as_posix(), summary
                 summary_only_rebuild = True
             elif mapping['status'] == 'committed':
                 raise ValueError('attachment-recovery-unavailable')
@@ -517,13 +660,17 @@ def _capture_one_core(
             legacy_summary = filter_suppressed_text(legacy['summary'], hashes)
             if legacy_summary != legacy['summary']:
                 summary_only_rebuild = True
-            with _publication_scope(state_dir, session_id):
-                with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                    _write_mapping(mapping_path, mapping)
-                    if not summary_only_rebuild:
-                        return destination.relative_to(vault_root).with_suffix('').as_posix(), legacy_summary
+            with verified_publication():
+                _write_mapping(mapping_path, mapping)
+                if not summary_only_rebuild:
+                    return destination.relative_to(vault_root).with_suffix('').as_posix(), legacy_summary
 
-        generated_summary = _summary_from_model(summarize, visible)
+        try:
+            generated_summary = _summary_from_model(summarize, visible)
+        except Exception:
+            verify_source_snapshot()
+            raise
+        verify_source_snapshot()
         if generated_summary is None:
             retain_empty_result()
             return None
@@ -532,9 +679,8 @@ def _capture_one_core(
             retain_empty_result()
             return None
         if summary_only_rebuild and mapping is not None and destination.is_file():
-            with _publication_scope(state_dir, session_id):
-                with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                    return destination.relative_to(vault_root).with_suffix('').as_posix(), summary
+            with verified_publication():
+                return destination.relative_to(vault_root).with_suffix('').as_posix(), summary
 
         note_date = mapping['event_date'] if mapping is not None and mapping['status'] in {'prepared', 'empty'} else None
         rendered = _render_note(
@@ -542,6 +688,7 @@ def _capture_one_core(
             source_digest, redactions, note_date,
         )
         note_digest = _attachment_digest(rendered)
+        verify_source_snapshot()
         if (
             mapping is not None
             and mapping['status'] == 'prepared'
@@ -566,25 +713,42 @@ def _capture_one_core(
         _validate_destination_parent(vault_root, destination)
         if destination.is_symlink():
             raise ValueError('attachment-destination-link-rejected')
-        with _publication_scope(state_dir, session_id):
-            with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                if destination.exists():
-                    if not destination.is_file():
-                        raise ValueError('attachment-note-invalid')
-                    existing = _read_note(
-                        destination, vault_root, expected_hash=note_digest,
-                        source_digest=source_digest, source_attachment=source_attachment,
-                    )
-                    # expected_hash içerik özetini sabitler; _read_note geçtiyse
-                    # ayrışma imkânsızdır — derinlemesine savunma satırı.
-                    if existing['source'] != visible or existing['summary'] != summary:  # pragma: no cover
-                        raise ValueError('attachment-note-integrity')
-                else:
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    _write_mapping(mapping_path, candidate)
-                    atomic_write_text(destination, rendered, newline='\n')
-                candidate['status'] = 'committed'
+        with verified_publication():
+            if destination.exists():
+                if not destination.is_file():
+                    raise ValueError('attachment-note-invalid')
+                existing = _read_note(
+                    destination, vault_root, expected_hash=note_digest,
+                    source_digest=source_digest, source_attachment=source_attachment,
+                )
+                # expected_hash içerik özetini sabitler; _read_note geçtiyse
+                # ayrışma imkânsızdır — derinlemesine savunma satırı.
+                if existing['source'] != visible or existing['summary'] != summary:  # pragma: no cover
+                    raise ValueError('attachment-note-integrity')
+                verify_source_snapshot()
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
                 _write_mapping(mapping_path, candidate)
+                staging_fd, staging_name = tempfile.mkstemp(
+                    dir=state_dir,
+                    prefix=f'kaynak-{attachment_id}-',
+                    suffix='.staging',
+                )
+                os.close(staging_fd)
+                staging = Path(staging_name)
+                try:
+                    atomic_write_text(staging, rendered, newline='\n')
+                    verify_source_snapshot()
+                    replace_with_retry(
+                        staging, destination, before_replace=verify_source_snapshot,
+                    )
+                    verify_source_snapshot()
+                finally:
+                    staging.unlink(missing_ok=True)
+            candidate['status'] = 'committed'
+            _write_mapping(mapping_path, candidate)
+            mapping = candidate
+            clear_source_changed_marker()
         return destination.relative_to(vault_root).with_suffix('').as_posix(), summary
 
 
@@ -611,6 +775,10 @@ def _capture_one(
         source_record = _read_source(source, attachment_root, hashes)
     except FileNotFoundError:
         source_record = None
+    except ValueError as exc:
+        if str(exc) != 'attachment-content-changed':
+            raise
+        source_record = {'_source_changed': True}
     with locked(state_dir / f'attachment-note-{attachment_id}'):
         return _capture_one_core(
             value, attachment_root, vault_root, event_time, hashes, summarize,
