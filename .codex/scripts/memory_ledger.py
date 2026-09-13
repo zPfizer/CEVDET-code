@@ -1651,7 +1651,12 @@ class MemoryRead:
         self._check_source_publication(resolved_identity)
         if resolved_identity in _COMPANION_SOURCE_ALIASES.values() and (root / _COMPANION_CANONICAL).is_file():
             from companion_memory import render_views
-            text = render_views(root, hashes=self._hashes, memory=self).get(source.name)
+            text = render_views(
+                root,
+                hashes=self._hashes,
+                memory=self,
+                deadline=deadline,
+            ).get(source.name)
             return source_relative, None if text is None else self.project_text(
                 identity,
                 text,

@@ -4456,6 +4456,7 @@ Analysis Lifecycle yalnız branded updateImpactPreviewId tüketir.
         self.assertLess(elapsed, 0.4)
         self.assertEqual(observed_deadlines, [deadline])
         self.assertIn("[Vault Arama Süresi Doldu]", context)
+        self.assertIn("kuyruğa alınmadı", context)
         self.assertTrue(getattr(context, "deadline_expired", False))
 
     def test_user_prompt_profile_worker_timeout_keeps_structured_timeout(self) -> None:
@@ -4481,6 +4482,7 @@ Analysis Lifecycle yalnız branded updateImpactPreviewId tüketir.
                 )
 
         self.assertIn("[Vault Arama Süresi Doldu]", context)
+        self.assertIn("kuyruğa alınmadı", context)
         self.assertTrue(getattr(context, "deadline_expired", False))
 
     def test_user_prompt_telemetry_deadline_is_visible_and_structured(self) -> None:

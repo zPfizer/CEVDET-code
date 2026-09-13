@@ -187,6 +187,11 @@ USER_PROMPT_CAPTURE_TIMEOUT_WARNING = (
     "Bu turda Vault bağlamı üretildi ancak arka plan kaydı için ayrılan süre telemetri sırasında doldu; "
     "kayıt kuyruğa alınmadı. Kaydedildi varsayma; eksikliği açıkça bildir."
 )
+USER_PROMPT_CAPTURE_SKIPPED_WARNING = (
+    "[Hafıza Devamlılığı]\n"
+    "Profil yüklemesi ayrılan sürede tamamlanamadı; bu tur arka plan kaydı kuyruğa alınmadı. "
+    "Kaydedildi varsayma; eksikliği açıkça bildir."
+)
 
 
 class _UserPromptContext(str):
@@ -771,7 +776,9 @@ def handle_user_prompt(
                 context.append(MEMORY_READ_RULE)
     except (TimeoutError, WorkerDeliveryTimeout):
         return _UserPromptContext(
-            VAULT_RETRIEVAL_TIMEOUT_WARNING,
+            VAULT_RETRIEVAL_TIMEOUT_WARNING
+            + "\n\n"
+            + USER_PROMPT_CAPTURE_SKIPPED_WARNING,
             deadline_expired=True,
         )
     except (OSError, UnicodeError, ValueError):
