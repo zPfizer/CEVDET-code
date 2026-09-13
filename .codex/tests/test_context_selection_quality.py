@@ -1277,6 +1277,7 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                 "Daha önce Python 3.14 ile veri saklama için hangi seçeneği uygun görmüştük?",
                 "Daha önce Node.js ile veri saklama için hangi seçeneği uygun görmüştük?",
                 "Daha önce config.active ile veri saklama için hangi seçeneği uygun görmüştük?",
+                "Daha önce veri saklama için pasif ve aktif depolama seçeneklerinden hangisini seçmiştik?",
                 "Daha önce T.C. sınırında veri saklama için hangi seçeneği uygun görmüştük?",
                 *("Daha önce veri saklama konusunda ne karar vermiştik" + end for end in (".", "!", ";", ":", "\n")),
                 "Daha önce veri saklama konusunda ne karar vermiştik, hatırlıyor musun?",
@@ -1320,6 +1321,19 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                     )
                     self.assertTrue(any("güncel uygulama" in hit.excerpt for hit in hits))
                     self.assertTrue(any("geçmiş uygulama" in hit.excerpt for hit in hits))
+
+    def test_rejected_retrospective_predicates_do_not_rescan_the_clause(self) -> None:
+        for body in (
+            "kodu, " * 2560,
+            "karar verdik, " * 1280,
+            "metin " * 2000 + ". " + "hangi secenegi sectik, " * 1000,
+        ):
+            with self.subTest(body_start=body[:30]), mock.patch.object(
+                retrieval, "HISTORY_TURKISH_RETROSPECTIVE_QUERY",
+                wraps=retrieval.HISTORY_TURKISH_RETROSPECTIVE_QUERY,
+            ) as matcher:
+                self.assertEqual(retrieval._retrospective_question_matches("daha once " + body), [])
+                self.assertLessEqual(matcher.fullmatch.call_count, 1)
 
     def test_past_background_before_current_request_does_not_enable_history(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1428,6 +1442,15 @@ Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun 
                 )
             entries = retrieval.build_vault_map(root, write_cache=False)
             history_first = "Daha önce veri saklama konusunda ne karar vermiştik ve güncel karar nedir?"
+            generic_current = history_first.replace("nedir", "hangisi")
+            self.assertEqual(
+                retrieval._split_current_history_query(generic_current),
+                ("güncel karar hangisi? veri saklama konusunda", "Daha önce veri saklama konusunda ne karar vermiştik"),
+            )
+            self.assertEqual(
+                {hit.entry.path for hit in retrieval.search_vault(entries, generic_current, top_k=2)},
+                {current, historical},
+            )
             self.assertEqual(
                 retrieval._split_current_history_query(history_first.replace(" ve ", "; ")),
                 ("güncel karar nedir? veri saklama konusunda", "Daha önce veri saklama konusunda ne karar vermiştik"),

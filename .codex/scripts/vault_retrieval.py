@@ -223,10 +223,11 @@ HISTORY_TURKISH_DECISION_PAST = re.compile(
 HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY = (
     rf"(?=\s*(?:[,.!?;:\r\n]|$|(?:ve|ile)\s+{CURRENT_QUERY_CUE}\b))"
 )
+HISTORY_TURKISH_INTERNAL_DOT = re.compile(r"(?<=\w)\.(?=\w)|(?<=\b\w\.\w)\.(?=\s)")
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
     rf"(?ix)\b(?:daha\s+once|onceden)\b"
     # Dots inside identifiers/versions and dotted initials are not clause ends.
-    r"(?:[^.!?;:\r\n]|(?<=\w)\.(?=\w)|(?<=\b\w\.\w)\.(?=\s))*?\s+"
+    rf"(?:[^.!?;:\r\n]|{HISTORY_TURKISH_INTERNAL_DOT.pattern})*?\s+"
     rf"(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b{HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY}"
 )
 HISTORY_TURKISH_RETROSPECTIVE_END = re.compile(
@@ -1579,53 +1580,83 @@ def _retrospective_question_terms(normalized: str) -> frozenset[str]:
     )
 
 
-def _modified_choice_question(prefix: list[str]) -> bool:
-    choice_heads = [
-        index for index, term in enumerate(prefix)
-        if any(term == root or _matches_history_inflection(term, root) for root in ("secenek", "seceneg"))
-    ]
-    if not choice_heads or choice_heads[-1] != len(prefix) - 1:
-        return False
-    # Bind `hangi` to its first choice head, not a later object after an
-    # embedded explanation such as `hangi seçeneğin ... bu seçeneği`.
-    start = choice_heads[-2] + 1 if len(choice_heads) > 1 else 0
-    return any(term == "hangi" or _matches_history_inflection(term, "hangi") for term in prefix[start:-1])
-
-
 def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
     normalized = _unquoted_request(normalized, preserve_positions=True)
     starts = [match.start() for match in re.finditer(r"\b(?:daha\s+once|onceden)\b", normalized)]
+    if not starts:
+        return []
     endings = list(HISTORY_TURKISH_RETROSPECTIVE_END.finditer(normalized))
-    predicate_ends = {ending.end() for ending in endings}
-    current_boundaries = [match.start() for match in re.finditer(
+    predicate_ends = [ending.end() for ending in endings]
+    whitespace = re.compile(r"\s*")
+    following = {end: whitespace.match(normalized, end).end() for end in predicate_ends}
+    current_boundaries = []
+    for connector in re.finditer(
         rf"(?:\b(?:ve|ile)\b\s+|[,.!?;:\r\n]\s*){CURRENT_QUERY_CUE}\b", normalized,
-    ) if normalized[match.start()] != "." or match.start() in predicate_ends]
+    ):
+        previous = bisect_right(predicate_ends, connector.start()) - 1
+        # A coordinated adjective is not a new clause. Require a preceding
+        # predicate, immediately followed by this connector.
+        if previous >= 0 and following[predicate_ends[previous]] == connector.start():
+            current_boundaries.append(connector.start())
+    clause_ends = [
+        mark.start() for mark in re.finditer(r"[.!?;:\r\n]", normalized)
+        if not HISTORY_TURKISH_INTERNAL_DOT.match(normalized, mark.start())
+    ]
+    words = list(re.finditer(r"\S+", normalized))
+    word_starts = [word.start() for word in words]
+    lexical_words = list(re.finditer(r"\w+", normalized))
+    lexical_starts = [word.start() for word in lexical_words]
+    question_positions = [
+        word.start() for word in lexical_words if _retrospective_question_terms(word.group())
+    ]
+    choice_questions: dict[int, int] = {}
+    which_start = -1
+    for word in words:
+        term = word.group()
+        if term == "hangi" or _matches_history_inflection(term, "hangi"):
+            which_start = word.start()
+        if any(term == root or _matches_history_inflection(term, root) for root in ("secenek", "seceneg")):
+            choice_questions[word.end()] = which_start
+            which_start = -1  # Bind each question to its first choice head.
+    auxiliary = re.compile(rf"\b(?:{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY}|neydi)$")
     accepted: dict[int, re.Match[str]] = {}
     for ending in endings:
         index = bisect_right(starts, ending.start()) - 1
         if index < 0 or starts[index] in accepted:
             continue
         start = starts[index]
+        clause_end = bisect_left(clause_ends, start)
+        if clause_end < len(clause_ends) and clause_ends[clause_end] < ending.start():
+            continue
         boundary = bisect_left(current_boundaries, start)
         if boundary < len(current_boundaries) and current_boundaries[boundary] < ending.start():
             continue
-        # A rejected declarative prefix must not consume the temporal marker;
-        # a later predicate in the same clause may be the operative question.
+        if not normalized[ending.start() - 1:ending.start()].isspace():
+            continue
+        after = following[ending.end()]
+        is_question = normalized[after:after + 1] == "?" or auxiliary.search(ending.group()) is not None
+        if not is_question:
+            # Decision predicates need at most the previous lexical word.
+            local = max(start, lexical_starts[max(0, bisect_left(lexical_starts, ending.start()) - 1)])
+            decision = HISTORY_TURKISH_DECISION_PAST.search(normalized[local:ending.end()])
+            if decision is None:
+                continue
+            prefix_end = local + decision.start()
+            count = bisect_left(word_starts, prefix_end)
+            if count == 0:
+                continue
+            prefix_start = max(start, word_starts[max(0, count - 2)])
+            question = bisect_left(question_positions, prefix_end) - 1
+            is_question = question >= 0 and question_positions[question] >= prefix_start
+            last = words[count - 1]
+            if last.end() <= prefix_end and choice_questions.get(last.end(), -1) >= start:
+                is_question = True
+        if not is_question:
+            continue
+        # Only a qualifying predicate rescans its clause; rejected candidates
+        # use indexed positions, including the modified-choice question path.
         match = HISTORY_TURKISH_RETROSPECTIVE_QUERY.fullmatch(normalized, start, ending.end())
-        if match is not None and (
-            normalized[match.end():].lstrip().startswith("?")
-            or re.search(rf"\b(?:{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY}|neydi)$", match.group())
-            or (
-                (decision := HISTORY_TURKISH_DECISION_PAST.search(match.group()))
-                and (prefix := match.group()[:decision.start()].split())
-                and (
-                    _retrospective_question_terms(" ".join(prefix[-2:]))
-                    # The existing choice family also allows modifiers between
-                    # `hangi` and its object, without an arbitrary word limit.
-                    or _modified_choice_question(prefix)
-                )
-            )
-        ):
+        if match is not None:
             accepted[start] = match
     return list(accepted.values())
 
@@ -2064,7 +2095,8 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     }
 
     def topic_terms(scope: str) -> list[str]:
-        if re.fullmatch(rf"{CURRENT_QUERY_CUE}\s+karar\w*\s+(?:ne|nedir)\??", _normalize(scope)):
+        generic = re.fullmatch(rf"{CURRENT_QUERY_CUE}\s+karar\w*\s+(\w+)\??", _normalize(scope))
+        if generic and (generic[1] == "nedir" or _retrospective_question_terms(generic[1])):
             return []
         scope_terms = _retrieval_terms(scope)
         retrospective_cue_terms = _retrospective_topic_cue_terms(scope)
