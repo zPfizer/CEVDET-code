@@ -298,13 +298,63 @@ def _guarded_backup_path(path: Path, state: Path | None) -> Path:
     return backup_dir / f'.{path.name}.companion-{backup_key}.bak'
 
 
+def _guarded_create_marker_path(path: Path, state: Path | None) -> Path:
+    backup_dir = state or path.parent
+    backup_key = _sha(str(path.resolve(strict=False)).encode('utf-8'))
+    return backup_dir / f'.{path.name}.companion-create-{backup_key}.bak'
+
+
+def _guarded_marker_exists(path: Path) -> bool:
+    return path.exists() or path.is_symlink() or path.is_junction()
+
+
 def _guarded_backup_exists(path: Path, state: Path | None) -> bool:
-    backup = _guarded_backup_path(path, state)
-    return backup.exists() or backup.is_symlink() or backup.is_junction()
+    return any(
+        _guarded_marker_exists(candidate)
+        for candidate in (
+            _guarded_backup_path(path, state),
+            _guarded_create_marker_path(path, state),
+        )
+    )
+
+
+def _reconcile_guarded_create_marker(
+    path: Path,
+    payload: bytes,
+    *,
+    state: Path | None,
+    expected_digest: str | None,
+) -> bool:
+    marker = _guarded_create_marker_path(path, state)
+    if not _guarded_marker_exists(marker):
+        legacy = _guarded_backup_path(path, state)
+        if expected_digest is not None or not _guarded_marker_exists(legacy):
+            return False
+        marker = legacy
+        try:
+            if _sha(marker.read_bytes()) != _sha(payload):
+                return False
+        except OSError:
+            return False
+
+    if marker.is_symlink() or marker.is_junction() or path.is_symlink() or path.is_junction():
+        return False
+    try:
+        target_exists = path.exists()
+        current = path.read_bytes() if path.is_file() else None
+        marker.unlink()
+    except OSError:
+        return False
+    if not target_exists:
+        return False
+    if current == payload:
+        return True
+    raise ValueError(_MANUAL_WRITE_CONFLICT)
 
 
 def _guarded_write(
     path: Path,
+    payload: bytes,
     expected_digest: str | None,
     *,
     state: Path | None,
@@ -314,7 +364,22 @@ def _guarded_write(
 ) -> None:
     backup_dir = state or path.parent
     backup_dir.mkdir(parents=True, exist_ok=True)
-    backup = _guarded_backup_path(path, state)
+    if _reconcile_guarded_create_marker(
+        path,
+        payload,
+        state=state,
+        expected_digest=expected_digest,
+    ):
+        if _guarded_backup_exists(path, state):
+            raise ValueError(_MANUAL_WRITE_CONFLICT)
+        if expected_digest is not None:
+            _validate_guarded_snapshot(path, expected_digest)
+        return
+    backup = (
+        _guarded_create_marker_path(path, state)
+        if expected_digest is None
+        else _guarded_backup_path(path, state)
+    )
     if _guarded_backup_exists(path, state):
         raise ValueError(_MANUAL_WRITE_CONFLICT)
 
@@ -407,14 +472,21 @@ def _manual_for_view(
     view_snapshot: dict[str, str | None] | None = None,
 ):
     source_path, view_path = _source_path(root, name), _view_path(root, name)
-    if write_source and _guarded_backup_exists(source_path, state):
-        raise ValueError(_MANUAL_WRITE_CONFLICT)
     source_digest = None
     if canonical and not source_path.is_file():
         raise ValueError('companion-manual-source-missing')
     if source_path.is_file():
         source = source_path.read_bytes()
         source_digest = _sha(source)
+        if write_source:
+            _reconcile_guarded_create_marker(
+                source_path,
+                source,
+                state=state,
+                expected_digest=source_digest,
+            )
+            if _guarded_backup_exists(source_path, state):
+                raise ValueError(_MANUAL_WRITE_CONFLICT)
         prefix, suffix = _manual_parts(name, source)
     else:
         view_exists = view_path.is_file()
@@ -627,11 +699,19 @@ def ensure_views(
         result = {}
         for name, payload in _render(records, manuals, hashes).items():
             path = _view_path(root, name)
-            if _guarded_backup_exists(path, state):
-                raise ValueError(_MANUAL_WRITE_CONFLICT)
             current = path.read_bytes() if path.is_file() else None
             current_digest = _sha(current) if current is not None else None
             expected_digest = view_snapshots.get(name, current_digest)
+            if _reconcile_guarded_create_marker(
+                path,
+                payload,
+                state=state,
+                expected_digest=expected_digest,
+            ):
+                current = payload
+                current_digest = _sha(payload)
+            if _guarded_backup_exists(path, state):
+                raise ValueError(_MANUAL_WRITE_CONFLICT)
             if current_digest != expected_digest:
                 raise ValueError(_MANUAL_WRITE_CONFLICT)
             if current != payload:
@@ -701,6 +781,7 @@ def _write_projection(
 
     _guarded_write(
         path,
+        payload,
         expected_digest,
         state=state,
         deadline=deadline,
@@ -739,6 +820,7 @@ def _write_manual(
 
     _guarded_write(
         path,
+        payload,
         expected_digest,
         state=state,
         deadline=deadline,
@@ -910,11 +992,19 @@ def publish(root: Path, state: Path, summary: str, event: dt.datetime,
             atomic_write_json(canonical_path, _catalog_payload(records, previous_metadata), sort_keys=True)
             for name, payload in _render(records, manuals, hashes).items():
                 path = _view_path(root, name)
-                if _guarded_backup_exists(path, state):
-                    raise ValueError(_MANUAL_WRITE_CONFLICT)
                 current = path.read_bytes() if path.is_file() else None
                 current_digest = _sha(current) if current is not None else None
                 expected_digest = view_snapshots.get(name, current_digest)
+                if _reconcile_guarded_create_marker(
+                    path,
+                    payload,
+                    state=state,
+                    expected_digest=expected_digest,
+                ):
+                    current = payload
+                    current_digest = _sha(payload)
+                if _guarded_backup_exists(path, state):
+                    raise ValueError(_MANUAL_WRITE_CONFLICT)
                 if current_digest != expected_digest:
                     raise ValueError(_MANUAL_WRITE_CONFLICT)
                 if current != payload:

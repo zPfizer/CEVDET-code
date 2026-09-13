@@ -503,7 +503,7 @@ class CompanionSplitTests(unittest.TestCase):
                         state=state,
                     )
 
-            backup = companion_memory._guarded_backup_path(target, state)
+            backup = companion_memory._guarded_create_marker_path(target, state)
             self.assertEqual(target.read_bytes(), user_bytes)
             self.assertFalse(backup.exists())
 
@@ -543,9 +543,61 @@ class CompanionSplitTests(unittest.TestCase):
                         state=state,
                     )
 
-            backup = companion_memory._guarded_backup_path(target, state)
+            backup = companion_memory._guarded_create_marker_path(target, state)
             self.assertEqual(target.read_bytes(), user_bytes)
             self.assertFalse(backup.exists())
+
+    def test_interrupted_create_marker_is_reconciled(self):
+        payload = b"generated\n"
+        for outcome in ("absent", "generated", "user"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                target = root / "Last-Session.md"
+                state = root / ".state"
+                marker = companion_memory._guarded_create_marker_path(target, state)
+                marker.parent.mkdir(parents=True)
+                marker.write_bytes(payload)
+                if outcome == "generated":
+                    target.write_bytes(payload)
+                elif outcome == "user":
+                    user_bytes = b"user content\n"
+                    target.write_bytes(user_bytes)
+
+                if outcome == "user":
+                    with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
+                        companion_memory._write_projection(
+                            target,
+                            payload,
+                            expected_digest=None,
+                            state=state,
+                        )
+                    self.assertEqual(target.read_bytes(), user_bytes)
+                else:
+                    companion_memory._write_projection(
+                        target,
+                        payload,
+                        expected_digest=None,
+                        state=state,
+                    )
+                    self.assertEqual(target.read_bytes(), payload)
+                self.assertFalse(marker.exists())
+
+    def test_ensure_reconciles_interrupted_create_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            companion = _seed(root)
+            state = root / ".state"
+            companion_memory.migrate(root)
+            companion_memory.publish(root, state, _summary(), EVENT, "a" * 64, "one", frozenset())
+            target = companion / "Last-Session.md"
+            payload = target.read_bytes()
+            marker = companion_memory._guarded_create_marker_path(target, state)
+            marker.write_bytes(payload)
+
+            companion_memory.ensure_views(root, state)
+
+            self.assertEqual(target.read_bytes(), payload)
+            self.assertFalse(marker.exists())
 
     def test_anonymous_legacy_block_remains_tracked_manual_source(self):
         with tempfile.TemporaryDirectory() as temporary:
