@@ -934,6 +934,8 @@ class DoctorTests(unittest.TestCase):
                 ("continuation", "true"),
                 ("continuation_reason", "a" * 65),
                 ("coverage", 3),
+                ("coverage_digest", "sk-proj-ABC123SECRET"),
+                ("coverage", {"api_key": "sk-proj-ABC123SECRET"}),
             ):
                 with self.subTest(field=field):
                     path.write_text(

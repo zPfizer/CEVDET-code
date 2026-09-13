@@ -708,37 +708,37 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
         "transcript",
     }
 
-    def is_metadata(value: object) -> bool:
-        if value is None or type(value) is bool:
-            return True
-        if type(value) is int:
-            return 0 <= value
-        if isinstance(value, str):
-            return re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", value) is not None
-        if isinstance(value, list):
-            return all(is_metadata(item) for item in value)
-        if isinstance(value, dict):
-            return all(
-                isinstance(key, str)
-                and key.casefold() not in forbidden
-                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", key)
-                is not None
-                and is_metadata(item)
-                for key, item in value.items()
-            )
-        return False
+    def is_token(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{0,63}", value) is not None
+            and not value.startswith(("sk-", "pk-", "ghp_", "github_pat_", "xox"))
+        )
+
+    def is_coverage(value: object) -> bool:
+        return isinstance(value, dict) and all(
+            isinstance(key, str)
+            and key.casefold() not in forbidden
+            and is_token(key)
+            and type(item) is int
+            and item >= 0
+            for key, item in value.items()
+        )
 
     def is_continuation_field(field: str) -> bool:
         value = payload[field]
         if field == "continuation_reason":
-            return isinstance(value, str) and is_metadata(value)
+            return is_token(value)
         if field == "continuation":
             return type(value) is bool
         if field in {"coverage_count", "coverage_end"}:
             return type(value) is int and value >= 0
         if field == "coverage_digest":
-            return isinstance(value, str) and is_metadata(value)
-        return isinstance(value, dict) and is_metadata(value)
+            return (
+                isinstance(value, str)
+                and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+            )
+        return is_coverage(value)
 
     return (
         type(payload.get("delivery_schema_version")) is int
