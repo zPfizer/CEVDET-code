@@ -1762,6 +1762,19 @@ def _retrospective_topic_cue_terms(query: str) -> frozenset[str]:
     return frozenset(cue_terms)
 
 
+def _current_cue_spans_outside_retrospective(normalized: str) -> tuple[tuple[int, int], ...]:
+    history = tuple(match.span() for match in _retrospective_question_matches(normalized))
+    history_starts = tuple(start for start, _end in history)
+    related = _current_selection_object_spans(normalized)
+    spans: list[tuple[int, int]] = []
+    for cue in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized):
+        index = bisect_right(history_starts, cue.start()) - 1
+        if cue.span() in related or (index >= 0 and cue.end() <= history[index][1]):
+            continue
+        spans.append(cue.span())
+    return tuple(spans)
+
+
 def _has_history_query_cues(query_terms: frozenset[str], query: str = "") -> bool:
     # ponytail: `tarih` alone is ambiguous date/history wording; explicit history cues widen recall.
     history_terms = query_terms & HISTORY_QUERY_TERMS
@@ -2057,12 +2070,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
         raw_cursor = connector.end()
     normalized_parts.append(_normalize(query[raw_cursor:]))
     normalized = _unquoted_request("".join(normalized_parts), preserve_positions=True)
-    related_current = _current_selection_object_spans(normalized)
-    current_spans = tuple(
-        (match.start(), match.end())
-        for match in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized)
-        if match.span() not in related_current
-    )
+    current_spans = _current_cue_spans_outside_retrospective(normalized)
     if not current_spans:
         return None
     connector_starts = tuple(start for start, _end, _raw_start, _raw_end in connector_spans)
@@ -2222,17 +2230,13 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
 
 def _has_independent_current_cue(query: str) -> bool:
     normalized = _unquoted_request(_normalize(query), preserve_positions=True)
-    current_spans = tuple(
-        match.span()
-        for match in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized)
-    )
+    current_spans = _current_cue_spans_outside_retrospective(normalized)
     if not current_spans:
         return False
     related_current_spans = {
         match.span("current")
         for match in HISTORY_OBJECT_CURRENT_CUE.finditer(normalized)
     }
-    related_current_spans.update(_current_selection_object_spans(normalized))
     words = tuple(re.finditer(r"(?<!\w)[\w]+(?!\w)", normalized))
     genitive_suffixes = {"in", "nin", "un", "nun"}
     for current_index, current_word in enumerate(words):

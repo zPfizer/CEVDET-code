@@ -1491,9 +1491,12 @@ Geçmiş veri saklama kararı: uzun günlükler.
             self.assertIn(other_history, {
                 hit.entry.path for hit in retrieval.search_vault(entries, quoted_topic, top_k=2)
             })
-            for label in ('"güncel"', '`güncel`', '"güncel ve eski"'):
-                query = f"Daha önce {label} etiketiyle veri saklama konusunda ne karar vermiştik?"
-                with self.subTest(label=label):
+            for query in (
+                *(f"Daha önce {label} etiketiyle veri saklama konusunda ne karar vermiştik?"
+                  for label in ('"güncel"', '`güncel`', '"güncel ve eski"')),
+                "Daha önce veri saklama için pasif ve aktif depolama seçeneklerinden hangisini seçmiştik?",
+            ):
+                with self.subTest(query=query):
                     self.assertFalse(retrieval._should_preserve_current_stale_penalty(
                         query, retrieval._retrieval_terms(query),
                     ))
