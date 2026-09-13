@@ -396,6 +396,30 @@ class UserEvidenceTests(unittest.TestCase):
         output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
         self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
 
+    def test_continued_list_reference_definition_cannot_create_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for opening, indent in (('10. item', '    '), ('1.    item', '      ')):
+            with self.subTest(opening=opening):
+                body = opening + '\n\n' + indent + "[label]: /url '" + cited + "'"
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(output['Alınan Kararlar'], '')
+                self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+        body = "10. item\n\n    [label]: /url 'title'\n\n" + cited
+        output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+
+    def test_literal_html_block_requires_exact_closing_token(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for tag in ('pre', 'script', 'style', 'textarea'):
+            for gap, trusted in ((' ', False), ('\t', False), ('', True)):
+                with self.subTest(tag=tag, gap=gap):
+                    body = '<' + tag + '>\nexample\n</' + tag + gap + '>\n' + cited
+                    output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                    self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                    self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
     def test_mixed_space_tab_code_indentation_cannot_create_evidence(self):
         quote = 'Bundan sonra kısa yanıt ver.'
         cited = decision('Kısa yanıt tercihi.', quote)

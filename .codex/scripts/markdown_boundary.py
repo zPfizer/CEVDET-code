@@ -14,7 +14,7 @@ HTML_LITERAL_OPEN = re.compile(
     re.IGNORECASE,
 )
 HTML_LITERAL_CLOSE = re.compile(
-    r"</(?P<tag>pre|script|style|textarea)[ \t]*>",
+    r"</(?P<tag>pre|script|style|textarea)>",
     re.IGNORECASE,
 )
 HTML_TAG = re.compile(r'<(?:[^"\'>]|"[^"]*"|\'[^\']*\')*>', re.DOTALL)
@@ -171,9 +171,30 @@ def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
         return None
 
     offset = 0
+    list_contexts: list[tuple[int, int]] = []
     for line in text.splitlines(keepends=True):
-        logical_line, _containers = _container_prefix(line.rstrip('\r\n'))
-        logical_offset = offset + len(line.rstrip('\r\n')) - len(logical_line)
+        content = line.rstrip('\r\n')
+        list_item = LIST_ITEM.match(content)
+        if list_item is not None:
+            indentation = _indent_columns(list_item.group('indent'))
+            content_indent, gap_width = _list_content_indent(list_item)
+            list_contexts = [item for item in list_contexts if item[0] < indentation]
+            if gap_width <= 4:
+                list_contexts.append((indentation, content_indent))
+            logical_line, _containers = _container_prefix(content)
+        else:
+            logical_line = content
+            for _indentation, content_indent in reversed(list_contexts):
+                candidate = _container_body(content, (('list', content_indent),))
+                if candidate is not None:
+                    logical_line = candidate
+                    list_contexts = [item for item in list_contexts if item[1] <= content_indent]
+                    break
+            else:
+                if content.strip():
+                    list_contexts = []
+            logical_line, _containers = _container_prefix(logical_line)
+        logical_offset = offset + len(content) - len(logical_line)
         offset += len(line)
         definition = REFERENCE_DEFINITION.match(logical_line)
         if definition is None:
