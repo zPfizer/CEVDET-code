@@ -1603,11 +1603,7 @@ def _suppression_controls_scope(
     controls = path.parent
     pre_private_metadata = _suppression_lstat(private)
     pre_controls_metadata = _suppression_lstat(controls)
-    pre_ancestor = (
-        _suppression_existing_ancestor(private)
-        if os.name == "nt"
-        else None
-    )
+    pre_ancestor = _suppression_existing_ancestor(private)
     pre_ancestor_metadata = (
         _suppression_lstat(pre_ancestor) if pre_ancestor is not None else None
     )
