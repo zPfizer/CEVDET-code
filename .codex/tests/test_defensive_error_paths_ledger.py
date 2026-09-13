@@ -358,6 +358,46 @@ class SuppressionEdges(unittest.TestCase):
                     if replacement.exists():
                         replacement.rename(controls)
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows directory handle guard")
+    def test_new_suppression_directory_identity_is_bound_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary) / "private-memory"
+            controls = private / "controls"
+            private.mkdir()
+            replacement = private / "controls-replacement"
+            real_pin = memory_ledger._pinned_windows_directory
+            injected = False
+
+            def replace_before_pin(path: Path):
+                nonlocal injected
+                if path == controls and not injected:
+                    injected = True
+                    controls.rename(replacement)
+                    controls.mkdir()
+                return real_pin(path)
+
+            try:
+                with mock.patch.object(
+                    memory_ledger,
+                    "_pinned_windows_directory",
+                    side_effect=replace_before_pin,
+                ):
+                    with self.assertRaisesRegex(
+                        memory_ledger.MemoryPreferenceError,
+                        "memory-suppression-path-invalid",
+                    ):
+                        memory_ledger.suppress_derived_memory(
+                            private, "hedef", now=1.0
+                        )
+                self.assertTrue(injected)
+                self.assertFalse((controls / "suppressions.lock").exists())
+                self.assertFalse((replacement / "suppressions.lock").exists())
+            finally:
+                if controls.exists():
+                    controls.rmdir()
+                if replacement.exists():
+                    replacement.rmdir()
+
     def test_invalid_and_unreadable_suppression_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             private = Path(temporary)
