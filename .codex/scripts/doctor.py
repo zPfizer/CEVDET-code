@@ -716,17 +716,29 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
             and re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{0,63}", value) is not None
         )
 
+    def is_bounded_count(value: object) -> bool:
+        return type(value) is int and 0 <= value <= (2**63 - 1)
+
     def is_coverage(value: object) -> bool:
-        if type(value) is int:
-            return value >= 0
-        return isinstance(value, dict) and all(
+        if is_bounded_count(value):
+            return True
+        if not isinstance(value, dict) or len(value) > 32:
+            return False
+        if not all(
             isinstance(key, str)
             and key.casefold() not in forbidden
             and is_token(key)
-            and type(item) is int
-            and item >= 0
+            and is_bounded_count(item)
             for key, item in value.items()
-        )
+        ):
+            return False
+        try:
+            encoded = json.dumps(
+                value, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+            ).encode("ascii")
+        except (TypeError, ValueError, UnicodeError):
+            return False
+        return len(encoded) <= 4_096
 
     def is_event_iso(value: object) -> bool:
         if not isinstance(value, str) or not value:
@@ -756,6 +768,14 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
             return False
         return name.casefold().endswith(".jsonl") and name.casefold() != ".jsonl"
 
+    def is_session_id(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and not contains_secret(value)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value)
+            is not None
+        )
+
     def is_continuation_field(field: str) -> bool:
         value = payload[field]
         if field == "continuation_reason":
@@ -763,7 +783,7 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
         if field == "continuation":
             return type(value) is bool or is_token(value)
         if field in {"coverage_count", "coverage_end"}:
-            return type(value) is int and value >= 0
+            return is_bounded_count(value)
         if field == "coverage_digest":
             return (
                 isinstance(value, str)
@@ -774,8 +794,7 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
     return (
         type(payload.get("delivery_schema_version")) is int
         and payload["delivery_schema_version"] == HOOK_INPUT_SCHEMA_VERSION
-        and isinstance(payload.get("session_id"), str)
-        and bool(payload["session_id"])
+        and is_session_id(payload.get("session_id"))
         and isinstance(payload.get("reason"), str)
         and payload["reason"] in FLUSH_REASON_PRIORITY
         and is_event_iso(payload.get("event_iso"))

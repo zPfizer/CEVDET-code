@@ -937,18 +937,26 @@ class DoctorTests(unittest.TestCase):
                 "sk-proj-abc123secret",
                 "AKIAABCDEFGHIJKLMNOPQRSTUV",
             }
+            oversized_coverage = {
+                f"metric-{index}": index for index in range(33)
+            }
             for field, value in (
                 ("prompt", "private prompt"),
                 ("message", "private message"),
                 ("unknown", "private value"),
+                ("session_id", "private prompt"),
+                ("session_id", "sk-proj-abc123secret"),
                 ("continuation", "private prompt"),
                 ("continuation_reason", "private continuation reason"),
                 ("continuation_reason", "sk-proj-abc123secret"),
                 ("continuation_reason", "AKIAABCDEFGHIJKLMNOPQRSTUV"),
                 ("continuation", "ghp_abc123secretvalue"),
                 ("coverage", {"message": "private message"}),
+                ("coverage", oversized_coverage),
+                ("coverage", 2**63),
                 ("continuation_reason", 7),
                 ("continuation_reason", "a" * 65),
+                ("coverage_count", 2**63),
                 ("coverage_digest", "sk-proj-ABC123SECRET"),
                 ("coverage", {"api_key": "sk-proj-ABC123SECRET"}),
             ):
