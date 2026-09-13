@@ -1466,6 +1466,30 @@ Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun 
                 )
             entries = retrieval.build_vault_map(root, write_cache=False)
             history_first = "Daha önce veri saklama konusunda ne karar vermiştik ve güncel karar nedir?"
+            for separator in ("? ", ". ", "! ", "?\n", "?\t", "?\r\n"):
+                sentence_query = history_first.replace(" ve ", separator)
+                with self.subTest(separator=separator):
+                    self.assertIsNotNone(retrieval._split_current_history_query(sentence_query))
+                    self.assertEqual(
+                        {hit.entry.path for hit in retrieval.search_vault(entries, sentence_query, top_k=2)},
+                        {current, historical},
+                    )
+                    reverse_query = f"Güncel veri saklama kararı{separator}Daha önce bu konuda ne karar vermiştik?"
+                    self.assertEqual(
+                        {hit.entry.path for hit in retrieval.search_vault(entries, reverse_query, top_k=2)},
+                        {current, historical},
+                    )
+            for comparison in ("daha", "en"):
+                comparison_query = f"Güncel veri saklama kararı ve önceden hangisi {comparison} iyiydi?"
+                with self.subTest(comparison=comparison):
+                    self.assertEqual(
+                        retrieval._split_current_history_query(comparison_query),
+                        ("Güncel veri saklama kararı", f"önceden hangisi {comparison} iyiydi? veri saklama kararı"),
+                    )
+                    self.assertEqual(
+                        {hit.entry.path for hit in retrieval.search_vault(entries, comparison_query, top_k=2)},
+                        {current, historical},
+                    )
             generic_current = history_first.replace("nedir", "hangisi")
             self.assertEqual(
                 retrieval._split_current_history_query(generic_current),

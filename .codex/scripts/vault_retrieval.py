@@ -203,7 +203,7 @@ HISTORY_TURKISH_NOMINAL_CHANGE_QUERY = re.compile(
 # A past predicate or decision question makes
 # `daha önce`/`önceden` retrospective; imperative forms such as
 # `daha önce bitir` stay current.
-HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS = frozenset({"hangi", "uygun", "konusunda"})
+HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS = frozenset({"hangi", "uygun", "konusunda", "daha", "en"})
 HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY = (
     r"m[iu](?:y[dt][iu](?:m|n|k|n[iu]z|lar|ler)?|y[iu][mz]|s[iu]n(?:[iu]z)?)?"
 )
@@ -1958,7 +1958,15 @@ def _split_selection_exclusion(query: str) -> tuple[str, str, bool, bool] | None
 def _split_current_history_query(query: str) -> tuple[str, str] | None:
     if not re.search(r"(?i)\b(?:current|güncel|guncel|latest|active|aktif)\b", query):
         return None
-    raw_connectors = tuple(CURRENT_HISTORY_CONNECTOR.finditer(query))
+    # Keep terminal punctuation in its question; internal technical dots are not boundaries.
+    sentence_boundaries = (
+        match for match in re.finditer(r"(?<=[.!?])\s+", query)
+        if not HISTORY_TURKISH_INTERNAL_DOT.match(query, match.start() - 1)
+    )
+    raw_connectors = tuple(sorted(
+        [*CURRENT_HISTORY_CONNECTOR.finditer(query), *sentence_boundaries],
+        key=lambda match: match.start(),
+    ))
     if not raw_connectors:
         return None
     normalized_parts: list[str] = []
@@ -2095,7 +2103,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     }
 
     def topic_terms(scope: str) -> list[str]:
-        generic = re.fullmatch(rf"{CURRENT_QUERY_CUE}\s+karar\w*\s+(\w+)\??", _normalize(scope))
+        generic = re.fullmatch(rf"{CURRENT_QUERY_CUE}\s+karar\w*\s+(\w+)[.!?]?", _normalize(scope))
         if generic and (generic[1] == "nedir" or _retrospective_question_terms(generic[1])):
             return []
         scope_terms = _retrieval_terms(scope)
