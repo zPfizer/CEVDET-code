@@ -64,6 +64,40 @@ class HookIntegrationTests(unittest.TestCase):
         self.assertEqual(result, 0)
         handle.assert_called_once_with(payload, state, deadline=deadline)
 
+    def test_user_prompt_literal_timeout_text_does_not_skip_normal_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            transcript = vault / "transcript.jsonl"
+            deadline = time.monotonic() + 30
+            payload = {
+                "session_id": "literal-timeout-text",
+                "cwd": str(vault),
+                "prompt": "Atlas kararı",
+                "transcript_path": str(transcript),
+            }
+            with (
+                mock.patch.object(hook, "VAULT_ROOT", vault),
+                mock.patch.object(hook, "STATE_DIR", state),
+                mock.patch.object(hook, "_validate_hook_scope"),
+                mock.patch.object(hook, "_hook_deadline", return_value=deadline),
+                mock.patch.object(
+                    hook,
+                    "handle_user_prompt",
+                    return_value="[Vault Arama Süresi Doldu] quoted source text",
+                ),
+                mock.patch.object(hook, "enqueue_flush") as enqueue,
+                mock.patch.object(hook, "record_hook_runtime"),
+                mock.patch.object(hook, "clear_hook_health"),
+                mock.patch.object(hook, "_emit_user_prompt_result"),
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                mock.patch.object(sys, "stdout", io.StringIO()),
+            ):
+                result = hook.main(["user-prompt", "--strict"])
+
+        self.assertEqual(result, 0)
+        enqueue.assert_called_once_with(payload, "precompact", deadline=deadline)
+
     def test_user_prompt_counter_lock_contention_respects_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

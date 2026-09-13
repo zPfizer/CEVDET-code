@@ -177,6 +177,27 @@ MEMORY_PRIVACY_BOUNDARY_WARNING = (
     '[Hafıza] Gizlilik kapsamı güvenli biçimde kaydedilemedi; bu istek engellendi. '
     'Yeniden dene; başarı varsayma.'
 )
+VAULT_RETRIEVAL_TIMEOUT_WARNING = (
+    "[Vault Arama Süresi Doldu]\n"
+    "Vault araması ayrılan süre içinde tamamlanamadı; bilgi yok sonucuna varma. "
+    "Ham bilgi dosyalarına veya eski önbelleğe geçme; eksik doğrulamayı açıkça bildir."
+)
+
+
+class _UserPromptContext(str):
+    """Rendered context with trusted control state kept beside its text."""
+
+    deadline_expired: bool
+
+    def __new__(
+        cls,
+        value: str,
+        *,
+        deadline_expired: bool = False,
+    ) -> "_UserPromptContext":
+        result = super().__new__(cls, value)
+        result.deadline_expired = deadline_expired
+        return result
 
 _LEADING_SKILL_LINK = re.compile(
     r"^\s*\[\$[^\]\r\n]+\]\(([^)\r\n]+)\)\s*",
@@ -268,6 +289,8 @@ def session_key(session_id: str) -> str:
 def _read_source_text(
     source: Path | str | None,
     memory: MemoryRead | None = None,
+    *,
+    deadline: float | None = None,
 ) -> str | None:
     if source is None:
         return None
@@ -278,11 +301,16 @@ def _read_source_text(
         if not source.is_file():
             return None
         try:
-            text = (
-                memory.read_source(source)[1]
-                if memory is not None
-                else source.read_text(encoding="utf-8")
-            )
+            if memory is not None:
+                text = (
+                    memory.read_source(source)[1]
+                    if deadline is None
+                    else memory.read_source(source, deadline=deadline)[1]
+                )
+            else:
+                text = source.read_text(encoding="utf-8")
+        except TimeoutError:
+            raise
         except OSError:
             return None
     if text is None:
@@ -319,19 +347,39 @@ def _profile_warning(issues: tuple[str, ...]) -> str:
     )
 
 
-def _profile_card(path: Path | str | None, vault_root: Path, memory: MemoryRead) -> str:
+def _profile_card(
+    path: Path | str | None,
+    vault_root: Path,
+    memory: MemoryRead,
+    *,
+    deadline: float | None = None,
+) -> str:
     if path is None or memory.excludes(PROFILE_RELATIVE):
         return ""
-    issues = memory.profile_issues()
+    if deadline is None:
+        issues = memory.profile_issues()
+    else:
+        issues = memory.profile_issues(deadline=deadline)
     if issues:
         return _profile_warning(issues)
-    text = _read_source_text(vault_root / PROFILE_RELATIVE, memory)
+    text = _read_source_text(vault_root / PROFILE_RELATIVE, memory, deadline=deadline)
     if text is None:
         return _profile_warning(('profile-unavailable',))
     if memory.active:
         # The full source must be read through the filtered memory view.
-        text = re.sub(r'\[\[([^\]]+)\]\]', lambda match: match[1].split('|')[-1], text)
-    return profile_card(text) or _profile_warning(('profile-context-limit',))
+        _check_hook_deadline(deadline)
+
+        def display_link(match: re.Match[str]) -> str:
+            _check_hook_deadline(deadline)
+            return match[1].split('|')[-1]
+
+        text = re.sub(r'\[\[([^\]]+)\]\]', display_link, text)
+        _check_hook_deadline(deadline)
+    if deadline is None:
+        card = profile_card(text)
+    else:
+        card = profile_card(text, check_deadline=lambda: _check_hook_deadline(deadline))
+    return card or _profile_warning(('profile-context-limit',))
 
 
 def _bound_session_section(title: str, value: str, source_pointer: str | None = None) -> str:
@@ -691,13 +739,29 @@ def handle_user_prompt(
         and is_meaningful_query(prompt)
     )
     context: list[str] = []
+    deadline_expired = False
     try:
-        with memory_read(vault_root) as memory:
-            profile = _profile_card(vault_root / PROFILE_RELATIVE, vault_root, memory)
+        memory_context = (
+            memory_read(vault_root)
+            if deadline is None
+            else memory_read(vault_root, deadline=deadline)
+        )
+        with memory_context as memory:
+            profile = _profile_card(
+                vault_root / PROFILE_RELATIVE,
+                vault_root,
+                memory,
+                deadline=deadline,
+            )
             if profile:
                 context.append('[Hafıza: Profil]\n' + profile)
             if memory.active:
                 context.append(MEMORY_READ_RULE)
+    except TimeoutError:
+        return _UserPromptContext(
+            VAULT_RETRIEVAL_TIMEOUT_WARNING,
+            deadline_expired=True,
+        )
     except (OSError, UnicodeError, ValueError):
         return ('[Hafıza Tercihi Sorunu] Profil ve hafıza tercihleri denetlenemedi. '
                 'Ham notlara veya eski önbelleğe geçme; kişisel bilgi yanıtlamadan sorunu bildir.')
@@ -860,11 +924,10 @@ def handle_user_prompt(
                     'Tercih kaydının onarılması gerektiğini kısa biçimde bildir.'
                 )
             if isinstance(exc, (TimeoutError, LockUnavailable)):
+                deadline_expired = True
                 context.insert(
                     0,
-                    "[Vault Arama Süresi Doldu]\n"
-                    "Vault araması ayrılan süre içinde tamamlanamadı; bilgi yok sonucuna varma. "
-                    "Ham bilgi dosyalarına veya eski önbelleğe geçme; eksik doğrulamayı açıkça bildir.",
+                    VAULT_RETRIEVAL_TIMEOUT_WARNING,
                 )
             elif isinstance(exc, OSError) and str(exc) == "vault-retrieval-incomplete":
                 context.insert(
@@ -928,7 +991,7 @@ def handle_user_prompt(
         if len(candidate) > USER_PROMPT_CONTEXT_TARGET_CHARS:
             break
         output = candidate
-    return output
+    return _UserPromptContext(output, deadline_expired=deadline_expired)
 
 
 def _mark_reflection_if_needed(
@@ -1417,7 +1480,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 STATE_DIR,
                 deadline=hook_deadline,
             )
-            deadline_context = "[Vault Arama Süresi Doldu]" in (emitted_context or "")
+            deadline_context = (
+                isinstance(emitted_context, _UserPromptContext)
+                and emitted_context.deadline_expired
+            )
             if deadline_context:
                 _emit_user_prompt_result(emitted_context or "")
                 response_emitted = True

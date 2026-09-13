@@ -4420,6 +4420,44 @@ Analysis Lifecycle yalnız branded updateImpactPreviewId tüketir.
         self.assertEqual(receipt["chars"], 0)
         self.assertNotIn("prompt", receipt)
 
+    def test_user_prompt_profile_deadline_bounds_cooperative_slow_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            state.mkdir(parents=True)
+            payload = {
+                "session_id": "slow-profile",
+                "cwd": str(vault),
+                "prompt": "Atlas kararı",
+            }
+            observed_deadlines: list[float | None] = []
+            deadline = time.monotonic() + 0.08
+            started = time.monotonic()
+
+            def slow_profile(*, deadline: float | None = None):
+                observed_deadlines.append(deadline)
+                while deadline is not None and time.monotonic() < deadline + 0.05:
+                    time.sleep(0.005)
+                raise TimeoutError("profile-deadline")
+
+            with mock.patch.object(
+                hook.MemoryRead,
+                "profile_issues",
+                side_effect=slow_profile,
+            ):
+                context = hook.handle_user_prompt(
+                    payload,
+                    state,
+                    vault_root=vault,
+                    deadline=deadline,
+                )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.4)
+        self.assertEqual(observed_deadlines, [deadline])
+        self.assertIn("[Vault Arama Süresi Doldu]", context)
+        self.assertTrue(getattr(context, "deadline_expired", False))
+
     def test_user_prompt_retrieval_deadline_bounds_cooperative_slow_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
