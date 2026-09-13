@@ -115,6 +115,15 @@ class GraphIntegrityTests(unittest.TestCase):
                 self.assertIn('[[../secret]]', markdown_body('<' + tag + '/>\n\n[[../secret]]'))
                 self.assertNotIn('[[../secret]]', markdown_body('<' + tag + ' />\n\n[[../secret]]'))
 
+    def test_deeper_quote_cannot_bypass_a_remaining_list_container(self) -> None:
+        for opener in ('```', '<pre>'):
+            for following in ('>> [[../secret]]', '>>   [[../secret]]'):
+                with self.subTest(opener=opener, following=following):
+                    self.assertIn('[[../secret]]', markdown_body('> - ' + opener + '\n' + following))
+            with self.subTest(opener=opener, retained=True):
+                self.assertNotIn('[[inside]]', markdown_body('> - ' + opener + '\n>   > [[inside]]'))
+                self.assertNotIn('[[inside]]', markdown_body('> ' + opener + '\n>> [[inside]]'))
+
     def test_graph_summary_keeps_observable_property_wikilinks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

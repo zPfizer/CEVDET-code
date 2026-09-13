@@ -31,6 +31,31 @@ def seed(root):
 
 
 class SessionSnapshotTests(unittest.TestCase):
+    def test_quoted_claim_cannot_retain_a_previously_verified_evidence_id(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            time = dt.datetime(2026, 9, 7, 12, tzinfo=dt.timezone.utc)
+            claim = 'Atlas hızlı olacak.'
+            parts = flush.SessionSummary.parse(summary('Atlas', 'Test açık')).sections
+            parts['Alınan Kararlar'] = '- ' + claim + ' <!-- user-source: {"quote":"Hız önemli","scope":"project"} -->'
+            bound = user_evidence.bind_evidence(parts, [('user', 'Hız önemli')], time.isoformat())
+            previous = flush.SessionSummary(bound).render()
+            daily_store.publish(root, root / '.state', previous, 'turnend', time, idempotency_key='a'*64)
+            for body, trusted in (
+                ('> quoted lead\n' + claim, False),
+                ('1.    item\n      > quoted lead\n      ' + claim, False),
+                ('```\n' + claim + '\n```', False),
+                ('- ' + claim, True),
+            ):
+                with self.subTest(body=body):
+                    current = dict(parts, **{'Alınan Kararlar': body})
+                    carried = user_evidence.bind_evidence(
+                        current, [], (time + dt.timedelta(days=1)).isoformat(),
+                        previous_summary=previous, vault_root=root, memory_reader=memory_read,
+                    )
+                    self.assertEqual(bool(carried['Alınan Kararlar']), trusted)
+                    self.assertEqual(bool(user_evidence.EVIDENCE.search(carried['Önemli Konuşmalar'])), trusted)
+
     def test_forgetting_original_daily_hides_carried_claim_and_quote(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

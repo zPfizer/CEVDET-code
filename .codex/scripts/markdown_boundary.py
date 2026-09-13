@@ -609,13 +609,11 @@ def _container_present(
     for kind, value in container:
         if kind == "quote":
             quote_depth = 0
-            while (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
+            while quote_depth < value and (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
                 quote_depth += 1
                 remainder = remainder[prefix.end():]
             if quote_depth < value:
                 return False
-            if quote_depth > value:
-                return True
             continue
         if not content.strip():
             return True

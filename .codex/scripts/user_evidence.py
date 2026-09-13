@@ -210,6 +210,8 @@ def _visible_source_body(text: str) -> str:
             quote_paragraph = False
         if line.strip() and not explicit_list and list_contexts and remainder == line:
             list_contexts = []
+        if offset in blockquote_starts:
+            chars[offset:offset + len(line)] = ' ' * len(line)
         offset += len(raw_line)
     link_spans = markdown_link_spans(text)
     for match in SOURCE.finditer(text):
