@@ -224,7 +224,9 @@ HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY = (
     rf"(?=\s*(?:[,.!?;:\r\n]|$|(?:ve|ile)\s+{CURRENT_QUERY_CUE}\b))"
 )
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
-    rf"(?ix)\b(?:daha\s+once|onceden)\b[^.!?;:\r\n]*?\s+"
+    rf"(?ix)\b(?:daha\s+once|onceden)\b"
+    # Dots inside identifiers/versions and dotted initials are not clause ends.
+    r"(?:[^.!?;:\r\n]|(?<=\w)\.(?=\w)|(?<=\b\w\.\w)\.(?=\s))*?\s+"
     rf"(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b{HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY}"
 )
 HISTORY_TURKISH_RETROSPECTIVE_END = re.compile(
@@ -1593,11 +1595,13 @@ def _modified_choice_question(prefix: list[str]) -> bool:
 def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
     normalized = _unquoted_request(normalized, preserve_positions=True)
     starts = [match.start() for match in re.finditer(r"\b(?:daha\s+once|onceden)\b", normalized)]
+    endings = list(HISTORY_TURKISH_RETROSPECTIVE_END.finditer(normalized))
+    predicate_ends = {ending.end() for ending in endings}
     current_boundaries = [match.start() for match in re.finditer(
-        rf"(?:\b(?:ve|ile)\b|,)\s+{CURRENT_QUERY_CUE}\b", normalized,
-    )]
+        rf"(?:\b(?:ve|ile)\b\s+|[,.!?;:\r\n]\s*){CURRENT_QUERY_CUE}\b", normalized,
+    ) if normalized[match.start()] != "." or match.start() in predicate_ends]
     accepted: dict[int, re.Match[str]] = {}
-    for ending in HISTORY_TURKISH_RETROSPECTIVE_END.finditer(normalized):
+    for ending in endings:
         index = bisect_right(starts, ending.start()) - 1
         if index < 0 or starts[index] in accepted:
             continue

@@ -1274,6 +1274,10 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                 "Daha önce veri saklama için ne kararlaştırdık",
                 "Daha önce veri saklama için hangi depolama seçeneğini seçmiştik",
                 "Daha önce veri saklama için hangi güvenli yerel depolama seçeneğini seçmiştik",
+                "Daha önce Python 3.14 ile veri saklama için hangi seçeneği uygun görmüştük?",
+                "Daha önce Node.js ile veri saklama için hangi seçeneği uygun görmüştük?",
+                "Daha önce config.active ile veri saklama için hangi seçeneği uygun görmüştük?",
+                "Daha önce T.C. sınırında veri saklama için hangi seçeneği uygun görmüştük?",
                 *("Daha önce veri saklama konusunda ne karar vermiştik" + end for end in (".", "!", ";", ":", "\n")),
                 "Daha önce veri saklama konusunda ne karar vermiştik, hatırlıyor musun?",
                 "Daha önce veri saklama için iki seçenek görmüştük, hangisini tercih etmiştik?",
@@ -1350,6 +1354,7 @@ Geçmiş veri saklama kararı: uzun günlükler.
             for query in (
                 "Daha önce veri saklama kararı vermiştik, şimdi nasıl değiştirelim?",
                 "Daha önce veri saklama için bunu kararlaştırmıştık; güncel seçeneği öner",
+                "Daha önce veri saklama kararı vermiştik.Güncel olarak hangi seçeneği uygun gördük?",
                 *("Daha önce veri saklama kararı vermiştik" + end + " güncel olarak hangi seçeneği uygun gördük?" for end in (".", "!", ";", ":", "\n")),
                 "Daha önce veri saklama kararı vermiştik ve güncel seçeneği öner",
                 "Daha önce veri saklama kararı verdik ve güncel seçeneği öner",
