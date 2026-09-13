@@ -1211,6 +1211,56 @@ class AttachmentMemoryTests(unittest.TestCase):
                         summarize, state_dir=state,
                     )
 
+    def test_missing_source_does_not_promote_prepared_mapping_after_install_gap(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Prepared source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nPrepared summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            real_write = attachment_memory._write_mapping
+            write_count = 0
+
+            def fail_after_install(path, mapping):
+                nonlocal write_count
+                write_count += 1
+                if write_count == 2:
+                    raise OSError('interrupted mapping commit')
+                return real_write(path, mapping)
+
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}), \
+                 mock.patch.object(attachment_memory, '_write_mapping', side_effect=fail_after_install):
+                with self.assertRaisesRegex(OSError, 'interrupted mapping commit'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc), frozenset(),
+                        mock.Mock(return_value=summary), state_dir=state,
+                    )
+
+            mapping_path = attachment_memory._mapping_path(
+                state, source.parent.name, attachment_memory._attachment_digest(text.rstrip()),
+            )
+            mapping_text = mapping_path.read_text(encoding='utf-8')
+            prepared = json.loads(mapping_text)
+            self.assertEqual(prepared['status'], 'prepared')
+            note = root / prepared['note_relative']
+            self.assertTrue(note.is_file())
+            note_text = note.read_text(encoding='utf-8')
+            source.unlink()
+            retry = mock.Mock(return_value=summary)
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                with self.assertRaisesRegex(ValueError, 'attachment-recovery-unavailable'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc), frozenset(),
+                        retry, state_dir=state,
+                    )
+
+            retry.assert_not_called()
+            self.assertEqual(mapping_path.read_text(encoding='utf-8'), mapping_text)
+            self.assertEqual(note.read_text(encoding='utf-8'), note_text)
+
     def test_rebuilds_reused_summary_when_new_suppression_hides_source(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

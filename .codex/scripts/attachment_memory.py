@@ -524,6 +524,8 @@ def _capture_one_core(
                 raise ValueError('attachment-recovery-unavailable')
             if mapping.get('source_changed'):
                 raise ValueError('attachment-content-changed')
+            if mapping['status'] == 'prepared':
+                raise ValueError('attachment-recovery-unavailable')
             if mapping['status'] == 'empty':
                 if mapping['suppression_revision'] != _suppression_revision(hashes):
                     raise ValueError('attachment-recovery-unavailable')

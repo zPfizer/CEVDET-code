@@ -455,7 +455,7 @@ class AttachmentCaptureGuards(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _capture(root, _envelope(source))
 
-    def test_prepared_note_drift_after_note_disappears_is_rejected(self) -> None:
+    def test_prepared_mapping_with_missing_source_fails_closed_before_note_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = _seed(root, content="Kept source.")
@@ -471,8 +471,6 @@ class AttachmentCaptureGuards(unittest.TestCase):
 
             def summarize_and_disappear(_visible: str) -> str:
                 summary_calls["count"] += 1
-                if summary_calls["count"] == 2:
-                    note.unlink(missing_ok=True)
                 return old_summary if summary_calls["count"] == 1 else new_summary
 
             summarize = mock.Mock(side_effect=summarize_and_disappear)
@@ -497,14 +495,14 @@ class AttachmentCaptureGuards(unittest.TestCase):
             hashes = load_suppressed_hashes(private_memory)
             source.unlink()
             with self.assertRaisesRegex(
-                ValueError, "attachment-prepared-note-drift"
+                ValueError, "attachment-recovery-unavailable"
             ):
                 _capture(
                     root, _envelope(source), summarize=summarize,
                     hashes=hashes,
                 )
-            self.assertFalse(note.exists())
-            self.assertEqual(summarize.call_count, 2)
+            self.assertTrue(note.exists())
+            self.assertEqual(summarize.call_count, 1)
 
 
 if __name__ == "__main__":
