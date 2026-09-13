@@ -9,6 +9,7 @@ import unicodedata
 from markdown_boundary import (
     FENCE_LINE as _FENCE_LINE,
     WIKILINK,
+    _blank_inline_code,
     is_escaped as _is_escaped,
     markdown_body as _markdown_body,
     wikilinks as _wikilinks,
@@ -191,6 +192,9 @@ def markdown_headings(text: str) -> list[tuple[str, str, int, int]]:
     """Return real Markdown headings outside fenced code blocks."""
     headings: list[tuple[str, str, int, int]] = []
     masked = _markdown_body(text, mask_inline_code=False)
+    chars = list(masked)
+    _blank_inline_code(chars, masked, multiline_only=True)
+    masked = ''.join(chars)
     offset = 0
     for raw_line in masked.splitlines(keepends=True):
         line = raw_line.rstrip("\r\n")

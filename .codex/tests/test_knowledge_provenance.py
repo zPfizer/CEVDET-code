@@ -151,6 +151,11 @@ Bağ.
             [("##", "Görünür")],
         )
 
+    def test_multiline_inline_code_cannot_supply_required_headings(self) -> None:
+        text = "`\n## Önemli Noktalar\n`\n"
+
+        self.assertEqual(knowledge_schema.markdown_headings(text), [])
+
     def test_heading_schema_ignores_fenced_headings_and_inline_tokens(self) -> None:
         fenced = "```markdown\n" + "\n".join(knowledge_schema.CONCEPT_HEADINGS) + "\n```\n"
         self.assertFalse(knowledge_schema._ordered(fenced, knowledge_schema.CONCEPT_HEADINGS))

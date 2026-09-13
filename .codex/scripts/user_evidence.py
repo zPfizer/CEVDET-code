@@ -26,7 +26,10 @@ from quote_grammar import QUOTED_CONTENT
 SOURCE = re.compile(r'<!-- user-source:\s*(\{[^\n]*\})\s*-->')
 EVIDENCE = re.compile(r'<!-- user-evidence:\s*(\{[^\n]*\})\s*-->')
 LIST_PREFIX = re.compile(r'^[ \t]*(?:[-+*]|\d+[.)])(?:[ \t]+|$)')
-REFERENCE_DEFINITION = re.compile(r'(?m)^[ \t]{0,3}\[[^\]\r\n]+\]:[^\r\n]*$')
+REFERENCE_DEFINITION = re.compile(
+    r'(?m)^[ \t]{0,3}\[[^\]\r\n]+\]:[^\r\n]*'
+    r'(?:\r?\n[ \t]{1,3}(?:["\'(])[^\r\n]*)?'
+)
 USER_ANCHOR = r'(?:#user-[a-f0-9]{64})?'
 USER_LINK = re.compile(r'\[\[daily/(\d{4}-\d{2}-\d{2})#user-([a-f0-9]{64})(?:\|[^\]]+)?\]\]')
 SCOPES = frozenset({'general', 'project', 'session', 'unspecified'})

@@ -72,7 +72,9 @@ def _fence_match(content: str) -> re.Match[str] | None:
     return match
 
 
-def _blank_inline_code(chars: list[str], text: str) -> None:
+def _blank_inline_code(
+    chars: list[str], text: str, *, multiline_only: bool = False
+) -> None:
     index = 0
     while index < len(text):
         if text[index] != "`" or is_escaped(text, index):
@@ -95,8 +97,10 @@ def _blank_inline_code(chars: list[str], text: str) -> None:
             # An unmatched delimiter is ordinary text; advance past it.
             index = delimiter_end
             continue
-        _blank(chars, index, close + len(delimiter))
-        index = close + len(delimiter)
+        end = close + len(delimiter)
+        if not multiline_only or any(char in "\r\n" for char in text[index:end]):
+            _blank(chars, index, end)
+        index = end
 
 
 def _blank_inline_html_elements(
@@ -264,6 +268,17 @@ def _is_html_literal_open(content: str) -> bool:
     )
 
 
+def _html_literal_close(content: str, tag: str) -> re.Match[str] | None:
+    return next(
+        (
+            match
+            for match in HTML_LITERAL_CLOSE.finditer(content)
+            if match.group("tag").casefold() == tag
+        ),
+        None,
+    )
+
+
 def _container_present(
     content: str,
     container: tuple[tuple[str, int], ...],
@@ -365,8 +380,8 @@ def markdown_body(
                 html_container = None
             else:
                 _blank(chars, start, end)
-                closing = HTML_LITERAL_CLOSE.search(content)
-                if closing is not None and closing.group("tag").casefold() == html_literal:
+                closing = _html_literal_close(content, html_literal)
+                if closing is not None:
                     html_literal = None
                     html_container = None
                 paragraph_active = False
@@ -414,10 +429,13 @@ def markdown_body(
             _blank(chars, start, end)
             remainder, container = _container_prefix(content)
             opening = HTML_LITERAL_OPEN.match(remainder)
-            closing = HTML_LITERAL_CLOSE.search(content)
+            closing = (
+                _html_literal_close(content, opening.group("tag").casefold())
+                if opening is not None
+                else None
+            )
             if opening is not None and (
                 closing is None
-                or closing.group("tag").casefold() != opening.group("tag").casefold()
             ):
                 html_literal = opening.group("tag").casefold()
                 html_container = container
