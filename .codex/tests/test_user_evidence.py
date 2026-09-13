@@ -373,6 +373,33 @@ class UserEvidenceTests(unittest.TestCase):
                     self.assertEqual(output['Alınan Kararlar'], '')
                     self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
 
+    def test_escaped_source_comment_is_literal_but_even_slashes_keep_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        for slashes, trusted in (('\\', False), ('\\\\', True)):
+            with self.subTest(slashes=slashes):
+                body = decision('Kısa yanıt tercihi.', quote).replace('<!--', slashes + '<!--')
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
+    def test_ordered_list_after_blockquote_is_real_source_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        body = '> quoted lead\n2. ' + decision('Kısa yanıt tercihi.', quote).removeprefix('- ')
+        output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+        self.assertIsNotNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+
+    def test_inline_literal_html_closer_escapes_do_not_change_block_html_rules(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for tag in ('pre', 'script', 'style', 'textarea'):
+            for prefix, trusted in (('prefix ', False), ('', True)):
+                with self.subTest(tag=tag, prefix=prefix):
+                    body = prefix + '<' + tag + '>example \\</' + tag + '>\n' + cited
+                    output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                    self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                    self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
     def test_source_marker_inside_reference_definition_title_is_not_provenance(self):
         quote = 'Bundan sonra kısa yanıt ver.'
         marker = decision('Kısa yanıt tercihi.', quote).split(' <!--', 1)[1]

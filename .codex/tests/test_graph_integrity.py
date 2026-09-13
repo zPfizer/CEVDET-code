@@ -101,6 +101,14 @@ class GraphIntegrityTests(unittest.TestCase):
         self.assertNotIn("foo", paragraph)
         self.assertNotIn("bar", paragraph)
 
+    def test_inline_code_cannot_cross_into_a_new_blockquote(self) -> None:
+        for example in ('`open\n> [[../secret]]`', '> `open\n> > [[../secret]]`'):
+            with self.subTest(example=example):
+                self.assertIn('[[../secret]]', markdown_body(example))
+        for example in ('> `open\n> [[inside]]`', '- `open\n  [[inside]]`'):
+            with self.subTest(example=example):
+                self.assertNotIn('[[inside]]', markdown_body(example))
+
     def test_graph_summary_keeps_observable_property_wikilinks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

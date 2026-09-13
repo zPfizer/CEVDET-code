@@ -304,12 +304,18 @@ def _crosses_inline_block(text: str, start: int, end: int) -> bool:
     if opening_line == closing_line:
         return False
     line_start = opening_line
+    opening_quote_depth = 0
     while line_start <= closing_line:
         line_end = text.find('\n', line_start)
         if line_end < 0:
             line_end = len(text)
         line = text[line_start:line_end].rstrip('\r')
-        logical_line, _containers = _container_prefix(line)
+        logical_line, containers = _container_prefix(line)
+        quote_depth = sum(value for kind, value in containers if kind == 'quote')
+        if line_start == opening_line:
+            opening_quote_depth = quote_depth
+        elif quote_depth > opening_quote_depth:
+            return True
         if not logical_line.strip() or ATX_HEADING_LINE.match(logical_line):
             return True
         if line_end >= len(text):
@@ -370,6 +376,9 @@ def _blank_inline_html_elements(
         _blank(parser_text, start, end)
     parser_input = "".join(parser_text)
     _blank_invalid_html_openers(parser_text, parser_input, tags)
+    for match in HTML_TAG.finditer(parser_input):
+        if is_escaped(text, match.start()):
+            parser_text[match.start()] = ' '
     parser_input = ''.join(parser_text)
 
     class ElementParser(HTMLParser):
@@ -398,7 +407,7 @@ def _blank_inline_html_elements(
             folded = tag.casefold()
             if folded not in tags:
                 return
-            if folded == 'code' and is_escaped(text, self._offset()):
+            if is_escaped(text, self._offset()):
                 return
             for index in range(len(self.open_tags) - 1, -1, -1):
                 if self.open_tags[index][0] != folded:

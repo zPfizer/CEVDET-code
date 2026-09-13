@@ -16,6 +16,7 @@ from markdown_boundary import (
     LIST_ITEM,
     _container_body,
     _container_prefix,
+    is_escaped,
     markdown_body,
     markdown_link_spans,
 )
@@ -213,6 +214,7 @@ def _visible_source_body(text: str) -> str:
         line_start = text.rfind('\n', 0, match.start()) + 1
         if (
             line_start in blockquote_starts
+            or is_escaped(text, match.start())
             or any(start < match.start() < end for start, end in link_spans)
             or any(
                 tag.start() < match.start() < tag.end()
