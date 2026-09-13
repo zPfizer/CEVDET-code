@@ -388,8 +388,7 @@ def _capture_one_core(
             updated = dict(mapping)
             updated['source_changed'] = True
             with _publication_scope(state_dir, session_id):
-                with suppression_guard(vault_root / '.codex/private-memory', hashes):
-                    _write_mapping(mapping_path, updated)
+                _write_mapping(mapping_path, updated)
             mapping = updated
 
         def verify_source_snapshot() -> None:
