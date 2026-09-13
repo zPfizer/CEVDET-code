@@ -224,14 +224,19 @@ HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY = (
     rf"(?=\s*(?:[,.!?;:\r\n]|$|(?:ve|ile)\s+{CURRENT_QUERY_CUE}\b))"
 )
 HISTORY_TURKISH_INTERNAL_DOT = re.compile(r"(?<=\w)\.(?=\w)|(?<=\b\w\.\w)\.(?=\s)")
+HISTORY_TURKISH_RELATIVE_PAST = re.compile(r"\w+[dt][iu](?:g(?:im(?:iz)?|in(?:iz)?|i)|k(?:lari|leri))")
+HISTORY_TURKISH_RELATIVE_QUESTION = r"hangi(?:si|leri)(?:dir)?"
+HISTORY_TURKISH_RETROSPECTIVE_ENDING = (
+    rf"(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi|{HISTORY_TURKISH_RELATIVE_QUESTION})"
+)
 HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
     rf"(?ix)\b(?:daha\s+once|onceden)\b"
     # Dots inside identifiers/versions and dotted initials are not clause ends.
     rf"(?:[^.!?;:\r\n]|{HISTORY_TURKISH_INTERNAL_DOT.pattern})*?\s+"
-    rf"(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b{HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY}"
+    rf"{HISTORY_TURKISH_RETROSPECTIVE_ENDING}\b{HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY}"
 )
 HISTORY_TURKISH_RETROSPECTIVE_END = re.compile(
-    rf"(?ix)\b(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b{HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY}"
+    rf"(?ix)\b{HISTORY_TURKISH_RETROSPECTIVE_ENDING}\b{HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY}"
 )
 HISTORY_TURKISH_PURPOSE = re.compile(r"\b(?:daha\s+once|onceden)\s+\w+m[ae]k\s+icin\b")
 HISTORY_TURKISH_DECISION_AORIST = re.compile(
@@ -1583,6 +1588,7 @@ def _retrospective_question_terms(normalized: str) -> frozenset[str]:
     return frozenset(
         term for term in re.findall(r"\w+", normalized)
         if term in {"neydi", "nasil", "niye", "nicin"}
+        or re.fullmatch(HISTORY_TURKISH_RELATIVE_QUESTION, term)
         or re.fullmatch(HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY, term)
         or any(term == root or _matches_history_inflection(term, root) for root in ("hangi", "ne", "kim"))
     )
@@ -1630,6 +1636,9 @@ def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
     word_starts = [word.start() for word in words]
     lexical_words = list(re.finditer(r"\w+", normalized))
     lexical_starts = [word.start() for word in lexical_words]
+    relative_positions = [
+        word.start() for word in lexical_words if HISTORY_TURKISH_RELATIVE_PAST.fullmatch(word.group())
+    ]
     question_positions = [
         word.start() for word in lexical_words if _retrospective_question_terms(word.group())
     ]
@@ -1664,6 +1673,11 @@ def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
             continue
         after = following[ending.end()]
         is_question = normalized[after:after + 1] == "?" or auxiliary.search(ending.group()) is not None
+        if re.fullmatch(HISTORY_TURKISH_RELATIVE_QUESTION, ending.group()):
+            relative = bisect_left(relative_positions, ending.start()) - 1
+            if relative < 0 or relative_positions[relative] < start:
+                continue
+            is_question = True
         if not is_question:
             # Decision predicates need at most the previous lexical word.
             local = max(start, lexical_starts[max(0, bisect_left(lexical_starts, ending.start()) - 1)])
@@ -1701,7 +1715,15 @@ def _retrospective_topic_cue_terms(query: str) -> frozenset[str]:
         for reference in re.finditer(r"\b(?:bu\s+konuda|bununla\s+ilgili)\b", retrospective):
             cue_terms.update(_tokens(reference.group()))
         past = re.search(rf"\b{HISTORY_TURKISH_RETROSPECTIVE_PAST}\b$", retrospective)
-        if past:
+        # An arbitrary action is the subject of the question, not boilerplate.
+        # Remove only established decision predicates and the generic good/best comparison.
+        scaffold = re.search(
+            rf"\b(?:karar\w*\s+ver|tercih\s+(?:et|ed)|uygun\s+gor|sec|benimse|kararlastir)"
+            rf"\w*{HISTORY_TURKISH_PAST_SUFFIX}(?:\s+{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY})?$",
+            retrospective,
+        )
+        generic_comparison = past and re.fullmatch(rf"iyi(?:y{HISTORY_TURKISH_PAST_SUFFIX})", past.group())
+        if past and (scaffold or generic_comparison):
             cue_terms.update(_tokens(past.group()))
         question_terms = _retrospective_question_terms(retrospective)
         cue_terms.update(question_terms)

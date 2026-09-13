@@ -1305,6 +1305,11 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                 "Daha önce veri saklama konusunda ne karar vermiştim?",
                 "Önceden veri saklama kararımız neydi?",
                 "Önceden veri saklama kararımız neydi",
+                "Önceden kullandığımız veri saklama çözümü hangisi?",
+                "Daha önce seçtiğimiz veri saklama planı hangisi?",
+                "Önceden kullandığım veri saklama çözümü hangisidir?",
+                "Daha önce seçtikleri veri saklama planları hangileri?",
+                "Önceden kullandığımız veri saklama çözümü hangisi",
                 "Önceden veri saklama konusunda müşteri kişisel verilerini güvenli ve uzun süre saklamak için kararımız neydi",
                 "Daha önce veri saklama kararı vermiş miydik?",
                 "Daha önce veri saklama kararı vermiş miydik",
@@ -1352,6 +1357,28 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                     hits = retrieval.search_vault(entries, query)
                     self.assertEqual({hit.entry.path for hit in hits}, relevant)
                     self.assertTrue(all("yedekleme" in hit.matched_terms for hit in hits))
+
+    def test_retrospective_ranking_preserves_topical_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            actions = (("a-delete", "silmiştik"), ("z-encrypt", "şifrelemiştik"), ("z-improve", "iyileştirdik"))
+            for name, action in actions:
+                _write(root, f"🎯 100-Command-Center/{name}.md",
+                       f"---\ntitle: Günlükler\nstatus: completed\ntype: work-packet\n---\nGünlükleri {action}.\n")
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            for name, action in actions:
+                with self.subTest(action=action):
+                    hits = retrieval.search_vault(entries, f"Daha önce günlükleri {action}?", top_k=1)
+                    self.assertEqual([hit.entry.path for hit in hits], [f"🎯 100-Command-Center/{name}.md"])
+                    self.assertIn(retrieval._normalize(action), hits[0].matched_terms)
+                    self.assertIn(action, hits[0].excerpt)
+        for query in (
+            "Daha önce bitirmek için kullanacağımız çözüm hangisi?",
+            '"Önceden kullandığımız çözüm hangisi?" örneğini açıkla',
+            "Daha önce kullandığımız çözüm vardı. Güncel çözüm hangisi?",
+        ):
+            with self.subTest(query=query):
+                self.assertFalse(retrieval._is_history_query(retrieval._retrieval_terms(query), query))
 
     def test_rejected_retrospective_predicates_do_not_rescan_the_clause(self) -> None:
         for body in (
