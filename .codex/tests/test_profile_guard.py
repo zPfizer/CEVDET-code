@@ -294,6 +294,19 @@ class ProfileGuardTests(unittest.TestCase):
 
         self.assertEqual(issues, ['profile-link-traversal'])
 
+    def test_tab_indented_html_blocks_do_not_hide_following_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                '\t<pre>\nmodel example\n[[../secret]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-traversal'])
+
     def test_check_links_keeps_nested_list_links_visible(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

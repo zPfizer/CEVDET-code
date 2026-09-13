@@ -14,6 +14,7 @@ from markdown_boundary import (
     FENCE_LINE,
     HTML_LITERAL_OPEN,
     HTML_TAG,
+    is_escaped,
     markdown_body,
 )
 from quote_grammar import QUOTED_CONTENT
@@ -145,6 +146,51 @@ def _authored_quote(message: str, quote: str) -> bool:
     return False
 
 
+def _markdown_link_spans(text: str) -> tuple[tuple[int, int], ...]:
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(text):
+        if text[index] != '[' or is_escaped(text, index):
+            index += 1
+            continue
+        label_depth = 1
+        label_end = None
+        cursor = index + 1
+        while cursor < len(text):
+            if text[cursor] == '\\':
+                cursor += 2
+                continue
+            if text[cursor] == '[':
+                label_depth += 1
+            elif text[cursor] == ']':
+                label_depth -= 1
+                if label_depth == 0:
+                    label_end = cursor
+                    break
+            cursor += 1
+        if label_end is None or label_end + 1 >= len(text) or text[label_end + 1] != '(':
+            index = max(cursor, index + 1)
+            continue
+        depth = 1
+        cursor = label_end + 2
+        while cursor < len(text):
+            if text[cursor] == '\\':
+                cursor += 2
+                continue
+            if text[cursor] == '(':
+                depth += 1
+            elif text[cursor] == ')':
+                depth -= 1
+                if depth == 0:
+                    spans.append((index, cursor + 1))
+                    index = cursor + 1
+                    break
+            cursor += 1
+        else:
+            index = label_end + 2
+    return tuple(spans)
+
+
 def _visible_source_body(text: str) -> str:
     """Keep visible source markers while hiding examples and code spans."""
     masked = markdown_body(text, mask_frontmatter=False)
@@ -180,6 +226,7 @@ def _visible_source_body(text: str) -> str:
         else:
             quote_paragraph = False
         offset += len(raw_line)
+    link_spans = _markdown_link_spans(text)
     for match in SOURCE.finditer(text):
         line_start = text.rfind('\n', 0, match.start()) + 1
         line_prefix = text[line_start:match.start()]
@@ -192,9 +239,14 @@ def _visible_source_body(text: str) -> str:
             if list_prefix is None:
                 break
             line_prefix = line_prefix[list_prefix.end():]
-        if line_start in lazy_blockquote_starts or in_blockquote or any(
-            tag.start() < match.start() < tag.end()
-            for tag in HTML_TAG.finditer(text)
+        if (
+            line_start in lazy_blockquote_starts
+            or in_blockquote
+            or any(start < match.start() < end for start, end in link_spans)
+            or any(
+                tag.start() < match.start() < tag.end()
+                for tag in HTML_TAG.finditer(text)
+            )
         ):
             chars[match.start():match.end()] = ' ' * (match.end() - match.start())
             continue

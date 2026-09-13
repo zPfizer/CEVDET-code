@@ -240,7 +240,11 @@ def _continuation_fence_parts(
 
 def _is_html_literal_open(content: str) -> bool:
     remainder, _container = _container_prefix(content)
-    return HTML_LITERAL_OPEN.match(remainder) is not None
+    opening = HTML_LITERAL_OPEN.match(remainder)
+    return (
+        opening is not None
+        and _indent_columns(remainder[: opening.start("tag") - 1]) <= 3
+    )
 
 
 def _container_present(
