@@ -420,6 +420,16 @@ class UserEvidenceTests(unittest.TestCase):
                     self.assertEqual(bool(output['Alınan Kararlar']), trusted)
                     self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
 
+    def test_mixed_thematic_markers_cannot_end_a_lazy_quote(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote).removeprefix('- ')
+        for markers, trusted in (('-*_*', False), ('_*_-', False), ('* - _', True), ('***', True), ('- - -', True), ('_ _ _', True)):
+            with self.subTest(markers=markers):
+                body = '> quoted lead\n' + markers + '\n' + cited
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
     def test_mixed_space_tab_code_indentation_cannot_create_evidence(self):
         quote = 'Bundan sonra kısa yanıt ver.'
         cited = decision('Kısa yanıt tercihi.', quote)

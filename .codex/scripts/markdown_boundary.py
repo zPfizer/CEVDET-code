@@ -10,7 +10,7 @@ import re
 FENCE_LINE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^\r\n]*)$")
 BLOCKQUOTE_PREFIX = re.compile(r"^[ \t]{0,3}>[ \t]?")
 HTML_LITERAL_OPEN = re.compile(
-    r"^[ \t]{0,3}<(?P<tag>pre|script|style|textarea)(?:[ \t/>]|$)",
+    r"^[ \t]{0,3}<(?P<tag>pre|script|style|textarea)(?:[ \t>]|$)",
     re.IGNORECASE,
 )
 HTML_LITERAL_CLOSE = re.compile(
@@ -36,6 +36,7 @@ LIST_ITEM = re.compile(
 )
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 ATX_HEADING_LINE = re.compile(r"^[ \t]{0,3}#{1,6}(?:[ \t]+|$)")
+THEMATIC_BREAK = re.compile(r'(?P<marker>[-*_])(?:[ \t]*(?P=marker)){2,}[ \t]*')
 REFERENCE_DEFINITION = re.compile(
     r'(?m)^[ \t]{0,3}\[(?P<label>(?:\\[^\r\n]|[^\]\\\r\n])+)\]:[^\r\n]*'
 )
@@ -645,7 +646,7 @@ def _is_paragraph_line(content: str) -> bool:
         return False
     if LIST_ITEM.match(content) is not None:
         return False
-    if re.fullmatch(r"(?:[-*_][ \t]*){3,}|=+[ \t]*", stripped):
+    if THEMATIC_BREAK.fullmatch(stripped) or re.fullmatch(r'=+[ \t]*', stripped):
         return False
     return True
 

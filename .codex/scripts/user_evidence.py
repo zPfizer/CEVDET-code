@@ -14,6 +14,7 @@ from markdown_boundary import (
     HTML_LITERAL_OPEN,
     HTML_TAG,
     LIST_ITEM,
+    THEMATIC_BREAK,
     _container_body,
     _container_prefix,
     is_escaped,
@@ -162,7 +163,8 @@ def _visible_source_body(text: str) -> str:
             or LIST_PREFIX.match(line) is not None
             or stripped.startswith('>')
             or re.match(r'^#{1,6}(?:[ \t]+|$)', stripped) is not None
-            or re.fullmatch(r'(?:[-*_][ \t]*){3,}|=+[ \t]*', stripped) is not None
+            or THEMATIC_BREAK.fullmatch(stripped) is not None
+            or re.fullmatch(r'=+[ \t]*', stripped) is not None
             or HTML_LITERAL_OPEN.match(stripped) is not None
         )
 

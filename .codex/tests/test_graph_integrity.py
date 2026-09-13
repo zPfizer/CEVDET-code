@@ -109,6 +109,12 @@ class GraphIntegrityTests(unittest.TestCase):
             with self.subTest(example=example):
                 self.assertNotIn('[[inside]]', markdown_body(example))
 
+    def test_compact_self_closing_literal_tag_does_not_start_a_raw_block(self) -> None:
+        for tag in ('pre', 'script', 'style', 'textarea'):
+            with self.subTest(tag=tag):
+                self.assertIn('[[../secret]]', markdown_body('<' + tag + '/>\n\n[[../secret]]'))
+                self.assertNotIn('[[../secret]]', markdown_body('<' + tag + ' />\n\n[[../secret]]'))
+
     def test_graph_summary_keeps_observable_property_wikilinks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
