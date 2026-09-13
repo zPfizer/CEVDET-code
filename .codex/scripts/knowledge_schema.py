@@ -32,7 +32,7 @@ _INDEX_LINK_TITLE = (
 )
 INDEX_ROW = re.compile(
     rf"\| \[\[concepts/([^\\|\]]+)\\\|{_INDEX_LINK_TITLE}\]\] "
-    rf"\| {_INDEX_CELL} \| {_INDEX_CELL} \| {_INDEX_CELL} \|"
+    rf"\| {_INDEX_CELL} \| {_INDEX_CELL} \| {_INDEX_CELL} \|[ \t]*"
 )
 LOG_HEADER = "# Derleme Günlüğü"
 DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
