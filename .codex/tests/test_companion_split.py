@@ -476,6 +476,44 @@ class CompanionSplitTests(unittest.TestCase):
                 )
             self.assertTrue(backups[0].is_file())
 
+    def test_guarded_create_conflict_removes_owned_generated_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "Last-Session.md"
+            state = root / ".state"
+            generated = b"generated\n"
+            user_bytes = b"user created the target\n"
+
+            def create_then_conflict(source, destination, **kwargs):
+                os.link(source, kwargs["backup"])
+                destination.write_bytes(user_bytes)
+                raise state_store.ReplacementConflict("replace-target-created")
+
+            with mock.patch.object(
+                state_store,
+                "replace_with_retry",
+                side_effect=create_then_conflict,
+            ):
+                with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
+                    companion_memory._write_projection(
+                        target,
+                        generated,
+                        expected_digest=None,
+                        state=state,
+                    )
+
+            backup = companion_memory._guarded_backup_path(target, state)
+            self.assertEqual(target.read_bytes(), user_bytes)
+            self.assertFalse(backup.exists())
+
+            companion_memory._write_projection(
+                target,
+                b"retry\n",
+                expected_digest=companion_memory._sha(user_bytes),
+                state=state,
+            )
+            self.assertEqual(target.read_bytes(), b"retry\n")
+
     def test_anonymous_legacy_block_remains_tracked_manual_source(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

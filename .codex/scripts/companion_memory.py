@@ -326,6 +326,10 @@ def _guarded_write(
     try:
         write(backup, before_replace)
     except ReplacementConflict as exc:
+        if str(exc) == 'replace-target-created':
+            # The marker only represents our generated payload when the
+            # no-clobber create loses the target race before replacement.
+            backup.unlink(missing_ok=True)
         raise ValueError(_MANUAL_WRITE_CONFLICT) from exc
     except Exception:
         # After ReplaceFileW the backup may be the only copy of user bytes;
