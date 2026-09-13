@@ -902,6 +902,38 @@ class SuppressionTests(unittest.TestCase):
                 deadline=time.monotonic() - 1,
             )
 
+    def test_filtered_read_only_retrieval_forwards_deadline_to_renderer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            source = vault / '🧠 500-Knowledge/source.md'
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                '# Kaynak\nVisible retrieval evidence.\nHidden detail.\n',
+                encoding='utf-8',
+            )
+            memory_ledger.suppress_derived_memory(
+                vault / '.codex/private-memory', 'Hidden detail.'
+            )
+            deadline = time.monotonic() + 30
+            observed: list[float | None] = []
+            original_render = memory_ledger.MemoryRead.render_views
+
+            def render(self, *args, **kwargs):
+                observed.append(kwargs.get('deadline'))
+                return original_render(self, *args, **kwargs)
+
+            with mock.patch.object(memory_ledger.MemoryRead, 'render_views', render):
+                result = vault_retrieval.retrieve_vault_context_detailed(
+                    vault,
+                    'Visible retrieval evidence',
+                    write_cache=False,
+                    write_views=False,
+                    deadline=deadline,
+                )
+
+        self.assertEqual(result.outcome, 'emitted')
+        self.assertEqual(observed, [deadline])
+
     def test_forget_tombstone_stores_only_target_hash(self) -> None:
         target = "Levent Ankara'da yaşıyor"
         with tempfile.TemporaryDirectory() as temporary:

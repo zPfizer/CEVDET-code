@@ -1458,7 +1458,11 @@ def build_vault_map(
     publication.check_knowledge_snapshot()
     if companion_names:
         memory = MemoryRead(vault_root, frozenset())
-        for name, text in companion_memory.render_views(vault_root, memory=memory).items():
+        for name, text in companion_memory.render_views(
+            vault_root,
+            memory=memory,
+            deadline=deadline,
+        ).items():
             _check_deadline(deadline)
             path = vault_root / COMPANION_ROOT / name
             entry = _entry_from_text(
@@ -2858,6 +2862,7 @@ def retrieve_vault_context_detailed(
             _rendered, views = memory.render_views(
                 view_sources,
                 alias_sources=[(entry.path, entry.title) for entry in indexed],
+                deadline=deadline,
             )
         else:
             views = {}

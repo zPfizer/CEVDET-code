@@ -4458,6 +4458,31 @@ Analysis Lifecycle yalnız branded updateImpactPreviewId tüketir.
         self.assertIn("[Vault Arama Süresi Doldu]", context)
         self.assertTrue(getattr(context, "deadline_expired", False))
 
+    def test_user_prompt_profile_worker_timeout_keeps_structured_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            state.mkdir(parents=True)
+            payload = {
+                "session_id": "profile-worker-timeout",
+                "cwd": str(vault),
+                "prompt": "Atlas kararı",
+            }
+            with mock.patch.object(
+                hook.MemoryRead,
+                "profile_issues",
+                side_effect=hook.WorkerDeliveryTimeout("profile-deadline"),
+            ):
+                context = hook.handle_user_prompt(
+                    payload,
+                    state,
+                    vault_root=vault,
+                    deadline=time.monotonic() + 30,
+                )
+
+        self.assertIn("[Vault Arama Süresi Doldu]", context)
+        self.assertTrue(getattr(context, "deadline_expired", False))
+
     def test_user_prompt_telemetry_deadline_is_visible_and_structured(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

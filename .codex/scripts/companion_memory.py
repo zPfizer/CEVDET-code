@@ -37,6 +37,11 @@ SOURCE_RELATIVE = Path('🔮 850-Companion') / 'Sources'
 _SOURCE_PREFIX = '<!-- cevo-generated-source-split:v1:'
 
 
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError('companion-render-deadline')
+
+
 def source_marker(name: str) -> bytes:
     if name not in VIEW_NAMES:
         raise ValueError('companion-view-invalid')
@@ -174,11 +179,18 @@ def _decode_escaped_evidence(text: str) -> str:
     return re.sub(r'&lt;!--\s*(user-(?:evidence|source):[^\n]*?)-->', r'<!-- \1-->', text)
 
 
-def _parse_sessions(text: str) -> dict[str, tuple[dt.datetime, str, str]]:
+def _parse_sessions(
+    text: str,
+    *,
+    deadline: float | None = None,
+) -> dict[str, tuple[dt.datetime, str, str]]:
     from flush import SessionSummary
     records: dict[str, tuple[dt.datetime, str, str]] = {}
+    _check_deadline(deadline)
     matches = list(SESSION.finditer(text))
+    _check_deadline(deadline)
     for match in matches:
+        _check_deadline(deadline)
         identity, stamp, key, value = match.groups()
         if identity in records:
             raise ValueError('companion-session-duplicate')
@@ -186,7 +198,9 @@ def _parse_sessions(text: str) -> dict[str, tuple[dt.datetime, str, str]]:
         if event.tzinfo is None:
             raise ValueError('companion-session-time-invalid')
         SessionSummary.parse(value)
+        _check_deadline(deadline)
         records[identity] = event, key, value.replace('\r\n', '\n')
+    _check_deadline(deadline)
     if text.count('<!-- cevo-session ') != len(matches):
         raise ValueError('companion-session-invalid')
     return records
@@ -195,28 +209,44 @@ def _parse_sessions(text: str) -> dict[str, tuple[dt.datetime, str, str]]:
 def _block_matches(
     payload: bytes,
     expected: dict[str, tuple[dt.datetime, str, str]] | None = None,
+    *,
+    deadline: float | None = None,
 ) -> list[tuple[re.Match[bytes], dict[str, tuple[dt.datetime, str, str]]]]:
+    _check_deadline(deadline)
     matches = list(_BLOCK_BYTES.finditer(payload))
+    _check_deadline(deadline)
     if payload.count(BEGIN.encode('ascii')) != len(matches):
         raise ValueError('companion-block-invalid')
     valid = []
     for match in matches:
+        _check_deadline(deadline)
         if expected:
             try:
-                if any(match.group(2).decode() == key and float(match.group(1)) == event.timestamp()
-                       for event, key, _value in expected.values()):
+                block_key = match.group(2).decode()
+                block_timestamp = float(match.group(1))
+                expected_match = False
+                for event, key, _value in expected.values():
+                    _check_deadline(deadline)
+                    if block_key == key and block_timestamp == event.timestamp():
+                        expected_match = True
+                        break
+                if expected_match:
                     valid.append((match, {}))
                     continue
             except (UnicodeDecodeError, ValueError):
                 pass
         try:
-            found = _parse_sessions(match.group(0).decode('utf-8'))
+            found = _parse_sessions(
+                match.group(0).decode('utf-8'),
+                deadline=deadline,
+            )
         except (UnicodeDecodeError, ValueError):
             continue
         if found:
             valid.append((match, found))
     if len(valid) > 1:
         raise ValueError('companion-block-duplicate')
+    _check_deadline(deadline)
     return valid
 
 
@@ -278,18 +308,23 @@ def _catalog_payload(records, manual) -> dict[str, Any]:
     }
 
 
-def _load_catalog(root: Path):
+def _load_catalog(root: Path, *, deadline: float | None = None):
+    _check_deadline(deadline)
     path = _canonical_path(root)
     if not path.is_file():
         return {}, {}, False
     try:
         payload = json.loads(path.read_text(encoding='utf-8'))
+        _check_deadline(deadline)
+    except TimeoutError:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError('companion-canonical-unreadable') from exc
     if not isinstance(payload, dict) or payload.get('schema') != CANONICAL_SCHEMA:
         raise ValueError('companion-canonical-invalid')
     records = {}
     for identity, row in payload.get('records', {}).items() if isinstance(payload.get('records'), dict) else ():
+        _check_deadline(deadline)
         if not re.fullmatch(r'[a-f0-9]{64}', identity) or not isinstance(row, dict):
             raise ValueError('companion-canonical-invalid')
         if not all(isinstance(row.get(field), str) for field in ('event', 'key', 'summary')):
@@ -299,6 +334,7 @@ def _load_catalog(root: Path):
             raise ValueError('companion-canonical-invalid')
         from flush import SessionSummary
         SessionSummary.parse(row['summary'])
+        _check_deadline(deadline)
         records[identity] = event, row['key'], row['summary'].replace('\r\n', '\n')
     if not isinstance(payload.get('records'), dict):
         raise ValueError('companion-canonical-invalid')
@@ -306,6 +342,7 @@ def _load_catalog(root: Path):
     if not isinstance(manual, dict):
         raise ValueError('companion-canonical-invalid')
     for name, row in manual.items():
+        _check_deadline(deadline)
         if name not in VIEW_NAMES or not isinstance(row, dict) or not all(
                 isinstance(row.get(field), str) and re.fullmatch(r'[a-f0-9]{64}', row[field])
                 for field in ('source_sha256', 'outside_sha256')):
@@ -328,23 +365,30 @@ def _manual_for_view(
     canonical: bool,
     deadline: float | None = None,
 ):
+    _check_deadline(deadline)
     source_path, view_path = _source_path(root, name), _view_path(root, name)
     if canonical and not source_path.is_file():
         raise ValueError('companion-manual-source-missing')
     if source_path.is_file():
         source = source_path.read_bytes()
+        _check_deadline(deadline)
         prefix, suffix = _manual_parts(name, source)
     else:
         current = view_path.read_bytes() if view_path.is_file() else b''
-        valid = _block_matches(current, expected or None) if current else []
+        _check_deadline(deadline)
+        valid = (
+            _block_matches(current, expected or None, deadline=deadline)
+            if current else []
+        )
         prefix, suffix = (current[:valid[0][0].start()], current[valid[0][0].end():]) if valid else (current, b'')
         source = _join_manual(name, prefix, suffix)
         if write_source:
             source_path.parent.mkdir(parents=True, exist_ok=True)
             _write_manual(source_path, source, deadline=deadline)
     current = view_path.read_bytes() if view_path.is_file() else None
+    _check_deadline(deadline)
     if current is not None:
-        valid = _block_matches(current, expected or None)
+        valid = _block_matches(current, expected or None, deadline=deadline)
         view_prefix, view_suffix = (
             (current[:valid[0][0].start()], current[valid[0][0].end():])
             if valid else (current, b'')
@@ -364,24 +408,29 @@ def _manual_for_view(
                     _write_manual(source_path, source, deadline=deadline)
             elif current_hash != wanted_hash:
                 raise ValueError('companion-manual-view-conflict')
+    _check_deadline(deadline)
     source = _join_manual(name, prefix, suffix)
     return prefix, suffix, _manual_meta(name, source, prefix, suffix)
 
 
-def _bodies(records):
+def _bodies(records, *, deadline: float | None = None):
     from flush import SessionSummary
+    _check_deadline(deadline)
     if not records:
         return {name: '' for name in VIEW_NAMES}
     ordered = sorted(records.items(), key=lambda item: (item[1][0], item[0]), reverse=True)
+    _check_deadline(deadline)
     latest = ordered[0][1][0].isoformat()
     last = [f'## Session: {latest}', 'Oturumların güncel özetleri; kaynaklar ayrı tutulur.']
     threads = ['## Oturumların açık konuları', 'Özetler eylem yetkisi veya canlı proje durumu değildir. Tamamlanan ve iptal edilen işler yeniden başlatılmaz.']
     journal = ''
     for identity, (event, key, value) in ordered:
+        _check_deadline(deadline)
         stamp = event.isoformat()
         link = f'Kaynak: [[daily/{event.date().isoformat()}|Konuşma kaydı]] · {stamp}'
         rendered = value.replace('<!--', '&lt;!--')
         parts = SessionSummary.parse(rendered).sections
+        _check_deadline(deadline)
         last.append(f'{link}\n\n<!-- cevo-session {identity} {stamp} {key} -->\n{rendered}\n<!-- /cevo-session -->')
         threads.append(f'### Oturum — {stamp}\n\n{parts["Yapılacaklar"]}\n\n{link}')
         if not journal:
@@ -390,73 +439,141 @@ def _bodies(records):
             'Threads.md': '\n\n'.join(threads) + '\n', 'Journal.md': journal}
 
 
-def _visible(records, hashes):
+def _visible(records, hashes, *, deadline: float | None = None):
     from flush import SessionSummary
     visible = {}
     for identity, (event, key, value) in records.items():
+        _check_deadline(deadline)
         if contains_suppressed_unit(f'daily/{event.date().isoformat()}.md', hashes):
             continue
         text = filter_suppressed_text(_decode_escaped_evidence(value), hashes)
         try:
             visible[identity] = event, key, SessionSummary.parse(text).render()
+            _check_deadline(deadline)
         except ValueError:
             pass
     return visible
 
 
-def _render(records, manuals, hashes):
-    visible = _visible(records, hashes)
+def _render(records, manuals, hashes, *, deadline: float | None = None):
+    _check_deadline(deadline)
+    visible = _visible(records, hashes, deadline=deadline)
     if not visible:
         return {name: prefix + suffix for name, (prefix, suffix) in manuals.items()}
     newest, newest_key, _ = max(visible.values(), key=lambda value: (value[0], value[1]))
     header = f'{BEGIN}{newest.timestamp()} {newest_key} -->\n'.encode()
-    bodies = _bodies(visible)
-    return {name: prefix + header + bodies[name].encode() + END.encode() + suffix
-            for name, (prefix, suffix) in manuals.items()}
+    _check_deadline(deadline)
+    bodies = _bodies(visible, deadline=deadline)
+    _check_deadline(deadline)
+    rendered = {}
+    for name, (prefix, suffix) in manuals.items():
+        _check_deadline(deadline)
+        rendered[name] = prefix + header + bodies[name].encode() + END.encode() + suffix
+    return rendered
 
 
-def _raw_views(root: Path, hashes: frozenset[str]):
-    records, metadata, canonical = _load_catalog(root)
+def _raw_views(
+    root: Path,
+    hashes: frozenset[str],
+    *,
+    deadline: float | None = None,
+):
+    _check_deadline(deadline)
+    records, metadata, canonical = _load_catalog(root, deadline=deadline)
     if not canonical:
         result = {}
         for name in VIEW_NAMES:
+            _check_deadline(deadline)
             if contains_suppressed_unit(f'🔮 850-Companion/{name}', hashes):
                 continue
             path = _view_path(root, name)
             if path.is_file():
                 result[name] = path.read_bytes().decode('utf-8')
+                _check_deadline(deadline)
             else:
                 source = _source_path(root, name)
                 if source.is_file():
                     prefix, suffix = _manual_parts(name, source.read_bytes())
                     result[name] = (prefix + suffix).decode('utf-8')
+                    _check_deadline(deadline)
         return result
     records = dict(records)
-    _reconcile_current(root, records, hashes, strict=False)
+    _reconcile_current(root, records, hashes, strict=False, deadline=deadline)
     manuals = {}
     for name in VIEW_NAMES:
+        _check_deadline(deadline)
         if not contains_suppressed_unit(f'🔮 850-Companion/{name}', hashes):
-            prefix, suffix, _ = _manual_for_view(root, name, metadata.get(name), records, write_source=False, canonical=True)
+            prefix, suffix, _ = _manual_for_view(
+                root,
+                name,
+                metadata.get(name),
+                records,
+                write_source=False,
+                canonical=True,
+                deadline=deadline,
+            )
             manuals[name] = prefix, suffix
-    return {name: value.decode('utf-8') for name, value in _render(records, manuals, hashes).items()}
+    return {
+        name: value.decode('utf-8')
+        for name, value in _render(
+            records,
+            manuals,
+            hashes,
+            deadline=deadline,
+        ).items()
+    }
 
 
-def _project_views(values: dict[str, str], memory: MemoryRead) -> dict[str, str]:
+def _project_views(
+    values: dict[str, str],
+    memory: MemoryRead,
+    *,
+    deadline: float | None = None,
+) -> dict[str, str]:
     result = {}
     for name, value in values.items():
-        text = memory.project_text(f'🔮 850-Companion/{name}', value)
+        _check_deadline(deadline)
+        if deadline is None:
+            text = memory.project_text(f'🔮 850-Companion/{name}', value)
+        else:
+            text = memory.project_text(
+                f'🔮 850-Companion/{name}',
+                value,
+                deadline=deadline,
+            )
         if text is not None:
             result[name] = text
+    _check_deadline(deadline)
     return result
 
 
-def render_views(root: Path, *, hashes: frozenset[str] = frozenset(), memory: MemoryRead | None = None) -> dict[str, str]:
+def render_views(
+    root: Path,
+    *,
+    hashes: frozenset[str] = frozenset(),
+    memory: MemoryRead | None = None,
+    deadline: float | None = None,
+) -> dict[str, str]:
+    _check_deadline(deadline)
     if memory is None:
-        with memory_read(root) as current:
-            return _project_views(_raw_views(root, current._hashes), current)
+        memory_context = (
+            memory_read(root)
+            if deadline is None
+            else memory_read(root, deadline=deadline)
+        )
+        with memory_context as current:
+            return _project_views(
+                _raw_views(root, current._hashes, deadline=deadline),
+                current,
+                deadline=deadline,
+            )
     if hashes and hashes != memory._hashes:
         raise ValueError('memory-preferences-changed')
-    return _project_views(_raw_views(root, memory._hashes), memory)
+    return _project_views(
+        _raw_views(root, memory._hashes, deadline=deadline),
+        memory,
+        deadline=deadline,
+    )
 
 
 def ensure_views(
@@ -470,7 +587,12 @@ def ensure_views(
 ) -> dict[str, str]:
     state = state or root / '.codex/scripts/.state'
     if memory is None:
-        with memory_read(root) as current:
+        memory_context = (
+            memory_read(root)
+            if deadline is None
+            else memory_read(root, deadline=deadline)
+        )
+        with memory_context as current:
             return ensure_views(
                 root,
                 state,
@@ -483,7 +605,11 @@ def ensure_views(
         raise ValueError('memory-preferences-changed')
     hashes = memory._hashes
     if not write:
-        return _project_views(_raw_views(root, hashes), memory)
+        return _project_views(
+            _raw_views(root, hashes, deadline=deadline),
+            memory,
+            deadline=deadline,
+        )
     state.mkdir(parents=True, exist_ok=True)
     if not (root / '🔮 850-Companion').is_dir():
         return {}
@@ -492,10 +618,14 @@ def ensure_views(
         hashes,
         timeout=timeout_for_deadline(deadline),
     ), locked(state / 'companion-publish', timeout=timeout_for_deadline(deadline)):
-        records, metadata, canonical = _load_catalog(root)
+        records, metadata, canonical = _load_catalog(root, deadline=deadline)
         if not canonical:
-            return _project_views(_raw_views(root, hashes), memory)
-        _reconcile_current(root, records, hashes)
+            return _project_views(
+                _raw_views(root, hashes, deadline=deadline),
+                memory,
+                deadline=deadline,
+            )
+        _reconcile_current(root, records, hashes, deadline=deadline)
         previous_metadata = dict(metadata)
         manuals = {}
         for name in VIEW_NAMES:
@@ -519,7 +649,13 @@ def ensure_views(
             deadline=deadline,
         )
         result = {}
-        for name, payload in _render(records, manuals, hashes).items():
+        for name, payload in _render(
+            records,
+            manuals,
+            hashes,
+            deadline=deadline,
+        ).items():
+            _check_deadline(deadline)
             path = _view_path(root, name)
             if not path.is_file() or path.read_bytes() != payload:
                 _write_projection(path, payload, deadline=deadline)
@@ -530,7 +666,7 @@ def ensure_views(
             sort_keys=True,
             deadline=deadline,
         )
-        return _project_views(result, memory)
+        return _project_views(result, memory, deadline=deadline)
 
 
 def _write_projection(
@@ -559,16 +695,27 @@ def _write_manual(
     atomic_write_bytes(path, payload, deadline=deadline)
 
 
-def _discover_current(root: Path, hashes: frozenset[str] = frozenset(), *, strict: bool = True):
+def _discover_current(
+    root: Path,
+    hashes: frozenset[str] = frozenset(),
+    *,
+    strict: bool = True,
+    deadline: float | None = None,
+):
     records = {}
     for name in VIEW_NAMES:
+        _check_deadline(deadline)
         if contains_suppressed_unit(f'🔮 850-Companion/{name}', hashes):
             continue
         path = _view_path(root, name)
         if not path.is_file():
             continue
-        for _match, found in _block_matches(path.read_bytes()):
+        payload = path.read_bytes()
+        _check_deadline(deadline)
+        for _match, found in _block_matches(payload, deadline=deadline):
+            _check_deadline(deadline)
             for identity, (event, key, value) in found.items():
+                _check_deadline(deadline)
                 record = event, key, _decode_escaped_evidence(value)
                 if strict and identity in records and records[identity] != record:
                     raise ValueError('companion-session-conflict')
@@ -578,10 +725,24 @@ def _discover_current(root: Path, hashes: frozenset[str] = frozenset(), *, stric
     return records
 
 
-def _reconcile_current(root: Path, records, hashes: frozenset[str], *, strict: bool = True) -> None:
+def _reconcile_current(
+    root: Path,
+    records,
+    hashes: frozenset[str],
+    *,
+    strict: bool = True,
+    deadline: float | None = None,
+) -> None:
+    _check_deadline(deadline)
     if contains_suppressed_unit('🔮 850-Companion/Last-Session.md', hashes):
         return
-    for identity, candidate in _discover_current(root, hashes, strict=strict).items():
+    for identity, candidate in _discover_current(
+        root,
+        hashes,
+        strict=strict,
+        deadline=deadline,
+    ).items():
+        _check_deadline(deadline)
         event, _key, _value = candidate
         if contains_suppressed_unit(f'daily/{event.date().isoformat()}.md', hashes):
             continue
@@ -589,8 +750,14 @@ def _reconcile_current(root: Path, records, hashes: frozenset[str], *, strict: b
         if previous is None or event > previous[0]:
             records[identity] = candidate
         elif strict and event == previous[0] and candidate != previous:
-            previous_view = _bodies(_visible({identity: previous}, hashes))['Last-Session.md']
-            candidate_view = _bodies(_visible({identity: candidate}, hashes))['Last-Session.md']
+            previous_view = _bodies(
+                _visible({identity: previous}, hashes, deadline=deadline),
+                deadline=deadline,
+            )['Last-Session.md']
+            candidate_view = _bodies(
+                _visible({identity: candidate}, hashes, deadline=deadline),
+                deadline=deadline,
+            )['Last-Session.md']
             if candidate[1] != previous[1] or candidate_view != previous_view:
                 raise ValueError('companion-session-conflict')
 

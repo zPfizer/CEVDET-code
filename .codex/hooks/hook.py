@@ -769,7 +769,7 @@ def handle_user_prompt(
                 context.append('[Hafıza: Profil]\n' + profile)
             if memory.active:
                 context.append(MEMORY_READ_RULE)
-    except TimeoutError:
+    except (TimeoutError, WorkerDeliveryTimeout):
         return _UserPromptContext(
             VAULT_RETRIEVAL_TIMEOUT_WARNING,
             deadline_expired=True,
