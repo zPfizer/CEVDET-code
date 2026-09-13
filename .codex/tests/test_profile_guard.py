@@ -94,6 +94,17 @@ class ProfileGuardTests(unittest.TestCase):
             self.assertEqual(profile_guard.check_profile(root, crlf), ())
             self.assertIn("Kısa ve doğal", profile_guard.portrait(crlf))
 
+    def test_frontmatter_closing_whitespace_preserves_profile_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seed_profile(root)
+            for closing in ('---   ', '---\t'):
+                for newline in ('\n', '\r\n'):
+                    with self.subTest(closing=closing, newline=newline):
+                        text = PROFILE_TEXT.replace('\n---\n', '\n' + closing + '\n', 1).replace('\n', newline)
+                        self.assertEqual(profile_guard.check_profile(root, text), ())
+                        self.assertEqual(profile_guard.portrait(text).replace('\r\n', '\n'), profile_guard.portrait(PROFILE_TEXT))
+
     def test_fenced_headings_do_not_hide_or_end_the_portrait(self) -> None:
         text = PROFILE_TEXT.replace(
             "Kısa ve doğal bir oturum özeti.\n\n",

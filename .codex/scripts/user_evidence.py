@@ -10,6 +10,7 @@ import re
 from typing import TypedDict
 
 from markdown_boundary import (
+    ATX_HEADING_LINE,
     FENCE_LINE,
     HTML_LITERAL_OPEN,
     HTML_TAG,
@@ -18,6 +19,7 @@ from markdown_boundary import (
     _blank,
     _container_body,
     _container_prefix,
+    _indent_columns,
     is_escaped,
     markdown_body,
     markdown_link_spans,
@@ -157,16 +159,20 @@ def _visible_source_body(text: str) -> str:
     chars = list(masked)
     prefix = '<!-- user-source:'
 
-    def is_lazy_paragraph(line: str) -> bool:
+    def is_lazy_paragraph(line: str, *, continuation: bool = False) -> bool:
         stripped = line.lstrip(' \t')
+        if not stripped:
+            return False
+        if _indent_columns(line[:len(line) - len(stripped)]) >= 4:
+            return continuation
         return bool(stripped) and not (
-            FENCE_LINE.fullmatch(stripped) is not None
+            FENCE_LINE.fullmatch(line) is not None
             or LIST_PREFIX.match(line) is not None
             or stripped.startswith('>')
-            or re.match(r'^#{1,6}(?:[ \t]+|$)', stripped) is not None
+            or ATX_HEADING_LINE.match(line) is not None
             or THEMATIC_BREAK.fullmatch(stripped) is not None
             or re.fullmatch(r'=+[ \t]*', stripped) is not None
-            or HTML_LITERAL_OPEN.match(stripped) is not None
+            or HTML_LITERAL_OPEN.match(line) is not None
         )
 
     blockquote_starts: set[int] = set()
@@ -197,15 +203,16 @@ def _visible_source_body(text: str) -> str:
             else:
                 remainder, containers = _container_prefix(line)
                 in_blockquote = any(kind == 'quote' for kind, _value in containers)
-                list_contexts = [
-                    value for kind, value in containers if kind == 'list'
-                ]
+                if line.strip():
+                    list_contexts = [
+                        value for kind, value in containers if kind == 'list'
+                    ]
         if in_blockquote:
             blockquote_starts.add(offset)
-            quote_paragraph = is_lazy_paragraph(remainder)
+            quote_paragraph = is_lazy_paragraph(remainder, continuation=quote_paragraph)
         elif not line.strip():
             quote_paragraph = False
-        elif quote_paragraph and is_lazy_paragraph(line):
+        elif quote_paragraph and is_lazy_paragraph(line, continuation=True):
             blockquote_starts.add(offset)
         else:
             quote_paragraph = False

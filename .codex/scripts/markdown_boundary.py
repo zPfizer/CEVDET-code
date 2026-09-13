@@ -118,9 +118,9 @@ def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
             return None
         return cursor
 
-    def title_start_after_definition(
+    def destination_and_title(
         definition: re.Match[str], offset: int,
-    ) -> tuple[int, str] | None:
+    ) -> tuple[int, tuple[int, str] | None] | None:
         cursor = offset + definition.end('label') + 2
         cursor = skip_hspace(cursor)
         if text.startswith('\r\n', cursor) or text.startswith('\n', cursor):
@@ -134,17 +134,17 @@ def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
         candidate = skip_hspace(destination_end)
         if candidate < len(text) and text[candidate] in "\"'(":
             if candidate == destination_end:
-                return None
-            return candidate, text[candidate]
+                return destination_end, None
+            return destination_end, (candidate, text[candidate])
         if candidate >= len(text) or text[candidate] not in '\r\n':
-            return None
+            return destination_end, None
         after_destination = newline_after(candidate)
         if after_destination is None:
-            return None
+            return destination_end, None
         candidate = skip_hspace(after_destination)
         if candidate < len(text) and text[candidate] in "\"'(":
-            return candidate, text[candidate]
-        return None
+            return destination_end, (candidate, text[candidate])
+        return destination_end, None
 
     def title_end(start: int, opener: str) -> int | None:
         closer = ')' if opener == '(' else opener
@@ -173,16 +173,30 @@ def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
 
     offset = 0
     list_contexts: list[tuple[int, int]] = []
-    for line in text.splitlines(keepends=True):
+    paragraph_active = False
+    paragraph_quote_depth = 0
+    consumed_until = 0
+    for line in _markdown_block_body(text, mask_frontmatter=False).splitlines(keepends=True):
+        line_start = offset
+        offset += len(line)
+        if line_start < consumed_until:
+            continue
         content = line.rstrip('\r\n')
+        if not content.strip():
+            paragraph_active = False
+            paragraph_quote_depth = 0
+            continue
         list_item = LIST_ITEM.match(content)
         if list_item is not None:
+            marker = list_item.group('marker')
+            if list_contexts or marker[0] in '-+*' or int(marker[:-1]) == 1:
+                paragraph_active = False
             indentation = _indent_columns(list_item.group('indent'))
             content_indent, gap_width = _list_content_indent(list_item)
             list_contexts = [item for item in list_contexts if item[0] < indentation]
             if gap_width <= 4:
                 list_contexts.append((indentation, content_indent))
-            logical_line, _containers = _container_prefix(content)
+            logical_line, containers = _container_prefix(content)
         else:
             logical_line = content
             for _indentation, content_indent in reversed(list_contexts):
@@ -194,23 +208,32 @@ def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
             else:
                 if content.strip():
                     list_contexts = []
-            logical_line, _containers = _container_prefix(logical_line)
-        logical_offset = offset + len(content) - len(logical_line)
-        offset += len(line)
-        definition = REFERENCE_DEFINITION.match(logical_line)
+            logical_line, containers = _container_prefix(logical_line)
+        quote_depth = sum(value for kind, value in containers if kind == 'quote')
+        if quote_depth > paragraph_quote_depth:
+            paragraph_active = False
+        logical_offset = line_start + len(content) - len(logical_line)
+        definition = None if paragraph_active else REFERENCE_DEFINITION.match(logical_line)
         if definition is None:
+            indentation = _indent_columns(logical_line[:len(logical_line) - len(logical_line.lstrip(' \t'))])
+            if not (paragraph_active and indentation >= 4):
+                paragraph_active = _is_paragraph_line(logical_line)
+            paragraph_quote_depth = max(paragraph_quote_depth, quote_depth) if paragraph_active else 0
             continue
-        start = logical_offset + definition.start()
-        end = logical_offset + definition.end()
-        title = title_start_after_definition(definition, logical_offset)
-        if title is None:
-            spans.append((start, end))
+        start = logical_offset + definition.start('label') - 1
+        parsed = destination_and_title(definition, logical_offset)
+        end = None
+        if parsed is not None:
+            destination_end, title = parsed
+            end = title_end(*title) if title is not None else None
+            if end is None and not text[destination_end:line_end(destination_end)].strip():
+                end = destination_end
+        if end is None:
+            paragraph_active = True
+            paragraph_quote_depth = quote_depth
             continue
-        span_end = title_end(*title)
-        if span_end is None:
-            spans.append((start, end))
-        else:
-            spans.append((start, span_end))
+        spans.append((start, end))
+        consumed_until = end
     return tuple(spans)
 
 
@@ -314,13 +337,36 @@ def _indent_columns(value: str, start: int = 0) -> int:
     return columns - start
 
 
-def _list_content_indent(list_item: re.Match[str]) -> tuple[int, int]:
+def _list_content_indent(list_item: re.Match[str], start_column: int = 0) -> tuple[int, int]:
     indent = list_item.group("indent")
     marker = list_item.group("marker")
     gap = list_item.group("gap")
-    marker_end = _indent_columns(indent) + len(marker)
+    marker_end = start_column + _indent_columns(indent, start_column) + len(marker)
     gap_width = _indent_columns(gap, marker_end) if gap else 0
-    return marker_end + (gap_width if gap else 1), gap_width
+    return marker_end - start_column + (gap_width if gap else 1), gap_width
+
+
+def _quote_prefix_body(content: str, column: int) -> tuple[str, int] | None:
+    prefix = BLOCKQUOTE_PREFIX.match(content)
+    if prefix is None:
+        return None
+    before, _marker, separator = prefix.group(0).partition('>')
+    indent = _indent_columns(before, column)
+    if indent > 3:
+        return None
+    column += indent + 1
+    padding = 0
+    if separator:
+        if separator == '\t':
+            padding = 4 - column % 4 - 1
+        column += 1
+    return ' ' * padding + content[prefix.end():], column
+
+
+def _logical_remainder(content: str, column: int) -> str:
+    suffix = content.lstrip(' \t')
+    width = _indent_columns(content[:len(content) - len(suffix)], column)
+    return ' ' * width + suffix
 
 
 def _fence_match(content: str) -> re.Match[str] | None:
@@ -470,18 +516,20 @@ def _blank_inline_html_literals(chars: list[str], text: str) -> None:
 def _indented_content(content: str) -> str:
     """Remove real quote/list containers before testing indented code."""
     remainder = content
+    column = 0
     while True:
-        if (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
-            remainder = remainder[prefix.end():]
+        if (quote := _quote_prefix_body(remainder, column)) is not None:
+            remainder, column = quote
             continue
         list_item = LIST_ITEM.match(remainder)
         if list_item is None:
-            return remainder
-        indent = _indent_columns(list_item.group("indent"))
-        _content_indent, gap_width = _list_content_indent(list_item)
+            return _logical_remainder(remainder, column) if column else content
+        indent = _indent_columns(list_item.group("indent"), column)
+        content_indent, gap_width = _list_content_indent(list_item, column)
         if indent >= 4 or gap_width > 4:
-            return remainder
+            return _logical_remainder(remainder, column) if column else content
         remainder = remainder[list_item.end():]
+        column += content_indent
 
 
 def _fence_parts(
@@ -505,25 +553,27 @@ def _container_prefix(
     content: str,
 ) -> tuple[str, tuple[tuple[str, int], ...]]:
     remainder = content
+    column = 0
     containers: list[tuple[str, int]] = []
     while True:
         quote_depth = 0
-        while (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
+        while (quote := _quote_prefix_body(remainder, column)) is not None:
             quote_depth += 1
-            remainder = remainder[prefix.end():]
+            remainder, column = quote
         if quote_depth:
             containers.append(("quote", quote_depth))
             continue
         list_item = LIST_ITEM.match(remainder)
         if list_item is None:
             break
-        _content_indent, gap_width = _list_content_indent(list_item)
+        _content_indent, gap_width = _list_content_indent(list_item, column)
         if gap_width > 4:
             return content, ()
         content_indent = _content_indent
         containers.append(("list", content_indent))
         remainder = remainder[list_item.end():]
-    return remainder, tuple(containers)
+        column += content_indent
+    return _logical_remainder(remainder, column), tuple(containers)
 
 
 def _container_body(
@@ -531,12 +581,13 @@ def _container_body(
     container: tuple[tuple[str, int], ...],
 ) -> str | None:
     remainder = content
+    column = 0
     for kind, value in container:
         if kind == "quote":
             quote_depth = 0
-            while (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
+            while (quote := _quote_prefix_body(remainder, column)) is not None:
                 quote_depth += 1
-                remainder = remainder[prefix.end():]
+                remainder, column = quote
             if quote_depth != value:
                 return None
             continue
@@ -546,12 +597,13 @@ def _container_body(
             char = remainder[index]
             if char not in " \t":
                 return None
-            columns += 4 - (columns % 4) if char == "\t" else 1
+            columns += 4 - ((column + columns) % 4) if char == "\t" else 1
             index += 1
         if columns < value:
             return None
-        remainder = remainder[index:]
-    return remainder
+        remainder = ' ' * (columns - value) + remainder[index:]
+        column += value
+    return _logical_remainder(remainder, column)
 
 
 def _continuation_fence_parts(
@@ -563,10 +615,36 @@ def _continuation_fence_parts(
         remainder = _container_body(content, container)
         if remainder is None:
             continue
-        match = _fence_match(remainder)
-        if match is not None:
-            return container, match.group(1), match.group(2)
+        fence = _fence_parts(remainder)
+        if fence is not None:
+            return container + fence[0], fence[1], fence[2]
     return None
+
+
+def _block_list_contexts(
+    content: str,
+    container: tuple[tuple[str, int], ...],
+    previous: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """Keep only list owners of the newly opened block, before any quote."""
+    if not container or container[0][0] != 'list':
+        return []
+    item = LIST_ITEM.match(content)
+    indentation = _indent_columns(item.group('indent')) if item else 0
+    contexts = (
+        [context for context in previous if context[0] < indentation]
+        if item else
+        [context for context in previous if context[1] <= container[0][1]]
+    )
+    column = 0
+    for kind, width in container:
+        if kind != 'list':
+            break
+        end = column + width
+        if not any(context[1] == end for context in contexts):
+            contexts.append((indentation if column == 0 else column, end))
+        column = end
+    return contexts
 
 
 def _html_literal_parts(
@@ -580,6 +658,8 @@ def _html_literal_parts(
         remainder = _container_body(content, container)
         if remainder is None:
             return None
+        remainder, nested = _container_prefix(remainder)
+        container += nested
     opening = HTML_LITERAL_OPEN.match(remainder)
     if opening is None or _indent_columns(remainder[: opening.start('tag') - 1]) > 3:
         return None
@@ -606,12 +686,13 @@ def _container_present(
     container: tuple[tuple[str, int], ...],
 ) -> bool:
     remainder = content
+    column = 0
     for kind, value in container:
         if kind == "quote":
             quote_depth = 0
-            while quote_depth < value and (prefix := BLOCKQUOTE_PREFIX.match(remainder)) is not None:
+            while quote_depth < value and (quote := _quote_prefix_body(remainder, column)) is not None:
                 quote_depth += 1
-                remainder = remainder[prefix.end():]
+                remainder, column = quote
             if quote_depth < value:
                 return False
             continue
@@ -623,11 +704,12 @@ def _container_present(
             char = remainder[index]
             if char not in " \t":
                 return False
-            columns += 4 - (columns % 4) if char == "\t" else 1
+            columns += 4 - ((column + columns) % 4) if char == "\t" else 1
             index += 1
         if columns < value:
             return False
-        remainder = remainder[index:]
+        remainder = ' ' * (columns - value) + remainder[index:]
+        column += value
     return True
 
 
@@ -649,13 +731,12 @@ def _is_paragraph_line(content: str) -> bool:
     return True
 
 
-def markdown_body(
+def _markdown_block_body(
     text: str,
     *,
     mask_frontmatter: bool = True,
-    mask_inline_code: bool = True,
 ) -> str:
-    """Mask frontmatter and Markdown code while preserving source offsets."""
+    """Mask block examples without invoking inline or reference parsing."""
     chars = list(text)
     lines: list[tuple[int, int, int, str]] = []
     offset = 0
@@ -672,7 +753,7 @@ def markdown_body(
             (
                 index
                 for index, frontmatter_line in enumerate(lines[1:], start=1)
-                if frontmatter_line[3] == "---"
+                if frontmatter_line[3].rstrip(' \t') == "---"
             ),
             None,
         )
@@ -708,7 +789,7 @@ def markdown_body(
                 paragraph_active = False
                 continue
         fence = _fence_parts(content, container=fence_container)
-        if fence_container is None and fence is not None and not fence[0]:
+        if fence_container is None:
             continuation = _continuation_fence_parts(content, list_contexts)
             if continuation is not None:
                 fence = continuation
@@ -743,6 +824,7 @@ def markdown_body(
             fence_char = fence[1][0]
             fence_length = len(fence[1])
             fence_container = fence[0]
+            list_contexts = _block_list_contexts(content, fence_container, list_contexts)
             _blank(chars, start, end)
             paragraph_active = False
             continue
@@ -758,6 +840,7 @@ def markdown_body(
         if html_open is not None:
             _blank(chars, start, end)
             container, opening = html_open
+            list_contexts = _block_list_contexts(content, container, list_contexts)
             closing = _html_literal_close(content, opening.group('tag').casefold())
             if closing is None:
                 html_literal = opening.group("tag").casefold()
@@ -794,6 +877,8 @@ def markdown_body(
                 list_context is not None
                 and indentation < list_context[1] + 4
             ):
+                logical = _container_body(content, (('list', list_context[1]),))
+                paragraph_active = logical is not None and _is_paragraph_line(logical)
                 continue
             _blank(chars, start, end)
             list_contexts = []
@@ -828,6 +913,17 @@ def markdown_body(
                 if indentation >= context[1]
             ]
         paragraph_active = _is_paragraph_line(content)
+    return ''.join(chars)
+
+
+def markdown_body(
+    text: str,
+    *,
+    mask_frontmatter: bool = True,
+    mask_inline_code: bool = True,
+) -> str:
+    """Mask frontmatter and Markdown code while preserving source offsets."""
+    chars = list(_markdown_block_body(text, mask_frontmatter=mask_frontmatter))
     if mask_inline_code:
         _blank_inline_code(chars, "".join(chars))
         _blank_inline_html_code(chars, "".join(chars))

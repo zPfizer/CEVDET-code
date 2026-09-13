@@ -249,6 +249,19 @@ Bağ.
         self.assertFalse(knowledge_schema._concept_related_ok(Path('ornek.md'), hidden_related))
         self.assertTrue(knowledge_schema._concept_related_ok(Path('ornek.md'), _concept()))
 
+    def test_reference_like_text_cannot_interrupt_a_paragraph(self):
+        source = '[[daily/2026-09-01|Kaynak]]'
+        for prefix in (
+            'paragraph\n', '10. item\n    paragraph\n    ',
+            '[bad]: <broken\n', '[bad]: url trailing\n',
+            '[bad]: url "unfinished\n', '[bad]: url "title" trailing\n',
+        ):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(knowledge_schema._source_links(prefix + '[hidden]: ' + source), {'2026-09-01.md'})
+        for prefix in ('paragraph\n\n', '10. item\n\n    ', '```\nx\n```\n', '<pre>\nx\n</pre>\n'):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(knowledge_schema._source_links(prefix + '[hidden]: ' + source), set())
+
     def test_connection_footer_is_repaired_but_extra_sources_are_not_silently_removed(self):
         from test_second_brain_acceptance import _write_derived_tree
         with tempfile.TemporaryDirectory() as temporary:

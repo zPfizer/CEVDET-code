@@ -205,6 +205,13 @@ class VaultTagQualityTests(unittest.TestCase):
                     [item.tag for item in tag_taxonomy._inline_tag_violations(note)],
                     expected,
                 )
+        for middle, expected in (('    paragraph\n', ['bad']), ('', [])):
+            with self.subTest(middle=middle):
+                note = tag_taxonomy.NoteIndex(
+                    Path('list.md'), PurePosixPath('list.md'),
+                    '10. item\n\n' + middle + '        Visible #bad\n',
+                )
+                self.assertEqual([item.tag for item in tag_taxonomy._inline_tag_violations(note)], expected)
 
     def test_migration_patch_only_changes_tags_and_dry_run_keeps_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

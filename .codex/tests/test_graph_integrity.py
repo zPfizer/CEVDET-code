@@ -24,6 +24,34 @@ from vault_corpus import vault_notes  # noqa: E402
 
 
 class GraphIntegrityTests(unittest.TestCase):
+    def test_list_block_owners_and_tab_columns_preserve_visible_links(self) -> None:
+        for text in (
+            '- - ```\n    x\n    ```\n    Visible [[real]]',
+            '> - ```\n> \t  ```\n>   Visible [[real]]',
+            '- item\n\n  > ```\n  > x\n  > ```\n  Visible [[real]]',
+            '10. ```\n    x\n    ```\n    Visible [[real]]',
+            '- - <pre>\n    x\n    </pre>\n    Visible [[real]]',
+        ):
+            with self.subTest(text=text):
+                visible = markdown_body(text)
+                self.assertEqual(len(visible), len(text))
+                self.assertEqual(visible.index('[[real]]'), text.index('[[real]]'))
+        for block in ('```\nx\n```', '<pre>\nx\n</pre>'):
+            text = '- item\n\n' + block + '\n    Hidden [[real]]'
+            self.assertNotIn('[[real]]', markdown_body(text))
+
+    def test_reference_offsets_preserve_original_tabbed_source_positions(self) -> None:
+        for newline in ('\n', '\r\n'):
+            text = newline.join(('before [[visible]]', '', '- item', '', '\t[a\\]b]: url "title"', ''))
+            spans = markdown_link_spans(text)
+            self.assertEqual(spans, ((text.index('[a'), text.index('"title"') + len('"title"')),))
+            self.assertEqual(text[spans[0][0]:spans[0][1]], '[a\\]b]: url "title"')
+        text = '[first]:\n  destination\n[second]: url "title\ncontinued"\n'
+        self.assertEqual(
+            [text[start:end] for start, end in markdown_link_spans(text)],
+            ['[first]:\n  destination', '[second]: url "title\ncontinued"'],
+        )
+
     def test_inline_link_metadata_uses_destination_and_title_boundaries(self) -> None:
         for text in (
             '[x](url "title ) value")',

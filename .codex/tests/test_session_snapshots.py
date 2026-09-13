@@ -44,6 +44,7 @@ class SessionSnapshotTests(unittest.TestCase):
             for body, trusted in (
                 ('> quoted lead\n' + claim, False),
                 ('1.    item\n      > quoted lead\n      ' + claim, False),
+                ('10. item\n\n    > quoted lead\n    ' + claim, False),
                 ('```\n' + claim + '\n```', False),
                 ("[hidden]: /url 'title\n" + claim + "\n'", False),
                 ('<span title="\n' + claim + '\n">label</span>', False),
