@@ -21,6 +21,7 @@ from codex_runner import find_codex
 from graph_integrity import graph_notes, graph_summary
 from knowledge_schema import WIKILINK, validate_knowledge_tree, wikilink_target
 from process_control import pid_is_alive
+from state_store import _health_generation
 from worker_supervisor import (
     STALE_HOOK_INPUT_SECONDS,
     SUPERVISOR_SCHEMA_VERSION,
@@ -633,6 +634,10 @@ def _brain_health_check(ctx: Context) -> Check:
         return Check("Beyin sağlığı", "FAIL", "health object değil")
     components = health.get("components")
     if health.get("schema_version") == 2:
+        try:
+            _health_generation(health)
+        except ValueError:
+            return Check("Beyin sağlığı", "FAIL", "generation geçersiz")
         if not isinstance(components, dict):
             return Check("Beyin sağlığı", "FAIL", "components object değil")
         if any(
