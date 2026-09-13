@@ -182,6 +182,11 @@ VAULT_RETRIEVAL_TIMEOUT_WARNING = (
     "Vault araması ayrılan süre içinde tamamlanamadı; bilgi yok sonucuna varma. "
     "Ham bilgi dosyalarına veya eski önbelleğe geçme; eksik doğrulamayı açıkça bildir."
 )
+USER_PROMPT_CAPTURE_TIMEOUT_WARNING = (
+    "[Hafıza Devamlılığı]\n"
+    "Bu turda Vault bağlamı üretildi ancak arka plan kaydı için ayrılan süre telemetri sırasında doldu; "
+    "kayıt kuyruğa alınmadı. Kaydedildi varsayma; eksikliği açıkça bildir."
+)
 
 
 class _UserPromptContext(str):
@@ -740,6 +745,13 @@ def handle_user_prompt(
     )
     context: list[str] = []
     deadline_expired = False
+
+    def mark_deadline_expired() -> None:
+        nonlocal deadline_expired
+        deadline_expired = True
+        if USER_PROMPT_CAPTURE_TIMEOUT_WARNING not in context:
+            context.insert(0, USER_PROMPT_CAPTURE_TIMEOUT_WARNING)
+
     try:
         memory_context = (
             memory_read(vault_root)
@@ -902,13 +914,20 @@ def handle_user_prompt(
                 ),
             }
             try:
+                _check_hook_deadline(deadline)
                 atomic_write(
                     state_dir / "runtime-vault-retrieval.json",
                     json.dumps(record, ensure_ascii=False) + "\n",
                     deadline=deadline,
                 )
+                _check_hook_deadline(deadline)
                 (state_dir / "retrieval-health.json").unlink(missing_ok=True)
+                _check_hook_deadline(deadline)
+            except (TimeoutError, WorkerDeliveryTimeout):
+                mark_deadline_expired()
             except OSError:
+                if deadline is not None and time.monotonic() >= deadline:
+                    mark_deadline_expired()
                 pass  # Telemetry failure must not discard successfully retrieved sources.
             if retrieval.text:
                 context.append(retrieval.text)
@@ -992,6 +1011,10 @@ def handle_user_prompt(
                 )
             except OSError:
                 pass  # Preserve the search warning even when health storage is unavailable.
+    try:
+        _check_hook_deadline(deadline)
+    except WorkerDeliveryTimeout:
+        mark_deadline_expired()
     output = ""
     for section in context:
         candidate = section if not output else output + "\n\n" + section

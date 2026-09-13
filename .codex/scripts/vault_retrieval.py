@@ -1085,11 +1085,23 @@ def _entry_from_payload(payload: object) -> VaultEntry:
     )
 
 
-def _load_cache(path: Path) -> dict[str, object]:
+def _load_cache(
+    path: Path,
+    *,
+    deadline: float | None = None,
+) -> dict[str, object]:
+    _check_deadline(deadline)
     try:
-        if path.stat().st_size > MAX_CACHE_BYTES:
+        size = path.stat().st_size
+        _check_deadline(deadline)
+        if size > MAX_CACHE_BYTES:
             return {}
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        _check_deadline(deadline)
+        payload = json.loads(text)
+        _check_deadline(deadline)
+    except TimeoutError:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
     if not isinstance(payload, dict) or payload.get("version") != CACHE_VERSION:
@@ -1259,7 +1271,10 @@ def build_vault_map(
             except (LockUnavailable, OSError):
                 cache_write_allowed = False
                 cache_result['status'] = 'locked'
-        cache = _load_cache(cache_path)
+        if deadline is None:
+            cache = _load_cache(cache_path)
+        else:
+            cache = _load_cache(cache_path, deadline=deadline)
         cached_files = cache.get('files')
         if not isinstance(cached_files, dict):
             cached_files = {}

@@ -4458,6 +4458,51 @@ Analysis Lifecycle yalnız branded updateImpactPreviewId tüketir.
         self.assertIn("[Vault Arama Süresi Doldu]", context)
         self.assertTrue(getattr(context, "deadline_expired", False))
 
+    def test_user_prompt_telemetry_deadline_is_visible_and_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            state.mkdir(parents=True)
+            payload = {
+                "session_id": "slow-telemetry",
+                "cwd": str(vault),
+                "prompt": "Atlas kararı",
+            }
+            retrieval = vault_retrieval.VaultContextResult(
+                "emitted",
+                "[Vault Retrieval]\nsuccess",
+                1,
+                1,
+                ("x.md",),
+                100,
+            )
+            deadline = time.monotonic() + 0.08
+            started = time.monotonic()
+
+            def slow_telemetry(*_args: object, **_kwargs: object) -> None:
+                while time.monotonic() < deadline + 0.05:
+                    time.sleep(0.005)
+
+            with (
+                mock.patch.object(
+                    hook,
+                    "retrieve_vault_context_detailed",
+                    return_value=retrieval,
+                ),
+                mock.patch.object(hook, "atomic_write", side_effect=slow_telemetry),
+            ):
+                context = hook.handle_user_prompt(
+                    payload,
+                    state,
+                    vault_root=vault,
+                    deadline=deadline,
+                )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.4)
+        self.assertIn("[Hafıza Devamlılığı]", context)
+        self.assertTrue(getattr(context, "deadline_expired", False))
+
     def test_user_prompt_retrieval_deadline_bounds_cooperative_slow_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
