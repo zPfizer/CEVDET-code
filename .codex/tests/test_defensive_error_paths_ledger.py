@@ -102,6 +102,312 @@ class SanitizerEdges(unittest.TestCase):
 
 
 class SuppressionEdges(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "requires Windows directory handle guard")
+    def test_pinned_controls_directory_blocks_junction_swap_during_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            private = root / "vault" / ".codex" / "private-memory"
+            controls = private / "controls"
+            outside = root / "outside-controls"
+            controls.mkdir(parents=True)
+            outside.mkdir()
+            real_write = memory_ledger.atomic_write_text
+            rmdir_result = None
+
+            def write(path: Path, text: str, **kwargs: object) -> None:
+                nonlocal rmdir_result
+                rmdir_result = subprocess.run(
+                    ["cmd", "/c", "rmdir", str(controls)],
+                    check=False,
+                    capture_output=True,
+                )
+                if rmdir_result.returncode == 0:
+                    _junction(controls, outside)
+                real_write(path, text, **kwargs)
+
+            with mock.patch.object(memory_ledger, "atomic_write_text", side_effect=write):
+                memory_ledger.suppress_derived_memory(private, "hedef", now=1.0)
+
+            self.assertIsNotNone(rmdir_result)
+            self.assertNotEqual(rmdir_result.returncode, 0)
+            self.assertTrue(controls.is_dir())
+            self.assertFalse(controls.is_junction())
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertIn(
+                memory_ledger.memory_text_hash("hedef"),
+                memory_ledger.load_suppressed_hashes(private),
+            )
+
+    def test_suppression_controls_junction_is_rejected_before_read_write_or_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            vault = root / "vault"
+            private = vault / ".codex" / "private-memory"
+            outside = root / "outside-controls"
+            private.mkdir(parents=True)
+            outside.mkdir()
+            repeated = "unutulacak"
+            (outside / "suppressions.jsonl").write_text(
+                json.dumps({
+                    "schema": 1,
+                    "ts": 1,
+                    "target_sha256": memory_ledger.memory_text_hash(repeated),
+                }) + "\n",
+                encoding="utf-8",
+            )
+            controls = private / "controls"
+            try:
+                _junction(controls, outside)
+            except (OSError, subprocess.CalledProcessError) as exc:
+                self.skipTest(f"junction unavailable: {exc}")
+            before = {
+                path.relative_to(outside): path.read_bytes()
+                for path in outside.rglob("*")
+                if path.is_file()
+            }
+            try:
+                with self.assertRaisesRegex(
+                    memory_ledger.MemoryPreferenceError,
+                    "memory-suppression-path-invalid",
+                ):
+                    memory_ledger.load_suppressed_hashes(private)
+                with self.assertRaisesRegex(
+                    memory_ledger.MemoryPreferenceError,
+                    "memory-suppression-path-invalid",
+                ):
+                    memory_ledger.suppress_derived_memory(private, repeated, now=1.0)
+                with self.assertRaisesRegex(
+                    memory_ledger.MemoryPreferenceError,
+                    "memory-suppression-path-invalid",
+                ):
+                    memory_ledger.suppress_derived_memory(private, "yeni hedef", now=1.0)
+                with self.assertRaisesRegex(
+                    memory_ledger.MemoryPreferenceError,
+                    "memory-suppression-path-invalid",
+                ):
+                    with memory_ledger.suppression_guard(private, frozenset()):
+                        pass
+                after = {
+                    path.relative_to(outside): path.read_bytes()
+                    for path in outside.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after, before)
+                self.assertFalse((outside / "suppressions.lock").exists())
+            finally:
+                subprocess.run(
+                    ["cmd", "/c", "rmdir", str(controls)],
+                    check=False,
+                    capture_output=True,
+                )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows directory handle guard")
+    def test_missing_private_root_is_pinned_before_write_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex = root / "vault" / ".codex"
+            codex.mkdir(parents=True)
+            private = codex / "private-memory"
+            outside = root / "outside-private"
+            outside.mkdir()
+            sentinel = outside / "sentinel.txt"
+            sentinel.write_bytes(b"keep")
+            before = {
+                path.relative_to(outside): path.read_bytes()
+                for path in outside.rglob("*")
+                if path.is_file()
+            }
+            real_mkdir = Path.mkdir
+            injected = False
+
+            def mkdir(path: Path, *args: object, **kwargs: object) -> None:
+                nonlocal injected
+                if path == private and not injected:
+                    injected = True
+                    _junction(private, outside)
+                real_mkdir(path, *args, **kwargs)
+
+            try:
+                with mock.patch.object(Path, "mkdir", new=mkdir):
+                    with self.assertRaisesRegex(
+                        memory_ledger.MemoryPreferenceError,
+                        "memory-suppression-path-invalid",
+                    ):
+                        memory_ledger.suppress_derived_memory(private, "hedef", now=1.0)
+                self.assertTrue(injected)
+                after = {
+                    path.relative_to(outside): path.read_bytes()
+                    for path in outside.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after, before)
+                self.assertFalse((outside / "controls").exists())
+                self.assertFalse((outside / "suppressions.jsonl").exists())
+                self.assertFalse((outside / "suppressions.lock").exists())
+            finally:
+                subprocess.run(
+                    ["cmd", "/c", "rmdir", str(private)],
+                    check=False,
+                    capture_output=True,
+                )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows directory handle guard")
+    def test_missing_private_root_reader_pins_existing_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex = root / "vault" / ".codex"
+            codex.mkdir(parents=True)
+            private = codex / "private-memory"
+            outside = root / "outside-private"
+            outside_controls = outside / "controls"
+            outside_controls.mkdir(parents=True)
+            ledger = outside_controls / "suppressions.jsonl"
+            ledger.write_text(
+                json.dumps({
+                    "schema": 1,
+                    "ts": 1,
+                    "target_sha256": memory_ledger.memory_text_hash("hedef"),
+                }) + "\n",
+                encoding="utf-8",
+            )
+            before = {
+                path.relative_to(outside): path.read_bytes()
+                for path in outside.rglob("*")
+                if path.is_file()
+            }
+            real_read = memory_ledger._read_suppression_lines
+            rmdir_result = None
+
+            def swap_then_read(private_root: Path, path: Path) -> list[str]:
+                nonlocal rmdir_result
+                rmdir_result = subprocess.run(
+                    ["cmd", "/c", "rmdir", str(codex)],
+                    check=False,
+                    capture_output=True,
+                )
+                _junction(private, outside)
+                return real_read(private_root, path)
+
+            try:
+                with mock.patch.object(
+                    memory_ledger,
+                    "_read_suppression_lines",
+                    side_effect=swap_then_read,
+                ):
+                    with self.assertRaisesRegex(
+                        memory_ledger.MemoryPreferenceError,
+                        "memory-suppression-path-invalid",
+                    ):
+                        memory_ledger.load_suppressed_hashes(private)
+                self.assertIsNotNone(rmdir_result)
+                self.assertNotEqual(rmdir_result.returncode, 0)
+                after = {
+                    path.relative_to(outside): path.read_bytes()
+                    for path in outside.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after, before)
+            finally:
+                subprocess.run(
+                    ["cmd", "/c", "rmdir", str(private)],
+                    check=False,
+                    capture_output=True,
+                )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows directory handle guard")
+    def test_replaced_suppression_directory_fails_before_handle_use(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary) / "private-memory"
+            controls = private / "controls"
+            controls.mkdir(parents=True)
+            (controls / "suppressions.jsonl").write_text("", encoding="utf-8")
+            real_pin = memory_ledger._pinned_windows_directory
+
+            for operation in (
+                lambda: memory_ledger.load_suppressed_hashes(private),
+                lambda: memory_ledger.suppress_derived_memory(
+                    private, "hedef", now=1.0
+                ),
+            ):
+                replacement = private / "controls-replacement"
+                injected = False
+
+                def replace_before_pin(path: Path):
+                    nonlocal injected
+                    if path == controls and not injected:
+                        injected = True
+                        controls.rename(replacement)
+                        controls.mkdir()
+                    return real_pin(path)
+
+                try:
+                    with mock.patch.object(
+                        memory_ledger,
+                        "_pinned_windows_directory",
+                        side_effect=replace_before_pin,
+                    ):
+                        with self.assertRaisesRegex(
+                            memory_ledger.MemoryPreferenceError,
+                            "memory-suppression-path-invalid",
+                        ):
+                            operation()
+                    self.assertTrue(injected)
+                finally:
+                    if controls.exists():
+                        controls.rmdir()
+                    if replacement.exists():
+                        replacement.rename(controls)
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows directory handle guard")
+    def test_new_suppression_directory_identity_is_bound_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary) / "private-memory"
+            controls = private / "controls"
+            private.mkdir()
+            replacement = private / "controls-replacement"
+            real_pin = memory_ledger._pinned_windows_directory
+            injected = False
+
+            def replace_before_pin(path: Path):
+                nonlocal injected
+                same_path = (
+                    os.path.normcase(os.path.abspath(os.fspath(path)))
+                    == os.path.normcase(os.path.abspath(os.fspath(controls)))
+                )
+                if same_path and not injected:
+                    injected = True
+                    controls.rename(replacement)
+                    controls.mkdir()
+                return real_pin(path)
+
+            try:
+                with mock.patch.object(
+                    memory_ledger,
+                    "_pinned_windows_directory",
+                    side_effect=replace_before_pin,
+                ):
+                    with self.assertRaisesRegex(
+                        memory_ledger.MemoryPreferenceError,
+                        "memory-suppression-path-invalid",
+                    ):
+                        memory_ledger.suppress_derived_memory(
+                            private, "hedef", now=1.0
+                        )
+                self.assertTrue(injected)
+                self.assertFalse((controls / "suppressions.lock").exists())
+                self.assertFalse((replacement / "suppressions.lock").exists())
+            finally:
+                if controls.exists():
+                    for child in controls.iterdir():
+                        if child.is_file():
+                            child.unlink()
+                    controls.rmdir()
+                if replacement.exists():
+                    for child in replacement.iterdir():
+                        if child.is_file():
+                            child.unlink()
+                    replacement.rmdir()
+
     def test_invalid_and_unreadable_suppression_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             private = Path(temporary)
@@ -116,6 +422,40 @@ class SuppressionEdges(unittest.TestCase):
             (controls / "suppressions.jsonl").write_bytes(bytes([255, 254, 250]))
             with self.assertRaises(memory_ledger.MemoryPreferenceError):
                 memory_ledger.load_suppressed_hashes(private)
+
+    def test_suppression_ledger_open_errors_do_not_mean_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary)
+            controls = private / "controls"
+            controls.mkdir()
+            ledger = controls / "suppressions.jsonl"
+            ledger.write_text("", encoding="utf-8")
+            with mock.patch.object(Path, "open", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(
+                    memory_ledger.MemoryPreferenceError,
+                    "memory-suppression-unreadable",
+                ):
+                    memory_ledger.load_suppressed_hashes(private)
+
+    def test_suppression_directory_access_denial_fails_without_retry(self) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows directory handle contract")
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary)
+            (private / "controls").mkdir()
+            denied = PermissionError("denied")
+            denied.winerror = 5
+            with mock.patch.object(
+                memory_ledger,
+                "_pinned_windows_directory",
+                side_effect=denied,
+            ) as pin:
+                with self.assertRaisesRegex(
+                    memory_ledger.MemoryPreferenceError,
+                    "memory-suppression-path-invalid",
+                ):
+                    memory_ledger.suppress_derived_memory(private, "hedef")
+            pin.assert_called_once()
 
     def test_repeated_suppression_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
