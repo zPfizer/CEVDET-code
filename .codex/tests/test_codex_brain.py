@@ -4437,7 +4437,8 @@ Analysis Lifecycle yalnız branded updateImpactPreviewId tüketir.
 
         self.assertLess(elapsed, 0.4)
         self.assertEqual(observed_deadlines, [deadline])
-        self.assertIn("[Vault Arama Sorunu]", context)
+        self.assertIn("[Vault Arama Süresi Doldu]", context)
+        self.assertNotIn("Mevcut dosya aramasıyla", context)
 
     def test_user_prompt_retrieval_deadline_preserves_successful_context(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

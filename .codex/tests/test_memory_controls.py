@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -822,6 +823,60 @@ class SuppressionTests(unittest.TestCase):
                 'prompt': 'Levent hangi şehirde yaşıyor?'}, vault / '.state', vault_root=vault)
             self.assertIn('Ham notlara veya eski önbelleğe geçme', context)
             self.assertNotIn('Mevcut dosya aramasıyla', context)
+
+    def test_retrieval_deadline_does_not_route_filtered_read_to_raw_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            private = vault / '.codex/private-memory'
+            memory_ledger.suppress_derived_memory(private, 'Levent Ankara\'da yaşıyor')
+            with mock.patch.object(
+                hook,
+                'retrieve_vault_context_detailed',
+                side_effect=TimeoutError('vault-retrieval-deadline'),
+            ):
+                context = hook.handle_user_prompt(
+                    {
+                        'session_id': 'filtered-deadline',
+                        'prompt': 'Levent hangi şehirde yaşıyor?',
+                    },
+                    vault / '.state',
+                    vault_root=vault,
+                    deadline=time.monotonic() + 30,
+                )
+
+        self.assertIn('Vault Arama Süresi Doldu', context)
+        self.assertIn('Ham bilgi dosyalarına veya eski önbelleğe geçme', context)
+        self.assertNotIn('Mevcut dosya aramasıyla', context)
+
+    def test_read_only_memory_renderer_receives_deadline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            private_views = vault / '.codex/private-memory/views'
+            private_views.mkdir(parents=True)
+            source = vault / 'daily/one.md'
+            source.parent.mkdir()
+            source.write_text('Bir kaynak.\n', encoding='utf-8')
+            memory = memory_ledger.MemoryRead(vault, frozenset({'0' * 64}))
+            deadline = time.monotonic() + 30
+            with mock.patch.object(
+                memory_ledger,
+                '_render_memory_views',
+                wraps=memory_ledger._render_memory_views,
+            ) as render:
+                rendered, paths = memory.render_views(
+                    [('daily/one.md', 'one')],
+                    alias_sources=[('daily/one.md', 'one')],
+                    deadline=deadline,
+                )
+
+        self.assertEqual(rendered['daily/one.md'], 'Bir kaynak.\n')
+        self.assertIn('daily/one.md', paths)
+        self.assertEqual(render.call_args.kwargs['deadline'], deadline)
+        with self.assertRaises(memory_ledger.MemoryPreferenceError):
+            memory.render_views(
+                [('daily/one.md', 'one')],
+                deadline=time.monotonic() - 1,
+            )
 
     def test_forget_tombstone_stores_only_target_hash(self) -> None:
         target = "Levent Ankara'da yaşıyor"

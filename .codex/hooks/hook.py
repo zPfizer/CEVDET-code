@@ -562,7 +562,7 @@ def build_session_context(
         if memory.active and write_views:
             views = memory.views(view_sources, deadline=deadline)
         elif memory.active:
-            view_texts, views = memory.render_views(view_sources)
+            view_texts, views = memory.render_views(view_sources, deadline=deadline)
         else:
             views = {}
 
@@ -859,7 +859,14 @@ def handle_user_prompt(
                     'Ham notlara veya eski önbelleğe geçme; hafızadan kişisel bilgi yanıtlama. '
                     'Tercih kaydının onarılması gerektiğini kısa biçimde bildir.'
                 )
-            if isinstance(exc, OSError) and str(exc) == "vault-retrieval-incomplete":
+            if isinstance(exc, TimeoutError):
+                context.insert(
+                    0,
+                    "[Vault Arama Süresi Doldu]\n"
+                    "Vault araması ayrılan süre içinde tamamlanamadı; bilgi yok sonucuna varma. "
+                    "Ham bilgi dosyalarına veya eski önbelleğe geçme; eksik doğrulamayı açıkça bildir.",
+                )
+            elif isinstance(exc, OSError) and str(exc) == "vault-retrieval-incomplete":
                 context.insert(
                     0,
                     "[Vault Arama Sorunu]\n"

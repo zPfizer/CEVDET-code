@@ -35,6 +35,12 @@ MEMORY_READ_RULE = (
     'memory_ledger.read_memory_source(vault_root, path) ile süzülmüş olarak oku.'
 )
 
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError('memory-view-deadline')
+
+
 PRIVATE_KEY = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?"
     r"-----END [A-Z0-9 ]*PRIVATE KEY-----",
@@ -1640,6 +1646,7 @@ class MemoryRead:
             return {}
         try:
             for relative, _title in sources:
+                _check_deadline(deadline)
                 self._check_source_publication(relative)
             views = materialize_memory_views(
                 self._vault_root,
@@ -1663,18 +1670,21 @@ class MemoryRead:
         sources: Sequence[tuple[str, str]],
         *,
         alias_sources: Sequence[tuple[str, str]] | None = None,
+        deadline: float | None = None,
     ) -> tuple[dict[str, str], dict[str, str]]:
         """Render filtered sources in memory, without creating view files."""
         if not self.active:
             return {}, {}
         try:
             for relative, _title in sources:
+                _check_deadline(deadline)
                 self._check_source_publication(relative)
             views = _render_memory_views(
                 self._vault_root,
                 sources,
                 self._hashes,
                 alias_sources=alias_sources,
+                deadline=deadline,
             )
             if self._publication is not None:
                 self.check_knowledge_snapshot()
@@ -1743,8 +1753,10 @@ def _render_memory_views(
     hashes: frozenset[str],
     *,
     alias_sources: Sequence[tuple[str, str]] | None = None,
+    deadline: float | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Return filtered source text and its safe view identities without writing."""
+    _check_deadline(deadline)
     private = vault_root / '.codex/private-memory'
     if private.is_symlink() or private.resolve() != vault_root.resolve() / '.codex/private-memory':
         raise MemoryPreferenceError('memory-view-path-invalid')
@@ -1755,11 +1767,13 @@ def _render_memory_views(
     }
     aliases: dict[str, Path | None] = {}
     for relative, title in alias_sources if alias_sources is not None else sources:
+        _check_deadline(deadline)
         path = PurePosixPath(relative)
         names = (relative.removesuffix('.md'), path.stem, title,
                  relative.removeprefix('knowledge/').removesuffix('.md'))
         target = targets.get(relative)
         for name in names:
+            _check_deadline(deadline)
             key = name.casefold()
             if key in aliases and aliases[key] != target:
                 aliases[key] = None
@@ -1785,6 +1799,7 @@ def _render_memory_views(
     memory = MemoryRead(vault_root, hashes)
     rendered: dict[str, str] = {}
     for relative, _title in sources:
+        _check_deadline(deadline)
         source = vault_root / relative
         if source.is_symlink():
             raise MemoryPreferenceError('memory-view-source-invalid')
@@ -1792,9 +1807,12 @@ def _render_memory_views(
             _source_relative, projected = memory.read_source(source, relative=relative)
         except MemorySourceError as exc:
             raise MemoryPreferenceError('memory-view-source-invalid') from exc
+        _check_deadline(deadline)
         projected = projected or ''
         projected = re.sub(r'(?<!!)\[([^\]]*)\]\(([^)]+)\)', markdown_link, projected)
+        _check_deadline(deadline)
         projected = re.sub(r'\[\[([^\]]+)\]\]', link, projected)
+        _check_deadline(deadline)
         rendered[relative] = projected
     return rendered, {
         relative: memory_view_relative_path(relative)
@@ -1825,8 +1843,10 @@ def materialize_memory_views(
             sources,
             hashes,
             alias_sources=alias_sources,
+            deadline=deadline,
         )
         for relative, projected in rendered.items():
+            _check_deadline(deadline)
             target = vault_root / paths[relative]
             if target.is_symlink() or target.resolve() != views.resolve() / target.name:
                 raise MemoryPreferenceError('memory-view-path-invalid')
