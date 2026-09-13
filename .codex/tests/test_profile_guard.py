@@ -294,6 +294,19 @@ class ProfileGuardTests(unittest.TestCase):
 
         self.assertEqual(issues, ['profile-link-traversal'])
 
+    def test_html_code_text_inside_markdown_link_title_does_not_hide_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                '[x](url "<code>")\n[[../secret]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-traversal'])
+
     def test_tab_indented_html_blocks_do_not_hide_following_links(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -372,6 +385,19 @@ class ProfileGuardTests(unittest.TestCase):
                 profile_guard._check_links(example, root, issues)
 
             self.assertEqual(issues, ['profile-link-broken'])
+
+    def test_list_continuation_html_containers_do_not_hide_following_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                '- item\n  <pre>\n  model example\n[[../secret]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-traversal'])
 
     def test_broken_and_outside_links_are_rejected_without_echoing_content(self) -> None:
         broken = PROFILE_TEXT.replace("tercih-kisa#Kayıtlar", "kayip#Kayıtlar")

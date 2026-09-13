@@ -24,6 +24,9 @@ LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])(?P<gap>[ \t]+|$)"
 )
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
+REFERENCE_DEFINITION = re.compile(
+    r'(?m)^[ \t]{0,3}\[[^\]\r\n]+\]:[^\r\n]*'
+)
 
 
 def is_escaped(text: str, index: int) -> bool:
@@ -41,6 +44,178 @@ def wikilinks(text: str) -> Iterator[re.Match[str]]:
         for match in WIKILINK.finditer(text)
         if not is_escaped(text, match.start())
     )
+
+
+def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
+    spans: list[tuple[int, int]] = []
+
+    def line_end(start: int) -> int:
+        end = text.find('\n', start)
+        return len(text) if end < 0 else end
+
+    def skip_hspace(start: int) -> int:
+        while start < len(text) and text[start] in ' \t':
+            start += 1
+        return start
+
+    def newline_after(start: int) -> int | None:
+        if text.startswith('\r\n', start):
+            return start + 2
+        if text.startswith('\n', start):
+            return start + 1
+        return None
+
+    def consume_destination(start: int) -> int | None:
+        if start >= len(text) or text[start] in '\r\n':
+            return None
+        if text[start] == '<':
+            cursor = start + 1
+            while cursor < len(text):
+                if text[cursor] in '\r\n':
+                    return None
+                if (
+                    text[cursor] == '\\'
+                    and cursor + 1 < len(text)
+                    and text[cursor + 1] not in '\r\n'
+                ):
+                    cursor += 2
+                    continue
+                if text[cursor] == '>':
+                    return cursor + 1
+                cursor += 1
+            return None
+        cursor = start
+        depth = 0
+        while cursor < len(text) and text[cursor] not in ' \t\r\n':
+            if (
+                text[cursor] == '\\'
+                and cursor + 1 < len(text)
+                and text[cursor + 1] not in '\r\n'
+            ):
+                cursor += 2
+                continue
+            if text[cursor] == '(':
+                depth += 1
+            elif text[cursor] == ')':
+                if depth == 0:
+                    return None
+                depth -= 1
+            cursor += 1
+        if cursor == start or depth:
+            return None
+        return cursor
+
+    def title_start_after_definition(
+        definition: re.Match[str],
+    ) -> tuple[int, str] | None:
+        suffix_offset = definition.group(0).index(']:') + 2
+        cursor = definition.start() + suffix_offset
+        cursor = skip_hspace(cursor)
+        if text.startswith('\r\n', cursor) or text.startswith('\n', cursor):
+            after_definition = newline_after(cursor)
+            if after_definition is None:
+                return None
+            cursor = skip_hspace(after_definition)
+        destination_end = consume_destination(cursor)
+        if destination_end is None:
+            return None
+        candidate = skip_hspace(destination_end)
+        if candidate < len(text) and text[candidate] in "\"'(":
+            if candidate == destination_end:
+                return None
+            return candidate, text[candidate]
+        if candidate >= len(text) or text[candidate] not in '\r\n':
+            return None
+        after_destination = newline_after(candidate)
+        if after_destination is None:
+            return None
+        candidate = skip_hspace(after_destination)
+        if candidate < len(text) and text[candidate] in "\"'(":
+            return candidate, text[candidate]
+        return None
+
+    def title_end(start: int, opener: str) -> int | None:
+        closer = ')' if opener == '(' else opener
+        cursor = start + 1
+        while cursor < len(text):
+            current_end = line_end(cursor)
+            escaped = False
+            for index in range(cursor, current_end):
+                if escaped:
+                    escaped = False
+                elif text[index] == '\\':
+                    escaped = True
+                elif opener == '(' and text[index] == '(':
+                    return None
+                elif text[index] == closer:
+                    if text[index + 1:current_end].strip(' \t\r'):
+                        return None
+                    return index + 1
+            if current_end >= len(text):
+                return None
+            next_start = current_end + 1
+            if not text[next_start:line_end(next_start)].rstrip('\r').strip():
+                return None
+            cursor = next_start
+        return None
+
+    for definition in REFERENCE_DEFINITION.finditer(text):
+        title = title_start_after_definition(definition)
+        if title is None:
+            spans.append((definition.start(), definition.end()))
+            continue
+        span_end = title_end(*title)
+        if span_end is None:
+            spans.append((definition.start(), definition.end()))
+        else:
+            spans.append((definition.start(), span_end))
+    return tuple(spans)
+
+
+def markdown_link_spans(text: str) -> tuple[tuple[int, int], ...]:
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(text):
+        if text[index] != '[' or is_escaped(text, index):
+            index += 1
+            continue
+        label_depth = 1
+        label_end = None
+        cursor = index + 1
+        while cursor < len(text):
+            if text[cursor] == '\\':
+                cursor += 2
+                continue
+            if text[cursor] == '[':
+                label_depth += 1
+            elif text[cursor] == ']':
+                label_depth -= 1
+                if label_depth == 0:
+                    label_end = cursor
+                    break
+            cursor += 1
+        if label_end is None or label_end + 1 >= len(text) or text[label_end + 1] != '(':
+            index = max(cursor, index + 1)
+            continue
+        depth = 1
+        cursor = label_end + 2
+        while cursor < len(text):
+            if text[cursor] == '\\':
+                cursor += 2
+                continue
+            if text[cursor] == '(':
+                depth += 1
+            elif text[cursor] == ')':
+                depth -= 1
+                if depth == 0:
+                    spans.append((index, cursor + 1))
+                    index = cursor + 1
+                    break
+            cursor += 1
+        else:
+            index = label_end + 2
+    spans.extend(_reference_definition_spans(text))
+    return tuple(spans)
 
 
 def _blank(chars: list[str], start: int, end: int) -> None:
@@ -102,6 +277,8 @@ def _blank_inline_code(chars: list[str], text: str) -> None:
 def _blank_inline_html_elements(
     chars: list[str], text: str, tags: frozenset[str]
 ) -> None:
+    metadata_spans = markdown_link_spans(text)
+
     class ElementParser(HTMLParser):
         def __init__(self) -> None:
             super().__init__(convert_charrefs=False)
@@ -116,17 +293,22 @@ def _blank_inline_html_elements(
             line, column = self.getpos()
             return self.line_starts[line - 1] + column
 
+        def _in_metadata(self, offset: int) -> bool:
+            return any(start <= offset < end for start, end in metadata_spans)
+
         def handle_starttag(self, tag: str, _attrs: list[tuple[str, str | None]]) -> None:
             folded = tag.casefold()
             if folded not in tags:
                 return
             start = self._offset()
-            if not is_escaped(text, start):
+            if not is_escaped(text, start) and not self._in_metadata(start):
                 self.open_tags.append((folded, start))
 
         def handle_endtag(self, tag: str) -> None:
             folded = tag.casefold()
             if folded not in tags:
+                return
+            if self._in_metadata(self._offset()):
                 return
             for index in range(len(self.open_tags) - 1, -1, -1):
                 if self.open_tags[index][0] != folded:
@@ -255,13 +437,25 @@ def _continuation_fence_parts(
     return None
 
 
-def _is_html_literal_open(content: str) -> bool:
-    remainder, _container = _container_prefix(content)
+def _html_literal_parts(
+    content: str,
+    *,
+    container: tuple[tuple[str, int], ...] | None = None,
+) -> tuple[tuple[tuple[str, int], ...], re.Match[str]] | None:
+    if container is None:
+        remainder, container = _container_prefix(content)
+    else:
+        remainder = _container_body(content, container)
+        if remainder is None:
+            return None
     opening = HTML_LITERAL_OPEN.match(remainder)
-    return (
-        opening is not None
-        and _indent_columns(remainder[: opening.start("tag") - 1]) <= 3
-    )
+    if opening is None or _indent_columns(remainder[: opening.start('tag') - 1]) > 3:
+        return None
+    return container, opening
+
+
+def _is_html_literal_open(content: str) -> bool:
+    return _html_literal_parts(content) is not None
 
 
 def _html_literal_close(content: str, tag: str) -> re.Match[str] | None:
@@ -421,18 +615,20 @@ def markdown_body(
             _blank(chars, start, end)
             paragraph_active = False
             continue
-        if _is_html_literal_open(content):
-            _blank(chars, start, end)
-            remainder, container = _container_prefix(content)
-            opening = HTML_LITERAL_OPEN.match(remainder)
-            closing = (
-                _html_literal_close(content, opening.group("tag").casefold())
-                if opening is not None
-                else None
+        html_open = None
+        for _indentation, content_indent in reversed(list_contexts):
+            html_open = _html_literal_parts(
+                content, container=(('list', content_indent),)
             )
-            if opening is not None and (
-                closing is None
-            ):
+            if html_open is not None:
+                break
+        if html_open is None:
+            html_open = _html_literal_parts(content)
+        if html_open is not None:
+            _blank(chars, start, end)
+            container, opening = html_open
+            closing = _html_literal_close(content, opening.group('tag').casefold())
+            if closing is None:
                 html_literal = opening.group("tag").casefold()
                 html_container = container
             paragraph_active = False
