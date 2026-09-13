@@ -252,8 +252,13 @@ def _prepare_retrieval_query(
     return ("" if followup else query), followup
 
 
-def atomic_write(path: Path, text: str) -> None:
-    atomic_write_text(path, text)
+def atomic_write(
+    path: Path,
+    text: str,
+    *,
+    deadline: float | None = None,
+) -> None:
+    atomic_write_text(path, text, deadline=deadline)
 
 
 def session_key(session_id: str) -> str:
@@ -641,8 +646,11 @@ def _increment_prompt_count(
     record_path: Path,
     *,
     meaningful: bool = False,
+    deadline: float | None = None,
 ) -> int:
-    with locked(record_path):
+    with locked(record_path, timeout=timeout_for_deadline(deadline)):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("user-prompt-counter-deadline")
         try:
             record = json.loads(record_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -656,7 +664,7 @@ def _increment_prompt_count(
         record["prompt_count"] = count + 1
         if meaningful:
             record["meaningful_prompt_seen"] = True
-        atomic_write_json(record_path, record)
+        atomic_write_json(record_path, record, deadline=deadline)
         return count + 1
 
 
@@ -666,6 +674,7 @@ def handle_user_prompt(
     *,
     vault_root: Path = VAULT_ROOT,
     now: float | None = None,
+    deadline: float | None = None,
 ) -> str:
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
@@ -779,8 +788,9 @@ def handle_user_prompt(
         count = _increment_prompt_count(
             record_path,
             meaningful=meaningful_prompt,
+            deadline=deadline,
         )
-    except (OSError, ValueError):
+    except (OSError, ValueError, LockUnavailable):
         count = 0
     if count == 1 and meaningful_prompt and directive is not None and directive.kind in {'ordinary', 'correct', 'what-known', 'read-only'}:
         context.append(_memory_behavior_contract())
@@ -803,6 +813,7 @@ def handle_user_prompt(
                 max_chars=min(MAX_CONTEXT_CHARS, USER_PROMPT_CONTEXT_TARGET_CHARS - len('\n\n'.join(context)) - (2 if context else 0)),
                 write_cache=not (read_only_requested or read_only_scope),
                 write_views=not (read_only_requested or read_only_scope),
+                deadline=deadline,
             )
             record = {
                 "ts": int(time.time() if now is None else now),
@@ -823,6 +834,7 @@ def handle_user_prompt(
                 atomic_write(
                     state_dir / "runtime-vault-retrieval.json",
                     json.dumps(record, ensure_ascii=False) + "\n",
+                    deadline=deadline,
                 )
                 (state_dir / "retrieval-health.json").unlink(missing_ok=True)
             except OSError:
@@ -887,6 +899,7 @@ def handle_user_prompt(
                         ensure_ascii=False,
                     )
                     + "\n",
+                    deadline=deadline,
                 )
                 atomic_write(
                     state_dir / "retrieval-health.json",
@@ -898,6 +911,7 @@ def handle_user_prompt(
                         ensure_ascii=False,
                     )
                     + "\n",
+                    deadline=deadline,
                 )
             except OSError:
                 pass  # Preserve the search warning even when health storage is unavailable.
@@ -1394,6 +1408,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             emitted_context = handle_user_prompt(
                 payload,
                 STATE_DIR,
+                deadline=hook_deadline,
             )
             transcript_path = payload.get("transcript_path")
             if (

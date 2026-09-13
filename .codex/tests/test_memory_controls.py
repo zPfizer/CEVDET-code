@@ -979,12 +979,17 @@ class SuppressionTests(unittest.TestCase):
             real_handle = hook.handle_user_prompt
             contexts: list[str] = []
 
-            def handle(payload: dict[str, object], state_dir: Path) -> str:
+            def handle(
+                payload: dict[str, object],
+                state_dir: Path,
+                **kwargs: object,
+            ) -> str:
                 context = real_handle(
                     payload,
                     state_dir,
                     vault_root=vault,
                     now=1234,
+                    **kwargs,
                 )
                 contexts.append(context)
                 return context

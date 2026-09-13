@@ -4391,6 +4391,90 @@ Analysis Lifecycle yalnız branded updateImpactPreviewId tüketir.
         self.assertEqual(receipt["chars"], 0)
         self.assertNotIn("prompt", receipt)
 
+    def test_user_prompt_retrieval_deadline_bounds_cooperative_slow_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            command = vault / "🎯 100-Command-Center"
+            state.mkdir(parents=True)
+            command.mkdir(parents=True)
+            (command / "Active Work.md").write_text(
+                "# Aktif İşler\n\n## Primary\n",
+                encoding="utf-8",
+            )
+            payload = {
+                "session_id": "slow-retrieval",
+                "cwd": str(vault),
+                "prompt": "Atlas kararı için yavaş retrieval denemesi",
+            }
+            observed_deadlines: list[float | None] = []
+            started = time.monotonic()
+
+            def slow_retrieval(*_args: object, **kwargs: object):
+                deadline = kwargs.get("deadline")
+                observed_deadlines.append(deadline if isinstance(deadline, float) else None)
+                while time.monotonic() - started < 0.6:
+                    if isinstance(deadline, float) and time.monotonic() >= deadline:
+                        raise TimeoutError("retrieval-deadline")
+                    time.sleep(0.01)
+                return vault_retrieval.VaultContextResult(
+                    "emitted", "slow result", 1, 1, ("x.md",), 100,
+                )
+
+            deadline = time.monotonic() + 0.08
+            with mock.patch.object(
+                hook,
+                "retrieve_vault_context_detailed",
+                side_effect=slow_retrieval,
+            ):
+                context = hook.handle_user_prompt(
+                    payload,
+                    state,
+                    vault_root=vault,
+                    deadline=deadline,
+                )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.4)
+        self.assertEqual(observed_deadlines, [deadline])
+        self.assertIn("[Vault Arama Sorunu]", context)
+
+    def test_user_prompt_retrieval_deadline_preserves_successful_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            state.mkdir(parents=True)
+            result = vault_retrieval.VaultContextResult(
+                "emitted", "[Vault Retrieval]\nbounded success", 1, 1, ("x.md",), 100,
+            )
+            payload = {
+                "session_id": "successful-retrieval",
+                "cwd": str(vault),
+                "prompt": "Atlas kararı",
+            }
+            deadline = time.monotonic() + 30
+            with mock.patch.object(
+                hook,
+                "retrieve_vault_context_detailed",
+                return_value=result,
+            ) as retrieve:
+                context = hook.handle_user_prompt(
+                    payload,
+                    state,
+                    vault_root=vault,
+                    deadline=deadline,
+                )
+
+        retrieve.assert_called_once_with(
+            vault,
+            "Atlas kararı",
+            max_chars=mock.ANY,
+            write_cache=True,
+            write_views=True,
+            deadline=deadline,
+        )
+        self.assertIn("bounded success", context)
+
     def test_user_prompt_skips_local_retrieval_for_noise(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
