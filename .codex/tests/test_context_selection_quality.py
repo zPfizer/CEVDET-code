@@ -1274,6 +1274,8 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                 "Daha önce veri saklama için ne kararlaştırdık",
                 "Daha önce veri saklama için hangi depolama seçeneğini seçmiştik",
                 "Daha önce veri saklama için hangi güvenli yerel depolama seçeneğini seçmiştik",
+                "Daha önce veri saklama sorumlusu olarak kimi seçmiştik",
+                "Daha önce veri saklama sorumluları olarak kimleri seçmiştik",
                 "Daha önce Python 3.14 ile veri saklama için hangi seçeneği uygun görmüştük?",
                 "Daha önce Node.js ile veri saklama için hangi seçeneği uygun görmüştük?",
                 "Daha önce config.active ile veri saklama için hangi seçeneği uygun görmüştük?",
@@ -1491,6 +1493,24 @@ Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun 
                         {current, historical},
                     )
             generic_current = history_first.replace("nedir", "hangisi")
+            plural_current = history_first.replace("güncel karar nedir", "güncel kararlar hangileri")
+            self.assertEqual(
+                retrieval._split_current_history_query(plural_current),
+                ("güncel kararlar hangileri? veri saklama", "Daha önce veri saklama konusunda ne karar vermiştik"),
+            )
+            self.assertEqual(
+                {hit.entry.path for hit in retrieval.search_vault(entries, plural_current, top_k=2)},
+                {current, historical},
+            )
+            generic_option = generic_current.replace("güncel karar", "güncel seçenek")
+            self.assertEqual(
+                retrieval._split_current_history_query(generic_option),
+                ("güncel seçenek hangisi? veri saklama", "Daha önce veri saklama konusunda ne karar vermiştik"),
+            )
+            self.assertEqual(
+                {hit.entry.path for hit in retrieval.search_vault(entries, generic_option, top_k=2)},
+                {current, historical},
+            )
             self.assertEqual(
                 retrieval._split_current_history_query(generic_current),
                 ("güncel karar hangisi? veri saklama", "Daha önce veri saklama konusunda ne karar vermiştik"),

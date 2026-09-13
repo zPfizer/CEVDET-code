@@ -1576,7 +1576,7 @@ def _retrospective_question_terms(normalized: str) -> frozenset[str]:
         term for term in re.findall(r"\w+", normalized)
         if term in {"neydi", "nasil", "niye", "nicin"}
         or re.fullmatch(HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY, term)
-        or any(term == root or _matches_history_inflection(term, root) for root in ("hangi", "ne"))
+        or any(term == root or _matches_history_inflection(term, root) for root in ("hangi", "ne", "kim"))
     )
 
 
@@ -2103,8 +2103,14 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     }
 
     def topic_terms(scope: str) -> list[str]:
-        generic = re.fullmatch(rf"{CURRENT_QUERY_CUE}\s+karar\w*\s+(\w+)[.!?]?", _normalize(scope))
-        if generic and (generic[1] == "nedir" or _retrospective_question_terms(generic[1])):
+        generic = re.fullmatch(rf"{CURRENT_QUERY_CUE}\s+(\w+)\s+(\w+)[.!?]?", _normalize(scope))
+        if (
+            generic
+            and (generic[1].startswith("karar")
+                 or any(generic[1] == root or _matches_history_inflection(generic[1], root)
+                        for root in ("secenek", "seceneg")))
+            and (generic[2] == "nedir" or _retrospective_question_terms(generic[2]))
+        ):
             return []
         scope_terms = _retrieval_terms(scope)
         retrospective_cue_terms = _retrospective_topic_cue_terms(scope)
