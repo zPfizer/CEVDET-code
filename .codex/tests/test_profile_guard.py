@@ -400,6 +400,32 @@ class ProfileGuardTests(unittest.TestCase):
 
         self.assertEqual(issues, ['profile-link-traversal'])
 
+    def test_malformed_ordered_markers_do_not_hide_following_links(self) -> None:
+        for example in (
+            '1234567890. ```\n    [[../secret]]',
+            '١. ```\n    [[../secret]]',
+        ):
+            with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                issues: list[str] = []
+
+                profile_guard._check_links(example, root, issues)
+
+            self.assertEqual(issues, ['profile-link-traversal'])
+
+    def test_malformed_html_code_openers_keep_links_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                '<code foo=>[[../secret]]</code>',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-traversal'])
+
     def test_broken_and_outside_links_are_rejected_without_echoing_content(self) -> None:
         broken = PROFILE_TEXT.replace("tercih-kisa#Kayıtlar", "kayip#Kayıtlar")
         outside = PROFILE_TEXT.replace(

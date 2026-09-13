@@ -68,9 +68,18 @@ class GraphIntegrityTests(unittest.TestCase):
             self.assertIn("[[knowledge/concepts/beta|beta]]", updated)
 
     def test_multiline_inline_code_does_not_hide_a_block_heading_link(self) -> None:
-        body = markdown_body("`\n## [[../secret]]\n`")
+        for example in (
+            "`\n## [[../secret]]\n`",
+            "> `\n> ## [[../secret]]\n> `",
+        ):
+            with self.subTest(example=example):
+                body = markdown_body(example)
 
-        self.assertIn("[[../secret]]", body)
+                self.assertIn("[[../secret]]", body)
+
+        paragraph = markdown_body("> `foo\n> bar`")
+        self.assertNotIn("foo", paragraph)
+        self.assertNotIn("bar", paragraph)
 
     def test_graph_summary_keeps_observable_property_wikilinks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

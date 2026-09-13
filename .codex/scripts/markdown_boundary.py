@@ -18,10 +18,13 @@ HTML_LITERAL_CLOSE = re.compile(
     re.IGNORECASE,
 )
 HTML_TAG = re.compile(r'<(?:[^"\'>]|"[^"]*"|\'[^\']*\')*>', re.DOTALL)
+HTML_EMPTY_UNQUOTED_ATTRIBUTE = re.compile(
+    r'(?:^|[ \t\r\n])[^ \t\r\n=/>]+[ \t\r\n]*=[ \t\r\n]*(?=[ \t/>]|$)'
+)
 HTML_LITERAL_TAGS = frozenset({"pre", "script", "style", "textarea"})
 INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
 LIST_ITEM = re.compile(
-    r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])(?P<gap>[ \t]+|$)"
+    r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|[0-9]{1,9}[.)])(?P<gap>[ \t]+|$)"
 )
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 ATX_HEADING_LINE = re.compile(r"^[ \t]{0,3}#{1,6}(?:[ \t]+|$)")
@@ -262,7 +265,8 @@ def _crosses_inline_block(text: str, start: int, end: int) -> bool:
         if line_end < 0:
             line_end = len(text)
         line = text[line_start:line_end].rstrip('\r')
-        if not line.strip() or ATX_HEADING_LINE.match(line):
+        logical_line, _containers = _container_prefix(line)
+        if not logical_line.strip() or ATX_HEADING_LINE.match(logical_line):
             return True
         if line_end >= len(text):
             break
@@ -326,6 +330,9 @@ def _blank_inline_html_elements(
         def handle_starttag(self, tag: str, _attrs: list[tuple[str, str | None]]) -> None:
             folded = tag.casefold()
             if folded not in tags:
+                return
+            raw = self.get_starttag_text()
+            if raw is None or HTML_EMPTY_UNQUOTED_ATTRIBUTE.search(raw):
                 return
             start = self._offset()
             if not is_escaped(text, start):

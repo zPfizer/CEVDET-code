@@ -25,7 +25,7 @@ from quote_grammar import QUOTED_CONTENT
 
 SOURCE = re.compile(r'<!-- user-source:\s*(\{[^\n]*\})\s*-->')
 EVIDENCE = re.compile(r'<!-- user-evidence:\s*(\{[^\n]*\})\s*-->')
-LIST_PREFIX = re.compile(r'^[ \t]*(?:[-+*]|\d+[.)])(?:[ \t]+|$)')
+LIST_PREFIX = re.compile(r'^[ \t]*(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)')
 USER_ANCHOR = r'(?:#user-[a-f0-9]{64})?'
 USER_LINK = re.compile(r'\[\[daily/(\d{4}-\d{2}-\d{2})#user-([a-f0-9]{64})(?:\|[^\]]+)?\]\]')
 SCOPES = frozenset({'general', 'project', 'session', 'unspecified'})

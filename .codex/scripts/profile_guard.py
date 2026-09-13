@@ -282,7 +282,7 @@ def check_profile(
     if updated is None or len(style_matches) != 1:
         return tuple(dict.fromkeys(issues))
     bullets = [line for line in _structured_section(text, style_matches[0]).splitlines()
-               if re.match(r"^\s*(?:[-+*]|\d+[.)])\s+", line)]
+               if re.match(r"^\s*(?:[-+*]|[0-9]{1,9}[.)])\s+", line)]
     if not bullets:
         issues.append("profile-preference-missing")
     claims: set[str] = set()
