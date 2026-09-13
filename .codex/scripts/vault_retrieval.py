@@ -21,6 +21,7 @@ from urllib.parse import unquote, urlsplit
 import companion_memory
 from file_lock import LockUnavailable, locked
 from memory_ledger import (
+    _unquoted_request,
     MEMORY_READ_RULE,
     MemoryPreferenceError,
     MemoryRead,
@@ -198,6 +199,62 @@ HISTORY_TURKISH_NOMINAL_CHANGE_QUERY = re.compile(
     r"(?ix)\bson\b"
     r"(?:\W+\w+){0,2}\W+"
     rf"\b(?:{HISTORY_CHANGE_NOUN_PATTERN})\b"
+)
+# A past predicate or decision question makes
+# `daha önce`/`önceden` retrospective; imperative forms such as
+# `daha önce bitir` stay current.
+HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS = frozenset({"hangi", "uygun", "konusunda", "daha", "en"})
+HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY = (
+    r"m[iu](?:y[dt][iu](?:m|n|k|n[iu]z|lar|ler)?|y[iu][mz]|s[iu]n(?:[iu]z)?)?"
+)
+HISTORY_TURKISH_PAST_SUFFIX = (
+    r"(?:[dt][iu](?:m|n|k|n[iu]z|lar|ler)?"
+    r"|m[iu]s(?:[iu]m|[iu]z|s[iu]n(?:[iu]z)?|lar|ler)?)"
+)
+HISTORY_TURKISH_RETROSPECTIVE_PAST = (
+    rf"\w+{HISTORY_TURKISH_PAST_SUFFIX}(?:\s+{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY})?"
+)
+# Without explicit question punctuation/auxiliary, cover decision predicates
+# only. An embedded wh-word in `hangi ... olduğunu bilmemiştik` is not enough.
+HISTORY_TURKISH_DECISION_PAST = re.compile(
+    rf"\b(?:(?:karar\w*|tercih|uygun)\s+{HISTORY_TURKISH_RETROSPECTIVE_PAST}"
+    rf"|(?:sec|benimse|kararlastir)\w*{HISTORY_TURKISH_PAST_SUFFIX})$"
+)
+HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY = (
+    rf"(?=\s*(?:[,.!?;:\r\n]|$|(?:ve|ile)\s+{CURRENT_QUERY_CUE}\b))"
+)
+HISTORY_TURKISH_INTERNAL_DOT = re.compile(r"(?<=\w)\.(?=\w)|(?<=\b\w\.\w)\.(?=\s)")
+HISTORY_TURKISH_INTERNAL_COLON = re.compile(r"(?<=\d):(?=\d)")
+HISTORY_TURKISH_RELATIVE_PAST = re.compile(
+    r"\w+[dt][iu](?:g(?:im(?:iz)?|in(?:iz)?|i)|k(?:lar|ler)(?:im(?:iz)?|in(?:iz)?|i))"
+    r"(?:n?[dt][ae]n?|n?[aeiu]|n?[iu]n|y?[ae]|y?[iu]|y?l[ae])?"
+)
+HISTORY_TURKISH_COUNTERFACTUAL = re.compile(
+    r"(?:olsa(?:m|n|k|niz|lar)?|\w+s[ae]ydi(?:m|n|k|niz|lar|ler)?)"
+)
+HISTORY_TURKISH_RELATIVE_QUESTION = r"hangi(?:si|leri)(?:dir)?"
+HISTORY_TURKISH_RETROSPECTIVE_ENDING = (
+    rf"(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi|{HISTORY_TURKISH_RELATIVE_QUESTION})"
+)
+HISTORY_TURKISH_RETROSPECTIVE_QUERY = re.compile(
+    rf"(?ix)\b(?:daha\s+once|onceden)\b"
+    # Dots inside identifiers/versions and dotted initials are not clause ends.
+    rf"(?:[^.!?;:\r\n]|{HISTORY_TURKISH_INTERNAL_DOT.pattern}|{HISTORY_TURKISH_INTERNAL_COLON.pattern})*?\s+"
+    rf"{HISTORY_TURKISH_RETROSPECTIVE_ENDING}\b{HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY}"
+)
+HISTORY_TURKISH_RETROSPECTIVE_END = re.compile(
+    rf"(?ix)\b{HISTORY_TURKISH_RETROSPECTIVE_ENDING}\b{HISTORY_TURKISH_RETROSPECTIVE_BOUNDARY}"
+)
+HISTORY_TURKISH_PURPOSE = re.compile(r"\b(?:daha\s+once|onceden)\s+\w+m[ae]k\s+icin\b")
+HISTORY_TURKISH_DECISION_AORIST = re.compile(
+    rf"(?:secer|eder|gorur|verir|benimser|kararlastirir){HISTORY_TURKISH_PAST_SUFFIX}\b"
+)
+HISTORY_TURKISH_CURRENT_SELECTION_OBJECT = re.compile(
+    rf"\b(?P<current>{CURRENT_QUERY_CUE})\s+(?:\w+\s+)?(?P<relative>\w+)\s+"
+    rf"(?P<which>hangi\w*)\s+sec\w*{HISTORY_TURKISH_PAST_SUFFIX}\b"
+)
+HISTORY_TURKISH_CURRENT_DIRECT_OBJECT = re.compile(
+    rf"\b(?P<current>guncel|aktif)\s+\w+[iu]\s+sec\w*{HISTORY_TURKISH_PAST_SUFFIX}\b"
 )
 HISTORY_CHANGE_TAIL = (
     rf"(?:\s*(?:[?!.,;:]|$)|\s+{HISTORY_CHANGE_TEMPORAL}\b"
@@ -1537,6 +1594,192 @@ def _has_history_context(query: str) -> bool:
     return False
 
 
+def _retrospective_question_terms(normalized: str) -> frozenset[str]:
+    return frozenset(
+        term for term in re.findall(r"\w+", normalized)
+        if term in {"neydi", "nasil", "niye", "nicin"}
+        or re.fullmatch(HISTORY_TURKISH_RELATIVE_QUESTION, term)
+        or re.fullmatch(HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY, term)
+        or any(term == root or _matches_history_inflection(term, root) for root in ("hangi", "ne", "kim"))
+    )
+
+
+def _current_selection_object_spans(normalized: str) -> set[tuple[int, int]]:
+    # Participial selection objects and an adjacent "active/current X we chose"
+    # qualify the past selection, rather than introducing a current request.
+    spans = {
+        match.span("current")
+        for match in HISTORY_TURKISH_CURRENT_SELECTION_OBJECT.finditer(normalized)
+        if match["relative"].endswith(("dan", "den"))
+        and re.search(r"[dt][iu][kg]", match["relative"])
+        and _retrospective_question_terms(match["which"])
+    }
+    spans.update(match.span("current") for match in HISTORY_TURKISH_CURRENT_DIRECT_OBJECT.finditer(normalized))
+    return spans
+
+
+def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
+    normalized = _unquoted_request(normalized, preserve_positions=True)
+    starts = [match.start() for match in re.finditer(r"\b(?:daha\s+once|onceden)\b", normalized)]
+    if not starts:
+        return []
+    purpose_starts = {start for start in starts if HISTORY_TURKISH_PURPOSE.match(normalized, start)}
+    endings = list(HISTORY_TURKISH_RETROSPECTIVE_END.finditer(normalized))
+    predicate_ends = [ending.end() for ending in endings]
+    whitespace = re.compile(r"\s*")
+    following = {end: whitespace.match(normalized, end).end() for end in predicate_ends}
+    related_current = _current_selection_object_spans(normalized)
+    current_boundaries = []
+    for connector in re.finditer(
+        rf"(?:\b(?:ve|ile)\b\s+|[,.!?;:\r\n]\s*)(?P<current>{CURRENT_QUERY_CUE})\b", normalized,
+    ):
+        if connector.span("current") in related_current:
+            continue
+        previous = bisect_right(predicate_ends, connector.start()) - 1
+        # A coordinated adjective is not a new clause. Require a preceding
+        # predicate, immediately followed by this connector.
+        if previous >= 0 and following[predicate_ends[previous]] == connector.start():
+            current_boundaries.append(connector.start())
+    clause_ends = [
+        mark.start() for mark in re.finditer(r"[.!?;:\r\n]", normalized)
+        if not HISTORY_TURKISH_INTERNAL_DOT.match(normalized, mark.start())
+        and not HISTORY_TURKISH_INTERNAL_COLON.match(normalized, mark.start())
+    ]
+    words = list(re.finditer(r"\S+", normalized))
+    word_starts = [word.start() for word in words]
+    lexical_words = list(re.finditer(r"\w+", normalized))
+    lexical_starts = [word.start() for word in lexical_words]
+    relative_positions = [
+        word.start() for word in lexical_words if HISTORY_TURKISH_RELATIVE_PAST.fullmatch(word.group())
+    ]
+    counterfactual_positions = [
+        word.start() for word in lexical_words if HISTORY_TURKISH_COUNTERFACTUAL.fullmatch(word.group())
+    ]
+    question_positions = [
+        word.start() for word in lexical_words if _retrospective_question_terms(word.group())
+    ]
+    choice_questions: dict[int, int] = {}
+    which_start = -1
+    for word in words:
+        term = word.group()
+        if term == "hangi" or _matches_history_inflection(term, "hangi"):
+            which_start = word.start()
+        if any(term == root or _matches_history_inflection(term, root) for root in ("secenek", "seceneg")):
+            choice_questions[word.end()] = which_start
+            which_start = -1  # Bind each question to its first choice head.
+    auxiliary = re.compile(rf"\b(?:{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY}|neydi)$")
+    accepted: dict[int, re.Match[str]] = {}
+    for ending in endings:
+        index = bisect_right(starts, ending.start()) - 1
+        if index < 0 or starts[index] in accepted:
+            continue
+        start = starts[index]
+        conditional = bisect_left(counterfactual_positions, ending.start()) - 1
+        if (
+            HISTORY_TURKISH_DECISION_AORIST.match(ending.group())
+            and (
+                start in purpose_starts
+                or (conditional >= 0 and counterfactual_positions[conditional] >= start)
+            )
+        ):
+            continue  # Explicit hypothetical choices are advice, not recalled decisions.
+        clause_end = bisect_left(clause_ends, start)
+        if clause_end < len(clause_ends) and clause_ends[clause_end] < ending.start():
+            continue
+        boundary = bisect_left(current_boundaries, start)
+        if boundary < len(current_boundaries) and current_boundaries[boundary] < ending.start():
+            continue
+        if not normalized[ending.start() - 1:ending.start()].isspace():
+            continue
+        after = following[ending.end()]
+        is_question = normalized[after:after + 1] == "?" or auxiliary.search(ending.group()) is not None
+        if re.fullmatch(HISTORY_TURKISH_RELATIVE_QUESTION, ending.group()):
+            relative = bisect_left(relative_positions, ending.start()) - 1
+            if relative < 0 or relative_positions[relative] < start:
+                continue
+            is_question = True
+        if not is_question:
+            # Decision predicates need at most the previous lexical word.
+            local = max(start, lexical_starts[max(0, bisect_left(lexical_starts, ending.start()) - 1)])
+            decision = HISTORY_TURKISH_DECISION_PAST.search(normalized[local:ending.end()])
+            if decision is None:
+                continue
+            prefix_end = local + decision.start()
+            count = bisect_left(word_starts, prefix_end)
+            if count == 0:
+                continue
+            prefix_start = max(start, word_starts[max(0, count - 2)])
+            question = bisect_left(question_positions, prefix_end) - 1
+            is_question = question >= 0 and question_positions[question] >= prefix_start
+            last = words[count - 1]
+            if last.end() <= prefix_end and choice_questions.get(last.end(), -1) >= start:
+                is_question = True
+        if not is_question:
+            continue
+        # Only a qualifying predicate rescans its clause; rejected candidates
+        # use indexed positions, including the modified-choice question path.
+        match = HISTORY_TURKISH_RETROSPECTIVE_QUERY.fullmatch(normalized, start, ending.end())
+        if match is not None:
+            accepted[start] = match
+    return list(accepted.values())
+
+
+def _retrospective_topic_cue_terms(query: str) -> frozenset[str]:
+    cue_terms: set[str] = set()
+    normalized = _normalize(query)
+    for match in _retrospective_question_matches(normalized):
+        retrospective = match.group()
+        marker = re.match(r"\b(?:daha\s+once|onceden)\b", retrospective)
+        if marker:
+            cue_terms.update(_tokens(marker.group()))
+        for reference in re.finditer(r"\b(?:bu\s+konuda|bununla\s+ilgili)\b", retrospective):
+            cue_terms.update(_tokens(reference.group()))
+        past = re.search(rf"\b{HISTORY_TURKISH_RETROSPECTIVE_PAST}\b$", retrospective)
+        # An arbitrary action is the subject of the question, not boilerplate.
+        # Remove only established decision predicates and the generic good/best comparison.
+        scaffold = re.search(
+            rf"\b(?:karar\w*\s+ver|tercih\s+(?:et|ed)|uygun\s+gor|sec|benimse|kararlastir)"
+            rf"\w*{HISTORY_TURKISH_PAST_SUFFIX}(?:\s+{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY})?$",
+            retrospective,
+        )
+        generic_comparison = past and re.fullmatch(rf"iyi(?:y{HISTORY_TURKISH_PAST_SUFFIX})", past.group())
+        if past and (scaffold or generic_comparison):
+            cue_terms.update(_tokens(past.group()))
+        question_terms = _retrospective_question_terms(retrospective)
+        cue_terms.update(question_terms)
+        if question_terms:
+            cue_terms.update(
+                term
+                for term in _tokens(retrospective)
+                if term in HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS
+                or any(term == root or _matches_history_inflection(term, root) for root in ("secenek", "seceneg"))
+            )
+        decision = re.search(
+            rf"\b(?P<decision>karar\w*)\b(?=\s+(?:{HISTORY_TURKISH_RETROSPECTIVE_PAST}|neydi)\b)",
+            retrospective,
+        )
+        if decision:
+            cue_terms.add(decision.group("decision"))
+        if past and past.group().startswith(("et", "ed")) and re.search(r"\btercih\s*$", retrospective[:past.start()]):
+            cue_terms.add("tercih")
+        if re.search(r"\bneydi\b", retrospective):
+            cue_terms.add("neydi")
+    return frozenset(cue_terms)
+
+
+def _current_cue_spans_outside_retrospective(normalized: str) -> tuple[tuple[int, int], ...]:
+    history = tuple(match.span() for match in _retrospective_question_matches(normalized))
+    history_starts = tuple(start for start, _end in history)
+    related = _current_selection_object_spans(normalized)
+    spans: list[tuple[int, int]] = []
+    for cue in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized):
+        index = bisect_right(history_starts, cue.start()) - 1
+        if cue.span() in related or (index >= 0 and cue.end() <= history[index][1]):
+            continue
+        spans.append(cue.span())
+    return tuple(spans)
+
+
 def _has_history_query_cues(query_terms: frozenset[str], query: str = "") -> bool:
     # ponytail: `tarih` alone is ambiguous date/history wording; explicit history cues widen recall.
     history_terms = query_terms & HISTORY_QUERY_TERMS
@@ -1555,12 +1798,16 @@ def _has_history_query_cues(query_terms: frozenset[str], query: str = "") -> boo
     has_turkish_nominal_change = bool(
         query and HISTORY_TURKISH_NOMINAL_CHANGE_QUERY.search(_normalize(query))
     )
+    has_turkish_retrospective = bool(
+        query and _retrospective_question_matches(_normalize(query))
+    )
     unambiguous_history_terms = history_terms - {"before", "past", "previous", "onceki", "tarih"}
     if (
         has_inflected_history
         or has_retrospective_change
         or has_nominal_change
         or has_turkish_nominal_change
+        or has_turkish_retrospective
         or unambiguous_history_terms
     ):
         return True
@@ -1793,9 +2040,19 @@ def _split_selection_exclusion(query: str) -> tuple[str, str, bool, bool] | None
 
 
 def _split_current_history_query(query: str) -> tuple[str, str] | None:
-    if not re.search(r"(?i)\b(?:current|güncel|guncel|latest|active|aktif)\b", query):
+    operative_query = _unquoted_request(query, preserve_positions=True)
+    if not re.search(r"(?i)\b(?:current|güncel|guncel|latest|active|aktif)\b", operative_query):
         return None
-    raw_connectors = tuple(CURRENT_HISTORY_CONNECTOR.finditer(query))
+    # Keep terminal punctuation in its question; internal technical dots are not boundaries.
+    sentence_boundaries = (
+        match for match in re.finditer(r"(?<=[.!?])\s+", query)
+        if operative_query[match.start() - 1] in ".!?"
+        and not HISTORY_TURKISH_INTERNAL_DOT.match(operative_query, match.start() - 1)
+    )
+    raw_connectors = tuple(sorted(
+        [*CURRENT_HISTORY_CONNECTOR.finditer(operative_query), *sentence_boundaries],
+        key=lambda match: match.start(),
+    ))
     if not raw_connectors:
         return None
     normalized_parts: list[str] = []
@@ -1817,11 +2074,8 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
         normalized_cursor += len(normalized_connector)
         raw_cursor = connector.end()
     normalized_parts.append(_normalize(query[raw_cursor:]))
-    normalized = "".join(normalized_parts)
-    current_spans = tuple(
-        (match.start(), match.end())
-        for match in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized)
-    )
+    normalized = _unquoted_request("".join(normalized_parts), preserve_positions=True)
+    current_spans = _current_cue_spans_outside_retrospective(normalized)
     if not current_spans:
         return None
     connector_starts = tuple(start for start, _end, _raw_start, _raw_end in connector_spans)
@@ -1860,6 +2114,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
         HISTORY_TURKISH_NOMINAL_CHANGE_QUERY,
     ):
         history_spans.update((match.start(), match.end()) for match in pattern.finditer(normalized))
+    history_spans.update((match.start(), match.end()) for match in _retrospective_question_matches(normalized))
     date_history_spans = {
         (reference.start, reference.end)
         for reference in _date_references(normalized)
@@ -1916,8 +2171,8 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     right = query[connector_end:].strip(" ,;:()[]")
     left_terms = _retrieval_terms(left)
     right_terms = _retrieval_terms(right)
-    left_current = bool(left_terms & CURRENT_QUERY_TERMS)
-    right_current = bool(right_terms & CURRENT_QUERY_TERMS)
+    left_current = _has_independent_current_cue(left)
+    right_current = _has_independent_current_cue(right)
     left_history = _is_history_query(left_terms, left)
     right_history = _is_history_query(right_terms, right)
     if left_current and right_history and not right_current and not left_history:
@@ -1931,7 +2186,17 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     }
 
     def topic_terms(scope: str) -> list[str]:
+        generic = re.fullmatch(rf"{CURRENT_QUERY_CUE}\s+(\w+)\s+(\w+)[.!?]?", _normalize(scope))
+        if (
+            generic
+            and (generic[1].startswith("karar")
+                 or any(generic[1] == root or _matches_history_inflection(generic[1], root)
+                        for root in ("secenek", "seceneg")))
+            and (generic[2] == "nedir" or _retrospective_question_terms(generic[2]))
+        ):
+            return []
         scope_terms = _retrieval_terms(scope)
+        retrospective_cue_terms = _retrospective_topic_cue_terms(scope)
         terms = []
         for match in re.finditer(r"(?<!\w)[\w]+(?!\w)", scope):
             raw_terms = _tokens(match[0])
@@ -1943,6 +2208,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
                 and term not in scope_connector_terms
                 and term not in SCOPE_COMMAND_TERMS
                 and not term.isdigit()
+                and term not in retrospective_cue_terms
                 and not any(_matches_history_inflection(term, root) for root in HISTORY_QUERY_INFLECTION_ROOTS)
                 for term in raw_terms
             ):
@@ -1955,7 +2221,7 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
     if current_topic_terms and not history_topic_terms:
         history_scope = f"{history_scope} {' '.join(current_topic_terms)}"
         history_terms = _retrieval_terms(history_scope)
-        if history_terms & CURRENT_QUERY_TERMS or not _is_history_query(history_terms, history_scope):
+        if _has_independent_current_cue(history_scope) or not _is_history_query(history_terms, history_scope):
             return None
     elif history_topic_terms and not current_topic_terms:
         current_scope = f"{current_scope} {' '.join(history_topic_terms)}"
@@ -1968,11 +2234,8 @@ def _split_current_history_query(query: str) -> tuple[str, str] | None:
 
 
 def _has_independent_current_cue(query: str) -> bool:
-    normalized = _normalize(query)
-    current_spans = tuple(
-        match.span()
-        for match in re.finditer(rf"\b{CURRENT_QUERY_CUE}\b", normalized)
-    )
+    normalized = _unquoted_request(_normalize(query), preserve_positions=True)
+    current_spans = _current_cue_spans_outside_retrospective(normalized)
     if not current_spans:
         return False
     related_current_spans = {
@@ -2196,6 +2459,9 @@ def _rank(
     vault_system_query = 'vault' in query_terms and bool(query_terms & {
         'sistem', 'sistemi', 'sisteminde', 'sisteminin', 'sistemindeki',
     })
+    # Determine scope above, then score the subject rather than question boilerplate.
+    topical_terms = query_terms - _retrospective_topic_cue_terms(query)
+    query_terms = topical_terms or query_terms
     eligible_entries = []
     for entry in entries:
         if (

@@ -616,8 +616,11 @@ class PersistentTurnReducer:
         )
 
 
-def _unquoted_request(text: str) -> str:
-    text = QUOTED_CONTENT.sub(' ', text)
+def _unquoted_request(text: str, *, preserve_positions: bool = False) -> str:
+    text = QUOTED_CONTENT.sub(
+        (lambda match: re.sub(r'[^\r\n]', ' ', match.group())) if preserve_positions else ' ',
+        text,
+    )
     output = list(text)
     start = None
     index = 0
@@ -639,7 +642,8 @@ def _unquoted_request(text: str) -> str:
                     index = end
                     continue
         index += 1
-    return ''.join(output).strip()
+    result = ''.join(output)
+    return result if preserve_positions else result.strip()
 
 
 def _folded_request(text: str) -> str:
