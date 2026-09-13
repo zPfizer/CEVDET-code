@@ -28,8 +28,9 @@ HTML_START_TAG = re.compile(
     r"(?:\"[^\"]*\"|'[^']*'|[^ \t\r\n\f\"'=<>`]+))?"
     r")*[ \t\r\n\f]*/?>"
 )
+HTML_END_TAG_NAME = re.compile(r'</\s*(?P<tag>[A-Za-z][A-Za-z0-9-]*)\b')
+HTML_END_TAG = re.compile(r'</[A-Za-z][A-Za-z0-9-]*[ \t\r\n\f]*>')
 HTML_LITERAL_TAGS = frozenset({"pre", "script", "style", "textarea"})
-INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
 LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|[0-9]{1,9}[.)])(?P<gap>[ \t]+|$)"
 )
@@ -324,16 +325,17 @@ def _crosses_inline_block(text: str, start: int, end: int) -> bool:
     return False
 
 
-def _blank_invalid_html_openers(
+def _blank_invalid_html_tags(
     parser_text: list[str], text: str, tags: frozenset[str]
 ) -> None:
     protected_tags = tags | HTML_LITERAL_TAGS
     for match in HTML_TAG.finditer(text):
         raw = match.group(0)
-        name = HTML_START_TAG_NAME.match(raw)
+        closing = raw.startswith('</')
+        name = (HTML_END_TAG_NAME if closing else HTML_START_TAG_NAME).match(raw)
         if name is None or name.group("tag").casefold() not in protected_tags:
             continue
-        if HTML_START_TAG.fullmatch(raw) is None:
+        if (HTML_END_TAG if closing else HTML_START_TAG).fullmatch(raw) is None:
             _blank(parser_text, match.start(), match.end())
 
 
@@ -375,7 +377,7 @@ def _blank_inline_html_elements(
     for start, end in metadata_spans:
         _blank(parser_text, start, end)
     parser_input = "".join(parser_text)
-    _blank_invalid_html_openers(parser_text, parser_input, tags)
+    _blank_invalid_html_tags(parser_text, parser_input, tags)
     for match in HTML_TAG.finditer(parser_input):
         if is_escaped(text, match.start()):
             parser_text[match.start()] = ' '
@@ -601,7 +603,8 @@ def _container_present(
 
 
 def _is_paragraph_line(content: str) -> bool:
-    if not content.strip() or INDENTED_CODE_LINE.match(content):
+    indentation = _indent_columns(content[:len(content) - len(content.lstrip(' \t'))])
+    if not content.strip() or indentation >= 4:
         return False
     if _fence_parts(content) is not None:
         return False
@@ -742,7 +745,7 @@ def markdown_body(
             and _list_content_indent(indented_list_item)[1] > 4
         )
         indented_code = (
-            INDENTED_CODE_LINE.match(indented_content) is not None
+            indentation >= 4
             or excessive_list_gap
         )
         if indented_code:

@@ -382,6 +382,32 @@ class UserEvidenceTests(unittest.TestCase):
                 self.assertEqual(bool(output['Alınan Kararlar']), trusted)
                 self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
 
+    def test_mixed_space_tab_code_indentation_cannot_create_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for indent in (' \t', '  \t', '   \t'):
+            for lead, trusted in (('', False), ('Paragraph\n', True), ('Paragraph\n\n', False)):
+                with self.subTest(indent=indent, lead=lead):
+                    output = evidence.bind_evidence(sections(lead + indent + cited), [('user', quote)], STAMP)
+                    self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                    self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
+    def test_invalid_inline_html_closer_cannot_expose_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for tag in ('code', 'pre', 'script', 'style', 'textarea'):
+            for closer, trusted in (
+                ('</' + tag + ' foo>', False),
+                ('</' + tag + '/>', False),
+                ('</ ' + tag + '>', False),
+                ('</' + tag.upper() + ' \t>', True),
+            ):
+                with self.subTest(tag=tag, closer=closer):
+                    body = 'prefix <' + tag + '>example' + closer + '\n' + cited
+                    output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                    self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                    self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
     def test_ordered_list_after_blockquote_is_real_source_evidence(self):
         quote = 'Bundan sonra kısa yanıt ver.'
         body = '> quoted lead\n2. ' + decision('Kısa yanıt tercihi.', quote).removeprefix('- ')
