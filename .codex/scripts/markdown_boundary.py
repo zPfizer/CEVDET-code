@@ -118,9 +118,9 @@ def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
         return cursor
 
     def title_start_after_definition(
-        definition: re.Match[str],
+        definition: re.Match[str], offset: int,
     ) -> tuple[int, str] | None:
-        cursor = definition.end('label') + 2
+        cursor = offset + definition.end('label') + 2
         cursor = skip_hspace(cursor)
         if text.startswith('\r\n', cursor) or text.startswith('\n', cursor):
             after_definition = newline_after(cursor)
@@ -170,16 +170,25 @@ def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
             cursor = next_start
         return None
 
-    for definition in REFERENCE_DEFINITION.finditer(text):
-        title = title_start_after_definition(definition)
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        logical_line, _containers = _container_prefix(line.rstrip('\r\n'))
+        logical_offset = offset + len(line.rstrip('\r\n')) - len(logical_line)
+        offset += len(line)
+        definition = REFERENCE_DEFINITION.match(logical_line)
+        if definition is None:
+            continue
+        start = logical_offset + definition.start()
+        end = logical_offset + definition.end()
+        title = title_start_after_definition(definition, logical_offset)
         if title is None:
-            spans.append((definition.start(), definition.end()))
+            spans.append((start, end))
             continue
         span_end = title_end(*title)
         if span_end is None:
-            spans.append((definition.start(), definition.end()))
+            spans.append((start, end))
         else:
-            spans.append((definition.start(), span_end))
+            spans.append((start, span_end))
     return tuple(spans)
 
 

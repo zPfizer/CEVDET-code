@@ -382,6 +382,20 @@ class UserEvidenceTests(unittest.TestCase):
                 self.assertEqual(bool(output['Alınan Kararlar']), trusted)
                 self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
 
+    def test_list_first_reference_definition_cannot_create_evidence(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote)
+        for prefix in ('- ', '1. ', '1.    ', '- - '):
+            for separator in (' ', '\n      '):
+                with self.subTest(prefix=prefix, separator=separator):
+                    body = prefix + "[label]: /url" + separator + "'" + cited + "'"
+                    output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                    self.assertEqual(output['Alınan Kararlar'], '')
+                    self.assertIsNone(evidence.EVIDENCE.search(output['Önemli Konuşmalar']))
+        body = "- [label]: /url 'title'\n\n" + cited
+        output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+        self.assertIn('Kısa yanıt tercihi.', output['Alınan Kararlar'])
+
     def test_mixed_space_tab_code_indentation_cannot_create_evidence(self):
         quote = 'Bundan sonra kısa yanıt ver.'
         cited = decision('Kısa yanıt tercihi.', quote)
