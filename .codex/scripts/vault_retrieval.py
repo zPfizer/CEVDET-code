@@ -1577,6 +1577,19 @@ def _retrospective_question_terms(normalized: str) -> frozenset[str]:
     )
 
 
+def _modified_choice_question(prefix: list[str]) -> bool:
+    choice_heads = [
+        index for index, term in enumerate(prefix)
+        if any(term == root or _matches_history_inflection(term, root) for root in ("secenek", "seceneg"))
+    ]
+    if not choice_heads or choice_heads[-1] != len(prefix) - 1:
+        return False
+    # Bind `hangi` to its first choice head, not a later object after an
+    # embedded explanation such as `hangi seçeneğin ... bu seçeneği`.
+    start = choice_heads[-2] + 1 if len(choice_heads) > 1 else 0
+    return any(term == "hangi" or _matches_history_inflection(term, "hangi") for term in prefix[start:-1])
+
+
 def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
     normalized = _unquoted_request(normalized, preserve_positions=True)
     starts = [match.start() for match in re.finditer(r"\b(?:daha\s+once|onceden)\b", normalized)]
@@ -1600,9 +1613,13 @@ def _retrospective_question_matches(normalized: str) -> list[re.Match[str]]:
             or re.search(rf"\b(?:{HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY}|neydi)$", match.group())
             or (
                 (decision := HISTORY_TURKISH_DECISION_PAST.search(match.group()))
-                # Direct wh + optional object + decision predicate. Remote wh-words
-                # inside a background explanation are not question evidence.
-                and _retrospective_question_terms(" ".join(match.group()[:decision.start()].split()[-2:]))
+                and (prefix := match.group()[:decision.start()].split())
+                and (
+                    _retrospective_question_terms(" ".join(prefix[-2:]))
+                    # The existing choice family also allows modifiers between
+                    # `hangi` and its object, without an arbitrary word limit.
+                    or _modified_choice_question(prefix)
+                )
             )
         ):
             accepted[start] = match
