@@ -413,18 +413,31 @@ class ProfileGuardTests(unittest.TestCase):
 
             self.assertEqual(issues, ['profile-link-traversal'])
 
-    def test_malformed_html_code_openers_keep_links_visible(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            issues: list[str] = []
+    def test_malformed_html_openers_do_not_change_following_visibility(self) -> None:
+        for example, expected in (
+            ('<code foo=>[[../secret]]</code>', ['profile-link-traversal']),
+            ('prefix <script foo=>\n<code>[[../secret]]</code>', []),
+        ):
+            with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                issues: list[str] = []
 
-            profile_guard._check_links(
-                '<code foo=>[[../secret]]</code>',
-                root,
-                issues,
-            )
+                profile_guard._check_links(example, root, issues)
 
-        self.assertEqual(issues, ['profile-link-traversal'])
+            self.assertEqual(issues, expected)
+
+    def test_valid_html_attribute_spacing_keeps_code_links_masked(self) -> None:
+        for example in (
+            '<code foo= "">[[../secret]]</code>',
+            '<code title="x a= >">[[../secret]]</code>',
+        ):
+            with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                issues: list[str] = []
+
+                profile_guard._check_links(example, root, issues)
+
+            self.assertEqual(issues, [])
 
     def test_broken_and_outside_links_are_rejected_without_echoing_content(self) -> None:
         broken = PROFILE_TEXT.replace("tercih-kisa#Kayıtlar", "kayip#Kayıtlar")

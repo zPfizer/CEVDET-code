@@ -18,9 +18,6 @@ HTML_LITERAL_CLOSE = re.compile(
     re.IGNORECASE,
 )
 HTML_TAG = re.compile(r'<(?:[^"\'>]|"[^"]*"|\'[^\']*\')*>', re.DOTALL)
-HTML_EMPTY_UNQUOTED_ATTRIBUTE = re.compile(
-    r'(?:^|[ \t\r\n])[^ \t\r\n=/>]+[ \t\r\n]*=[ \t\r\n]*(?=[ \t/>]|$)'
-)
 HTML_LITERAL_TAGS = frozenset({"pre", "script", "style", "textarea"})
 INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
 LIST_ITEM = re.compile(
@@ -274,6 +271,71 @@ def _crosses_inline_block(text: str, start: int, end: int) -> bool:
     return False
 
 
+def _html_start_tag(raw: str) -> tuple[str, int] | None:
+    if not raw.startswith("<") or len(raw) < 3 or raw[1] in "/!?":
+        return None
+    cursor = 1
+    while cursor < len(raw) and raw[cursor] not in " \t\r\n\f/>":
+        cursor += 1
+    if cursor == 1:
+        return None
+    return raw[1:cursor].casefold(), cursor
+
+
+def _has_empty_unquoted_attribute(raw: str, cursor: int) -> bool:
+    limit = len(raw) - 1
+    whitespace = " \t\r\n\f"
+    while cursor < limit:
+        while cursor < limit and raw[cursor] in whitespace:
+            cursor += 1
+        if cursor >= limit or raw[cursor] == "/":
+            return False
+        attribute_start = cursor
+        while (
+            cursor < limit
+            and raw[cursor] not in whitespace + "/=>"
+        ):
+            cursor += 1
+        if cursor == attribute_start:
+            return False
+        while cursor < limit and raw[cursor] in whitespace:
+            cursor += 1
+        if cursor >= limit or raw[cursor] != "=":
+            continue
+        cursor += 1
+        while cursor < limit and raw[cursor] in whitespace:
+            cursor += 1
+        if cursor >= limit:
+            return True
+        if raw[cursor] in "\"'":
+            quote = raw[cursor]
+            cursor += 1
+            while cursor < limit and raw[cursor] != quote:
+                cursor += 1
+            if cursor >= limit:
+                return True
+            cursor += 1
+            continue
+        value_start = cursor
+        while cursor < limit and raw[cursor] not in whitespace:
+            cursor += 1
+        if cursor == value_start:
+            return True
+    return False
+
+
+def _blank_invalid_html_openers(
+    parser_text: list[str], text: str, tags: frozenset[str]
+) -> None:
+    protected_tags = tags | HTML_LITERAL_TAGS
+    for match in HTML_TAG.finditer(text):
+        start_tag = _html_start_tag(match.group(0))
+        if start_tag is None or start_tag[0] not in protected_tags:
+            continue
+        if _has_empty_unquoted_attribute(match.group(0), start_tag[1]):
+            _blank(parser_text, match.start(), match.end())
+
+
 def _blank_inline_code(chars: list[str], text: str) -> None:
     index = 0
     while index < len(text):
@@ -311,6 +373,8 @@ def _blank_inline_html_elements(
     parser_text = list(text)
     for start, end in metadata_spans:
         _blank(parser_text, start, end)
+    parser_input = "".join(parser_text)
+    _blank_invalid_html_openers(parser_text, parser_input, tags)
     parser_input = ''.join(parser_text)
 
     class ElementParser(HTMLParser):
@@ -330,9 +394,6 @@ def _blank_inline_html_elements(
         def handle_starttag(self, tag: str, _attrs: list[tuple[str, str | None]]) -> None:
             folded = tag.casefold()
             if folded not in tags:
-                return
-            raw = self.get_starttag_text()
-            if raw is None or HTML_EMPTY_UNQUOTED_ATTRIBUTE.search(raw):
                 return
             start = self._offset()
             if not is_escaped(text, start):
