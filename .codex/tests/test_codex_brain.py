@@ -4456,7 +4456,6 @@ Analysis Lifecycle yalnız branded updateImpactPreviewId tüketir.
         self.assertLess(elapsed, 0.4)
         self.assertEqual(observed_deadlines, [deadline])
         self.assertIn("[Vault Arama Süresi Doldu]", context)
-        self.assertIn("kuyruğa alınmadı", context)
         self.assertTrue(getattr(context, "deadline_expired", False))
 
     def test_user_prompt_profile_worker_timeout_keeps_structured_timeout(self) -> None:
@@ -4482,8 +4481,39 @@ Analysis Lifecycle yalnız branded updateImpactPreviewId tüketir.
                 )
 
         self.assertIn("[Vault Arama Süresi Doldu]", context)
-        self.assertIn("kuyruğa alınmadı", context)
         self.assertTrue(getattr(context, "deadline_expired", False))
+
+    def test_expired_plain_user_prompt_failure_surfaces_capture_warning(self) -> None:
+        payload = {
+            "session_id": "preference-deadline",
+            "cwd": str(CODEX_DIR.parent),
+            "prompt": "Kararım: haftalık planı pazartesi sabahı yapacağım.",
+            "transcript_path": str(CODEX_DIR / "tests" / "fixture.jsonl"),
+        }
+        deadline = time.monotonic() - 1
+
+        with (
+            mock.patch.object(hook, "_hook_deadline", return_value=deadline),
+            mock.patch.object(hook, "_validate_hook_scope"),
+            mock.patch.object(
+                hook,
+                "handle_user_prompt",
+                return_value="[Hafıza Tercihi Sorunu] Profil ve hafıza tercihleri denetlenemedi.",
+            ),
+            mock.patch.object(hook, "enqueue_flush") as enqueue,
+            mock.patch.object(hook, "record_hook_runtime"),
+            mock.patch.object(hook, "clear_hook_health"),
+            mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+            mock.patch.object(sys, "stdout", io.StringIO()) as stdout,
+        ):
+            exit_code = hook.main(["user-prompt"])
+
+        self.assertEqual(exit_code, 0)
+        enqueue.assert_not_called()
+        emitted = json.loads(stdout.getvalue())
+        context = emitted["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Hafıza Tercihi Sorunu", context)
+        self.assertIn("kuyruğa alınmadı", context)
 
     def test_user_prompt_telemetry_deadline_is_visible_and_structured(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

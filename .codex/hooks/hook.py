@@ -189,7 +189,7 @@ USER_PROMPT_CAPTURE_TIMEOUT_WARNING = (
 )
 USER_PROMPT_CAPTURE_SKIPPED_WARNING = (
     "[Hafıza Devamlılığı]\n"
-    "Profil yüklemesi ayrılan sürede tamamlanamadı; bu tur arka plan kaydı kuyruğa alınmadı. "
+    "Bu turda bağlam veya arka plan kaydı için ayrılan süre doldu; kayıt kuyruğa alınmadı. "
     "Kaydedildi varsayma; eksikliği açıkça bildir."
 )
 
@@ -776,9 +776,7 @@ def handle_user_prompt(
                 context.append(MEMORY_READ_RULE)
     except (TimeoutError, WorkerDeliveryTimeout):
         return _UserPromptContext(
-            VAULT_RETRIEVAL_TIMEOUT_WARNING
-            + "\n\n"
-            + USER_PROMPT_CAPTURE_SKIPPED_WARNING,
+            VAULT_RETRIEVAL_TIMEOUT_WARNING,
             deadline_expired=True,
         )
     except (OSError, UnicodeError, ValueError):
@@ -1521,11 +1519,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 isinstance(emitted_context, _UserPromptContext)
                 and emitted_context.deadline_expired
             )
-            if deadline_context:
-                _emit_user_prompt_result(emitted_context or "")
-                response_emitted = True
             transcript_path = payload.get("transcript_path")
-            if (
+            capture_eligible = (
                 not response_emitted
                 and not is_stop_message(emitted_context)
                 and isinstance(prompt, str)
@@ -1536,12 +1531,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 and not is_session_only(STATE_DIR, session_id)
                 and not is_read_only_turn(STATE_DIR, session_id)
                 and isinstance(transcript_path, str)
-                and transcript_path
-                and (
-                    hook_deadline is None
-                    or timeout_for_deadline(hook_deadline) > 0
-                )
-            ):
+                and bool(transcript_path)
+            )
+            deadline_would_skip_capture = (
+                capture_eligible
+                and hook_deadline is not None
+                and timeout_for_deadline(hook_deadline) <= 0
+            )
+            if deadline_context or deadline_would_skip_capture:
+                if (
+                    capture_eligible
+                    and USER_PROMPT_CAPTURE_SKIPPED_WARNING
+                    not in (emitted_context or "")
+                ):
+                    emitted_context = _UserPromptContext(
+                        (emitted_context or "")
+                        + "\n\n"
+                        + USER_PROMPT_CAPTURE_SKIPPED_WARNING,
+                        deadline_expired=True,
+                    )
+                _emit_user_prompt_result(emitted_context or "")
+                response_emitted = True
+            elif capture_eligible:
                 enqueue_flush(payload, "precompact", deadline=hook_deadline)
         elif args.event == "pre-compact":
             session_id = payload.get("session_id")
