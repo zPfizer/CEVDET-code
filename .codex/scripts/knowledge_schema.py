@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -11,6 +11,7 @@ from markdown_boundary import (
     WIKILINK,
     is_escaped as _is_escaped,
     markdown_body as _markdown_body,
+    markdown_link_spans,
     wikilinks as _wikilinks,
 )
 from user_evidence import USER_ANCHOR, USER_LINK, proof_for_link
@@ -179,10 +180,19 @@ def wikilink_target(inner: str) -> str:
     return target.split("#", 1)[0].strip().replace("\\", "/")
 
 
+def _visible_wikilinks(text: str, *, mask_frontmatter: bool = True) -> Iterator[re.Match[str]]:
+    body = _markdown_body(text, mask_frontmatter=mask_frontmatter)
+    metadata = markdown_link_spans(body, include_labels=False)
+    return (
+        match for match in _wikilinks(body)
+        if not any(start < match.end() and match.start() < end for start, end in metadata)
+    )
+
+
 def _link_slugs(text: str) -> set[str]:
     return {
         target
-        for match in _wikilinks(_markdown_body(text))
+        for match in _visible_wikilinks(text)
         if (target := wikilink_target(match.group(1)))
     }
 
@@ -356,10 +366,9 @@ def source_link_details(text: str) -> str:
 
 
 def _source_links(text: str) -> set[str]:
-    body = _markdown_body(text)
     return {
         f"{source.group(1)}.md"
-        for match in _wikilinks(body)
+        for match in _visible_wikilinks(text)
         if (source := SOURCE_LINK.fullmatch(match.group(0))) is not None
     }
 
@@ -398,7 +407,7 @@ def _concept_related_ok(path: Path, text: str) -> bool:
     related = _section(text, CONCEPT_HEADINGS[2], CONCEPT_HEADINGS[3])
     return sum(
         1
-        for _ in _wikilinks(_markdown_body(related, mask_frontmatter=False))
+        for _ in _visible_wikilinks(related, mask_frontmatter=False)
     ) >= RELATED_LINKS_MIN
 
 

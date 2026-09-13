@@ -210,6 +210,45 @@ Bağ.
             )
         )
 
+    def test_reference_metadata_cannot_satisfy_derived_connection_sources(self):
+        for footer, accepted in (
+            ('[hidden]: [[daily/2026-09-01|Kaynak]]', False),
+            ('[hidden]: /url "[[daily/2026-09-01|Kaynak]]"', False),
+            ('[label](url "[[daily/2026-09-01|Kaynak]]")', False),
+            ('[[daily/2026-09-01|Kaynak]]', True),
+        ):
+            with self.subTest(footer=footer):
+                text = ('---\nschema: knowledge-v2\nsources: [2026-09-01.md]\n'
+                        'updated: 2026-09-01\n---\n## Kaynaklar\n\n' + footer)
+                issues = []
+                knowledge_schema._validate_derived_connection(
+                    Path('knowledge/connections/bir--iki.md'), text, None, issues
+                )
+                self.assertEqual(any(item.endswith(':source-links') for item in issues), not accepted)
+                if not accepted:
+                    normalized = knowledge_schema.normalize_source_links(text)
+                    self.assertIn(footer, normalized)
+                    issues = []
+                    knowledge_schema._validate_derived_connection(
+                        Path('knowledge/connections/bir--iki.md'), normalized, None, issues
+                    )
+                    self.assertFalse(any(item.endswith(':source-links') for item in issues))
+
+    def test_link_targets_ignore_metadata_and_preserve_visible_labels(self):
+        body = ('[hidden]: [[knowledge/concepts/hidden]]\n\n'
+                '[[knowledge/concepts/real]]\n'
+                '[label [[knowledge/concepts/label]]](url "[[knowledge/concepts/title]]")')
+        self.assertEqual(
+            knowledge_schema._link_slugs(body),
+            {'knowledge/concepts/real', 'knowledge/concepts/label'},
+        )
+        hidden_related = _concept().replace(
+            '- [[bir]] ilişkisi.\n- [[iki]] ilişkisi.',
+            '[one]: [[bir]]\n[two]: [[iki]]',
+        )
+        self.assertFalse(knowledge_schema._concept_related_ok(Path('ornek.md'), hidden_related))
+        self.assertTrue(knowledge_schema._concept_related_ok(Path('ornek.md'), _concept()))
+
     def test_connection_footer_is_repaired_but_extra_sources_are_not_silently_removed(self):
         from test_second_brain_acceptance import _write_derived_tree
         with tempfile.TemporaryDirectory() as temporary:

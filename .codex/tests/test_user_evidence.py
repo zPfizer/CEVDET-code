@@ -430,6 +430,16 @@ class UserEvidenceTests(unittest.TestCase):
                 self.assertEqual(bool(output['Alınan Kararlar']), trusted)
                 self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
 
+    def test_tab_indented_pseudoheading_cannot_split_inline_code(self):
+        quote = 'Bundan sonra kısa yanıt ver.'
+        cited = decision('Kısa yanıt tercihi.', quote).removeprefix('- ')
+        for indent, trusted in (('\t', False), (' \t', False), ('  \t', False), ('   ', True)):
+            with self.subTest(indent=indent):
+                body = '`open\n' + indent + '## ' + cited + '\n`'
+                output = evidence.bind_evidence(sections(body), [('user', quote)], STAMP)
+                self.assertEqual(bool(output['Alınan Kararlar']), trusted)
+                self.assertEqual(bool(evidence.EVIDENCE.search(output['Önemli Konuşmalar'])), trusted)
+
     def test_mixed_space_tab_code_indentation_cannot_create_evidence(self):
         quote = 'Bundan sonra kısa yanıt ver.'
         cited = decision('Kısa yanıt tercihi.', quote)

@@ -35,7 +35,7 @@ LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|[0-9]{1,9}[.)])(?P<gap>[ \t]+|$)"
 )
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
-ATX_HEADING_LINE = re.compile(r"^[ \t]{0,3}#{1,6}(?:[ \t]+|$)")
+ATX_HEADING_LINE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+|$)")
 THEMATIC_BREAK = re.compile(r'(?P<marker>[-*_])(?:[ \t]*(?P=marker)){2,}[ \t]*')
 REFERENCE_DEFINITION = re.compile(
     r'(?m)^[ \t]{0,3}\[(?P<label>(?:\\[^\r\n]|[^\]\\\r\n])+)\]:[^\r\n]*'
