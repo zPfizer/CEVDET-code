@@ -19,6 +19,7 @@ from graph_integrity import (  # noqa: E402
     graph_summary,
     normalize_connection_links,
 )
+from markdown_boundary import markdown_body  # noqa: E402
 from vault_corpus import vault_notes  # noqa: E402
 
 
@@ -44,7 +45,7 @@ class GraphIntegrityTests(unittest.TestCase):
         self.assertIn("text`", result.stdout)
         self.assertIn(DAILY_GRAPH_LINK, result.stdout)
 
-    def test_multiline_inline_code_cannot_supply_connection_heading(self) -> None:
+    def test_multiline_inline_code_does_not_hide_block_connection_heading(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             concepts = root / "knowledge" / "concepts"
@@ -61,12 +62,15 @@ class GraphIntegrityTests(unittest.TestCase):
             )
             connection.write_text(original, encoding="utf-8")
 
-            with self.assertRaisesRegex(
-                GraphPolicyError, "connection-heading-missing:alpha--beta.md"
-            ):
-                normalize_connection_links(root)
+            self.assertEqual(normalize_connection_links(root), 1)
+            updated = connection.read_text(encoding="utf-8")
+            self.assertIn("[[knowledge/concepts/alpha|alpha]]", updated)
+            self.assertIn("[[knowledge/concepts/beta|beta]]", updated)
 
-            self.assertEqual(connection.read_text(encoding="utf-8"), original)
+    def test_multiline_inline_code_does_not_hide_a_block_heading_link(self) -> None:
+        body = markdown_body("`\n## [[../secret]]\n`")
+
+        self.assertIn("[[../secret]]", body)
 
     def test_graph_summary_keeps_observable_property_wikilinks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

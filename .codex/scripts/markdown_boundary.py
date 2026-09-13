@@ -24,6 +24,7 @@ LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])(?P<gap>[ \t]+|$)"
 )
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
+ATX_HEADING_LINE = re.compile(r"^[ \t]{0,3}#{1,6}(?:[ \t]+|$)")
 REFERENCE_DEFINITION = re.compile(
     r'(?m)^[ \t]{0,3}\[[^\]\r\n]+\]:[^\r\n]*'
 )
@@ -250,6 +251,25 @@ def _fence_match(content: str) -> re.Match[str] | None:
     return match
 
 
+def _crosses_inline_block(text: str, start: int, end: int) -> bool:
+    opening_line = text.rfind('\n', 0, start) + 1
+    closing_line = text.rfind('\n', 0, end) + 1
+    if opening_line == closing_line:
+        return False
+    line_start = opening_line
+    while line_start <= closing_line:
+        line_end = text.find('\n', line_start)
+        if line_end < 0:
+            line_end = len(text)
+        line = text[line_start:line_end].rstrip('\r')
+        if not line.strip() or ATX_HEADING_LINE.match(line):
+            return True
+        if line_end >= len(text):
+            break
+        line_start = line_end + 1
+    return False
+
+
 def _blank_inline_code(chars: list[str], text: str) -> None:
     index = 0
     while index < len(text):
@@ -271,6 +291,9 @@ def _blank_inline_code(chars: list[str], text: str) -> None:
             break
         if close < 0:
             # An unmatched delimiter is ordinary text; advance past it.
+            index = delimiter_end
+            continue
+        if _crosses_inline_block(text, index, close):
             index = delimiter_end
             continue
         _blank(chars, index, close + len(delimiter))
@@ -511,7 +534,7 @@ def _is_paragraph_line(content: str) -> bool:
     stripped = content.lstrip(" \t")
     if stripped.startswith(">"):
         return False
-    if re.match(r"^#{1,6}(?:[ \t]+|$)", stripped):
+    if ATX_HEADING_LINE.match(content):
         return False
     if LIST_ITEM.match(content) is not None:
         return False
