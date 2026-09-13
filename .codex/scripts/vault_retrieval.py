@@ -684,7 +684,10 @@ def _source_snapshot(
         return None, None, None
     source_memory = memory if memory is not None else MemoryRead(vault_root, frozenset())
     try:
-        relative, text = source_memory.read_source(path)
+        if deadline is None:
+            relative, text = source_memory.read_source(path)
+        else:
+            relative, text = source_memory.read_source(path, deadline=deadline)
     except MemorySourceError:
         return None, None, None
     _check_deadline(deadline)
@@ -2704,7 +2707,13 @@ def _required_view_sources(
     selected: dict[str, VaultEntry] = {hit.entry.path: hit.entry for hit in hits}
     for hit in hits:
         _check_deadline(deadline)
-        _relative, text = memory.read_source(vault_root / hit.entry.path)
+        if deadline is None:
+            _relative, text = memory.read_source(vault_root / hit.entry.path)
+        else:
+            _relative, text = memory.read_source(
+                vault_root / hit.entry.path,
+                deadline=deadline,
+            )
         _check_deadline(deadline)
         if text is None:
             continue
@@ -2727,7 +2736,12 @@ def retrieve_vault_context_detailed(
     _check_deadline(deadline)
     if not _retrieval_terms(query):
         return VaultContextResult("skipped", "", 0, 0, (), max_chars)
-    with memory_read(vault_root) as memory:
+    memory_context = (
+        memory_read(vault_root)
+        if deadline is None
+        else memory_read(vault_root, deadline=deadline)
+    )
+    with memory_context as memory:
         _check_deadline(deadline)
         memory.check_knowledge_snapshot()
         # Route filtresi sorgu başına TEK geçiş: sonuç hem aday havuzu hem sayaç.
