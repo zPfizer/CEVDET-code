@@ -933,12 +933,19 @@ class DoctorTests(unittest.TestCase):
                 "reason": "turnend",
                 "event_iso": "2026-09-13T00:00:00+00:00",
             }
+            canonical_secret_tokens = {
+                "sk-proj-abc123secret",
+                "AKIAABCDEFGHIJKLMNOPQRSTUV",
+            }
             for field, value in (
                 ("prompt", "private prompt"),
                 ("message", "private message"),
                 ("unknown", "private value"),
                 ("continuation", "private prompt"),
                 ("continuation_reason", "private continuation reason"),
+                ("continuation_reason", "sk-proj-abc123secret"),
+                ("continuation_reason", "AKIAABCDEFGHIJKLMNOPQRSTUV"),
+                ("continuation", "ghp_abc123secretvalue"),
                 ("coverage", {"message": "private message"}),
                 ("continuation_reason", 7),
                 ("continuation_reason", "a" * 65),
@@ -946,6 +953,8 @@ class DoctorTests(unittest.TestCase):
                 ("coverage", {"api_key": "sk-proj-ABC123SECRET"}),
             ):
                 with self.subTest(field=field):
+                    if isinstance(value, str) and value in canonical_secret_tokens:
+                        self.assertTrue(memory_ledger.contains_secret(value))
                     path.write_text(
                         json.dumps({**payload, field: value}), encoding="utf-8"
                     )

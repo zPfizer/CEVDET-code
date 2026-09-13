@@ -53,7 +53,7 @@ from vault_corpus import (
     vault_notes,
 )
 from vault_retrieval import MAX_CACHE_BYTES, build_vault_map
-from memory_ledger import MemoryPreferenceError, memory_read
+from memory_ledger import MemoryPreferenceError, contains_secret, memory_read
 
 
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
@@ -712,6 +712,7 @@ def _is_current_hook_input_delivery(payload: object) -> bool:
     def is_token(value: object) -> bool:
         return (
             isinstance(value, str)
+            and not contains_secret(value)
             and re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{0,63}", value) is not None
         )
 
