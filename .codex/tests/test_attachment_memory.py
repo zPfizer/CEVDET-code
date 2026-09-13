@@ -486,6 +486,46 @@ class AttachmentMemoryTests(unittest.TestCase):
             self.assertEqual(list((root / attachment_memory.SOURCE_DIR).glob('*.md')), [])
             self.assertEqual(list(root.rglob('*.staging')), [])
 
+    def test_source_drift_does_not_delete_external_note_edit_on_rollback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            destination = root / attachment_memory._note_relative(
+                source.parent.name, attachment_memory._attachment_digest('Stable source.'),
+            )
+            real_replace = attachment_memory.replace_with_retry
+
+            def replace_then_edit(source_path: Path, destination_path: Path, **kwargs) -> None:
+                real_replace(source_path, destination_path, **kwargs)
+                destination_path.write_text(
+                    destination_path.read_text(encoding='utf-8') + '\nExternal revision.\n',
+                    encoding='utf-8',
+                )
+                replacement = source.with_name('replacement.txt')
+                replacement.write_text('Changed source.', encoding='utf-8')
+                replacement.replace(source)
+
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}), \
+                 mock.patch.object(
+                     attachment_memory,
+                     'replace_with_retry',
+                     side_effect=replace_then_edit,
+                 ):
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                    )
+
+            self.assertTrue(destination.is_file())
+            self.assertIn('External revision.', destination.read_text(encoding='utf-8'))
+
     def test_stale_note_staging_is_removed_before_retry(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

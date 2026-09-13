@@ -704,6 +704,21 @@ def _capture_one_core(
             raise ValueError('attachment-destination-link-rejected')
         with verified_publication():
             created_destination = False
+            created_destination_signature = None
+
+            def remove_created_destination() -> None:
+                if not created_destination or created_destination_signature is None:
+                    return
+                try:
+                    if (
+                        destination.is_symlink()
+                        or _source_signature(destination.lstat()) != created_destination_signature
+                    ):
+                        return
+                    destination.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
             if destination.exists():
                 if not destination.is_file():
                     raise ValueError('attachment-note-invalid')
@@ -726,14 +741,15 @@ def _capture_one_core(
                 try:
                     atomic_write_text(staging, rendered, newline='\n')
                     verify_source_snapshot()
+                    staging_signature = _source_signature(staging.lstat())
                     replace_with_retry(
                         staging, destination, before_replace=verify_source_snapshot,
                     )
                     created_destination = True
+                    created_destination_signature = staging_signature
                     verify_source_snapshot()
                 except Exception:
-                    if created_destination:
-                        destination.unlink(missing_ok=True)
+                    remove_created_destination()
                     raise
                 finally:
                     staging.unlink(missing_ok=True)
@@ -743,8 +759,7 @@ def _capture_one_core(
                 mapping = candidate
                 clear_source_changed_marker()
             except Exception:
-                if created_destination:
-                    destination.unlink(missing_ok=True)
+                remove_created_destination()
                 raise
         return destination.relative_to(vault_root).with_suffix('').as_posix(), summary
 
