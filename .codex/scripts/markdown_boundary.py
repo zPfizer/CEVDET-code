@@ -172,7 +172,9 @@ def _reference_definition_spans(text: str) -> tuple[tuple[int, int], ...]:
     return tuple(spans)
 
 
-def markdown_link_spans(text: str) -> tuple[tuple[int, int], ...]:
+def markdown_link_spans(
+    text: str, *, include_labels: bool = True
+) -> tuple[tuple[int, int], ...]:
     spans: list[tuple[int, int]] = []
     index = 0
     while index < len(text):
@@ -208,7 +210,8 @@ def markdown_link_spans(text: str) -> tuple[tuple[int, int], ...]:
             elif text[cursor] == ')':
                 depth -= 1
                 if depth == 0:
-                    spans.append((index, cursor + 1))
+                    start = index if include_labels else label_end + 1
+                    spans.append((start, cursor + 1))
                     index = cursor + 1
                     break
             cursor += 1
@@ -277,7 +280,11 @@ def _blank_inline_code(chars: list[str], text: str) -> None:
 def _blank_inline_html_elements(
     chars: list[str], text: str, tags: frozenset[str]
 ) -> None:
-    metadata_spans = markdown_link_spans(text)
+    metadata_spans = markdown_link_spans(text, include_labels=False)
+    parser_text = list(text)
+    for start, end in metadata_spans:
+        _blank(parser_text, start, end)
+    parser_input = ''.join(parser_text)
 
     class ElementParser(HTMLParser):
         def __init__(self) -> None:
@@ -293,22 +300,17 @@ def _blank_inline_html_elements(
             line, column = self.getpos()
             return self.line_starts[line - 1] + column
 
-        def _in_metadata(self, offset: int) -> bool:
-            return any(start <= offset < end for start, end in metadata_spans)
-
         def handle_starttag(self, tag: str, _attrs: list[tuple[str, str | None]]) -> None:
             folded = tag.casefold()
             if folded not in tags:
                 return
             start = self._offset()
-            if not is_escaped(text, start) and not self._in_metadata(start):
+            if not is_escaped(text, start):
                 self.open_tags.append((folded, start))
 
         def handle_endtag(self, tag: str) -> None:
             folded = tag.casefold()
             if folded not in tags:
-                return
-            if self._in_metadata(self._offset()):
                 return
             for index in range(len(self.open_tags) - 1, -1, -1):
                 if self.open_tags[index][0] != folded:
@@ -319,7 +321,7 @@ def _blank_inline_html_elements(
                 break
 
     parser = ElementParser()
-    parser.feed(text)
+    parser.feed(parser_input)
     parser.close()
     for start, end in parser.spans:
         _blank(chars, start, end)

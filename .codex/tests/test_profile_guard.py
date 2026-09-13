@@ -295,17 +295,18 @@ class ProfileGuardTests(unittest.TestCase):
         self.assertEqual(issues, ['profile-link-traversal'])
 
     def test_html_code_text_inside_markdown_link_title_does_not_hide_links(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            issues: list[str] = []
+        for example, expected in (
+            ('[x](url "<code>")\n[[../secret]]', ['profile-link-traversal']),
+            ('[x](url "<script>")\n<code>[[../secret]]</code>', []),
+            ('[<code>[[../secret]]</code>](url)', []),
+        ):
+            with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                issues: list[str] = []
 
-            profile_guard._check_links(
-                '[x](url "<code>")\n[[../secret]]',
-                root,
-                issues,
-            )
+                profile_guard._check_links(example, root, issues)
 
-        self.assertEqual(issues, ['profile-link-traversal'])
+            self.assertEqual(issues, expected)
 
     def test_tab_indented_html_blocks_do_not_hide_following_links(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
