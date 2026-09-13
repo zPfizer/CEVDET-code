@@ -201,6 +201,119 @@ class SuppressionEdges(unittest.TestCase):
                     capture_output=True,
                 )
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows directory handle guard")
+    def test_missing_private_root_is_pinned_before_write_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex = root / "vault" / ".codex"
+            codex.mkdir(parents=True)
+            private = codex / "private-memory"
+            outside = root / "outside-private"
+            outside.mkdir()
+            sentinel = outside / "sentinel.txt"
+            sentinel.write_bytes(b"keep")
+            before = {
+                path.relative_to(outside): path.read_bytes()
+                for path in outside.rglob("*")
+                if path.is_file()
+            }
+            real_mkdir = Path.mkdir
+            injected = False
+
+            def mkdir(path: Path, *args: object, **kwargs: object) -> None:
+                nonlocal injected
+                if path == private and not injected:
+                    injected = True
+                    _junction(private, outside)
+                real_mkdir(path, *args, **kwargs)
+
+            try:
+                with mock.patch.object(Path, "mkdir", new=mkdir):
+                    with self.assertRaisesRegex(
+                        memory_ledger.MemoryPreferenceError,
+                        "memory-suppression-path-invalid",
+                    ):
+                        memory_ledger.suppress_derived_memory(private, "hedef", now=1.0)
+                self.assertTrue(injected)
+                after = {
+                    path.relative_to(outside): path.read_bytes()
+                    for path in outside.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after, before)
+                self.assertFalse((outside / "controls").exists())
+                self.assertFalse((outside / "suppressions.jsonl").exists())
+                self.assertFalse((outside / "suppressions.lock").exists())
+            finally:
+                subprocess.run(
+                    ["cmd", "/c", "rmdir", str(private)],
+                    check=False,
+                    capture_output=True,
+                )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows directory handle guard")
+    def test_missing_private_root_reader_pins_existing_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex = root / "vault" / ".codex"
+            codex.mkdir(parents=True)
+            private = codex / "private-memory"
+            outside = root / "outside-private"
+            outside_controls = outside / "controls"
+            outside_controls.mkdir(parents=True)
+            ledger = outside_controls / "suppressions.jsonl"
+            ledger.write_text(
+                json.dumps({
+                    "schema": 1,
+                    "ts": 1,
+                    "target_sha256": memory_ledger.memory_text_hash("hedef"),
+                }) + "\n",
+                encoding="utf-8",
+            )
+            before = {
+                path.relative_to(outside): path.read_bytes()
+                for path in outside.rglob("*")
+                if path.is_file()
+            }
+            real_read = memory_ledger._read_suppression_lines
+            rmdir_result = None
+
+            def swap_then_read(private_root: Path, path: Path) -> list[str]:
+                nonlocal rmdir_result
+                rmdir_result = subprocess.run(
+                    ["cmd", "/c", "rmdir", str(codex)],
+                    check=False,
+                    capture_output=True,
+                )
+                _junction(private, outside)
+                return real_read(private_root, path)
+
+            try:
+                with mock.patch.object(
+                    memory_ledger,
+                    "_read_suppression_lines",
+                    side_effect=swap_then_read,
+                ):
+                    with self.assertRaisesRegex(
+                        memory_ledger.MemoryPreferenceError,
+                        "memory-suppression-path-invalid",
+                    ):
+                        memory_ledger.load_suppressed_hashes(private)
+                self.assertIsNotNone(rmdir_result)
+                self.assertNotEqual(rmdir_result.returncode, 0)
+                after = {
+                    path.relative_to(outside): path.read_bytes()
+                    for path in outside.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after, before)
+            finally:
+                subprocess.run(
+                    ["cmd", "/c", "rmdir", str(private)],
+                    check=False,
+                    capture_output=True,
+                )
+
     def test_invalid_and_unreadable_suppression_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             private = Path(temporary)

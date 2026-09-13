@@ -1529,25 +1529,109 @@ _SUPPRESSION_DIRECTORY_PINNED: ContextVar[str | None] = ContextVar(
 )
 
 
+def _suppression_existing_ancestor(path: Path) -> Path:
+    candidate = Path(path).absolute()
+    while _suppression_lstat(candidate) is None:
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    return candidate
+
+
+def _pin_suppression_directory(stack: ExitStack, path: Path) -> None:
+    opened = stack.enter_context(_pinned_windows_directory(path))
+    current = _suppression_lstat(path)
+    if current is None or not stat.S_ISDIR(current.st_mode):
+        raise MemoryPreferenceError("memory-suppression-path-invalid")
+    if opened is not None and (
+        (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        or opened.st_nlink != 1
+        or current.st_nlink != 1
+    ):
+        raise MemoryPreferenceError("memory-suppression-path-invalid")
+
+
+def _ensure_pinned_suppression_directory(
+    stack: ExitStack,
+    target: Path,
+    ancestor: Path,
+    private_root: Path,
+) -> None:
+    pending: list[Path] = []
+    current = Path(target).absolute()
+    ancestor_key = _suppression_path_key(Path(ancestor).absolute())
+    while _suppression_path_key(current) != ancestor_key:
+        pending.append(current)
+        parent = current.parent
+        if parent == current:
+            raise MemoryPreferenceError("memory-suppression-path-invalid")
+        current = parent
+    for candidate in reversed(pending):
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
+        _checked_suppression_path(private_root)
+        _pin_suppression_directory(stack, candidate)
+        _checked_suppression_path(private_root)
+
+
 @contextmanager
 def _suppression_controls_scope(
     private_root: Path,
     *,
     pin_directory: bool = True,
+    ensure_directory: bool = False,
 ) -> Iterator[Path]:
     path = _checked_suppression_path(private_root)
     controls = path.parent
     private = Path(private_root).absolute()
+
+    if ensure_directory:
+        with ExitStack() as stack:
+            try:
+                ancestor = _suppression_existing_ancestor(private)
+                _pin_suppression_directory(stack, ancestor)
+                _checked_suppression_path(private_root)
+                _ensure_pinned_suppression_directory(
+                    stack, private, ancestor, private_root
+                )
+                _ensure_pinned_suppression_directory(
+                    stack, controls, private, private_root
+                )
+                path = _checked_suppression_path(private_root)
+            except MemoryPreferenceError:
+                raise
+            except OSError as exc:
+                if os.name == "nt" and getattr(exc, "winerror", None) in {32, 33}:
+                    raise _SuppressionDirectoryBusy("suppression directory busy") from exc
+                raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
+            pin_token = _SUPPRESSION_DIRECTORY_PINNED.set(
+                _suppression_path_key(private)
+            )
+            try:
+                yield path
+            finally:
+                _SUPPRESSION_DIRECTORY_PINNED.reset(pin_token)
+        return
+
     private_metadata = _suppression_lstat(private)
     controls_metadata = _suppression_lstat(controls)
     if not pin_directory or os.name != "nt" or controls_metadata is None:
         if pin_directory and os.name == "nt" and private_metadata is not None:
             pin_target = private
+        elif pin_directory and os.name == "nt":
+            pin_target = _suppression_existing_ancestor(private)
         else:
             yield path
             return
     else:
         pin_target = controls
+    # An absent controls entry has no handle of its own; keep its existing
+    # private-memory parent pinned and reject changes observed across the read.
     with ExitStack() as stack:
         try:
             opened = stack.enter_context(_pinned_windows_directory(pin_target))
@@ -1574,10 +1658,13 @@ def _suppression_controls_scope(
         pin_token = _SUPPRESSION_DIRECTORY_PINNED.set(
             _suppression_path_key(Path(private_root).absolute())
         )
+        private_absent_snapshot = private_metadata is None
         try:
             yield path
         finally:
             _SUPPRESSION_DIRECTORY_PINNED.reset(pin_token)
+        if private_absent_snapshot and _suppression_lstat(private) is not None:
+            raise MemoryPreferenceError("memory-suppression-path-invalid")
         if parent_snapshot:
             current = _suppression_lstat(private)
             if current is None or opened is None or (
@@ -1596,13 +1683,13 @@ def _suppression_write_scope(
     *,
     timeout: float | None,
 ) -> Iterator[tuple[Path, object]]:
-    path = _checked_suppression_path(private_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     deadline = None if timeout is None else time.monotonic() + timeout
     while True:
         stack = ExitStack()
         try:
-            path = stack.enter_context(_suppression_controls_scope(private_root))
+            path = stack.enter_context(
+                _suppression_controls_scope(private_root, ensure_directory=True)
+            )
         except _SuppressionDirectoryBusy:
             stack.close()
             if deadline is not None:
@@ -1644,6 +1731,7 @@ def _checked_suppression_lock_handle(private_root: Path, handle: object) -> None
 
 
 def _read_suppression_lines(private_root: Path, path: Path) -> list[str]:
+    # A missing file is only a valid empty ledger if it was already absent.
     ledger_metadata = _suppression_lstat(path)
     try:
         handle = path.open("r", encoding="utf-8")
