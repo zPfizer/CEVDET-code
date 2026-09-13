@@ -163,7 +163,12 @@ def _validate_destination_parent(vault_root: Path, destination: Path) -> None:
 
 
 def _read_source(source: Path, attachment_root: Path, hashes: frozenset[str]) -> dict[str, Any]:
-    _regular_path(source, attachment_root)
+    try:
+        _regular_path(source, attachment_root)
+    except ValueError as exc:
+        if str(exc) == 'attachment-not-regular' and not source.exists():
+            raise ValueError('attachment-content-changed') from exc
+        raise
     before = source.lstat()
     try:
         with source.open('rb') as handle:
@@ -475,7 +480,10 @@ def _capture_one_core(
                         with suppression_guard(vault_root / '.codex/private-memory', hashes):
                             suppression_entered = True
                             verify_source_snapshot()
-                            yield
+                            try:
+                                yield
+                            finally:
+                                verify_source_snapshot()
                     except Exception:
                         if not suppression_entered:
                             verify_source_snapshot()

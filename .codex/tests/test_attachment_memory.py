@@ -325,6 +325,48 @@ class AttachmentMemoryTests(unittest.TestCase):
                         frozenset(), mock.Mock(return_value=summary), state_dir=state,
                     )
 
+    def test_source_disappearance_during_preopen_validation_marks_mapping(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                attachment_memory.capture_sources(
+                    [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                )
+                real_is_file = Path.is_file
+                removed = False
+
+                def disappear_on_is_file(path: Path) -> bool:
+                    nonlocal removed
+                    if path == source and not removed:
+                        removed = True
+                        source.unlink()
+                    return real_is_file(path)
+
+                with mock.patch.object(Path, 'is_file', autospec=True, side_effect=disappear_on_is_file):
+                    with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                        attachment_memory.capture_sources(
+                            [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                            frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                        )
+
+                marker = attachment_memory._source_changed_marker_path(
+                    state, source.parent.name,
+                )
+                self.assertTrue(marker.is_file())
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                    )
+
     def test_source_change_survives_concurrent_suppression_update(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
