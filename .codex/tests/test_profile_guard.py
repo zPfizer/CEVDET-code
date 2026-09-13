@@ -416,6 +416,8 @@ class ProfileGuardTests(unittest.TestCase):
     def test_malformed_html_openers_do_not_change_following_visibility(self) -> None:
         for example, expected in (
             ('<code foo=>[[../secret]]</code>', ['profile-link-traversal']),
+            ('<code foo=""bar>[[../secret]]</code>', ['profile-link-traversal']),
+            ('<code 1foo="x">[[../secret]]</code>', ['profile-link-traversal']),
             ('prefix <script foo=>\n<code>[[../secret]]</code>', []),
         ):
             with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
