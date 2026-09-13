@@ -848,6 +848,30 @@ class SuppressionTests(unittest.TestCase):
         self.assertIn('Ham bilgi dosyalarına veya eski önbelleğe geçme', context)
         self.assertNotIn('Mevcut dosya aramasıyla', context)
 
+    def test_retrieval_lock_expiry_does_not_route_filtered_read_to_raw_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            private = vault / '.codex/private-memory'
+            memory_ledger.suppress_derived_memory(private, 'Levent Ankara\'da yaşıyor')
+            with mock.patch.object(
+                hook,
+                'retrieve_vault_context_detailed',
+                side_effect=hook.LockUnavailable('lock-busy'),
+            ):
+                context = hook.handle_user_prompt(
+                    {
+                        'session_id': 'filtered-lock-deadline',
+                        'prompt': 'Levent hangi şehirde yaşıyor?',
+                    },
+                    vault / '.state',
+                    vault_root=vault,
+                    deadline=time.monotonic() + 30,
+                )
+
+        self.assertIn('Vault Arama Süresi Doldu', context)
+        self.assertIn('Ham bilgi dosyalarına veya eski önbelleğe geçme', context)
+        self.assertNotIn('Mevcut dosya aramasıyla', context)
+
     def test_read_only_memory_renderer_receives_deadline(self):
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

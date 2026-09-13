@@ -850,7 +850,7 @@ def handle_user_prompt(
                     "ilgili Obsidian bağlantılarını ve tam kaynakları incele. "
                     "Yeterli aramadan sonra bulunamayanı veya belirsiz kalanı açıkça söyle.",
                 )
-        except (OSError, UnicodeError, ValueError) as exc:
+        except (OSError, UnicodeError, ValueError, LockUnavailable) as exc:
             if isinstance(exc, MemoryPreferenceError):
                 if str(exc).startswith('memory-publication-'):
                     return MEMORY_PUBLICATION_WARNING
@@ -859,7 +859,7 @@ def handle_user_prompt(
                     'Ham notlara veya eski önbelleğe geçme; hafızadan kişisel bilgi yanıtlama. '
                     'Tercih kaydının onarılması gerektiğini kısa biçimde bildir.'
                 )
-            if isinstance(exc, TimeoutError):
+            if isinstance(exc, (TimeoutError, LockUnavailable)):
                 context.insert(
                     0,
                     "[Vault Arama Süresi Doldu]\n"
@@ -1417,11 +1417,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 STATE_DIR,
                 deadline=hook_deadline,
             )
-            _emit_user_prompt_result(emitted_context or "")
-            response_emitted = True
+            deadline_context = "[Vault Arama Süresi Doldu]" in (emitted_context or "")
+            if deadline_context:
+                _emit_user_prompt_result(emitted_context or "")
+                response_emitted = True
             transcript_path = payload.get("transcript_path")
             if (
-                not is_stop_message(emitted_context)
+                not response_emitted
+                and not is_stop_message(emitted_context)
                 and isinstance(prompt, str)
                 and is_meaningful_query(prompt)
                 and directive is not None
@@ -1490,6 +1493,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 state_dir=STATE_DIR,
                 deadline=hook_deadline,
             )
+        if args.event == "user-prompt" and not response_emitted:
+            _emit_user_prompt_result(emitted_context or "")
+            response_emitted = True
         record_hook_runtime(
             args.event,
             payload,
