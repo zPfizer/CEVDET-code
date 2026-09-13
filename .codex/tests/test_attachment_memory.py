@@ -678,6 +678,56 @@ class AttachmentMemoryTests(unittest.TestCase):
                                 frozenset(), mock.Mock(return_value=outcome), state_dir=state,
                             )
 
+    def test_source_change_before_publication_guard_failure_is_recorded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                attachment_memory.capture_sources(
+                    [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                )
+                real_scope = attachment_memory._publication_scope
+                calls = 0
+
+                @contextmanager
+                def remove_before_guard(scope_state: Path, session: str | None):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 2:
+                        source.unlink()
+                        mark_session_only(scope_state, session or 'session')
+                    with real_scope(scope_state, session):
+                        yield
+
+                with mock.patch.object(
+                    attachment_memory,
+                    '_publication_scope',
+                    side_effect=remove_before_guard,
+                ):
+                    with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                        attachment_memory.capture_sources(
+                            [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                            frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                            session_id='session',
+                        )
+
+                marker = attachment_memory._source_changed_marker_path(
+                    state, source.parent.name,
+                )
+                self.assertTrue(marker.is_file())
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                    )
+
     def test_empty_source_receipt_does_not_cross_suppression_revision(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
