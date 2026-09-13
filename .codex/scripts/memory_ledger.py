@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import time
 import tokenize
 from typing import Callable, Iterator, Sequence
@@ -1452,6 +1453,15 @@ def _suppression_path_key(path: Path) -> str:
     return value
 
 
+def _suppression_lstat(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+    except (OSError, RuntimeError) as exc:
+        raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
+
+
 def _checked_suppression_path(private_root: Path) -> Path:
     """Keep the suppression ledger and its lock inside private memory."""
     private = Path(private_root)
@@ -1470,6 +1480,8 @@ def _checked_suppression_path(private_root: Path) -> Path:
         private_resolved = absolute_private.resolve(strict=False)
         controls_resolved = controls.resolve(strict=False)
         path_resolved = absolute_path.resolve(strict=False)
+        private_metadata = _suppression_lstat(absolute_private)
+        controls_metadata = _suppression_lstat(controls)
         if (
             _suppression_path_key(controls_resolved)
             != _suppression_path_key(private_resolved / "controls")
@@ -1477,20 +1489,26 @@ def _checked_suppression_path(private_root: Path) -> Path:
             != _suppression_path_key(
                 private_resolved / "controls" / "suppressions.jsonl"
             )
-            or (absolute_private.exists() and not absolute_private.is_dir())
-            or (controls.exists() and not controls.is_dir())
+            or (
+                private_metadata is not None
+                and not stat.S_ISDIR(private_metadata.st_mode)
+            )
+            or (
+                controls_metadata is not None
+                and not stat.S_ISDIR(controls_metadata.st_mode)
+            )
         ):
             raise ValueError("suppression path escaped private memory")
         for candidate in (absolute_path, lock):
-            if candidate.exists() or candidate.is_symlink():
-                metadata = candidate.lstat()
+            metadata = _suppression_lstat(candidate)
+            if metadata is not None:
                 candidate_resolved = candidate.resolve(strict=False)
                 if (
                     _suppression_path_key(candidate_resolved)
                     != _suppression_path_key(
                         private_resolved / "controls" / candidate.name
                     )
-                    or not candidate.is_file()
+                    or not stat.S_ISREG(metadata.st_mode)
                     or metadata.st_nlink != 1
                 ):
                     raise ValueError("linked suppression file")
@@ -1516,25 +1534,29 @@ def _suppression_controls_scope(
     private_root: Path,
     *,
     pin_directory: bool = True,
-    ensure_directory: bool = False,
+    ensure_directory: bool = True,
 ) -> Iterator[Path]:
     path = _checked_suppression_path(private_root)
     controls = path.parent
+    private = Path(private_root).absolute()
+    private_metadata = _suppression_lstat(private)
+    controls_metadata = _suppression_lstat(controls)
     if (
         ensure_directory
         and os.name == "nt"
-        and private_root.exists()
-        and not controls.exists()
+        and private_metadata is not None
+        and controls_metadata is None
     ):
         try:
             controls.mkdir(parents=True, exist_ok=True)
             path = _checked_suppression_path(private_root)
             controls = path.parent
+            controls_metadata = _suppression_lstat(controls)
         except MemoryPreferenceError:
             raise
         except (OSError, RuntimeError, ValueError) as exc:
             raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
-    if not pin_directory or os.name != "nt" or not controls.exists():
+    if not pin_directory or os.name != "nt" or controls_metadata is None:
         yield path
         return
     with ExitStack() as stack:
