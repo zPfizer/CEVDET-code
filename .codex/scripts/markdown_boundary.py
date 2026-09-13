@@ -46,6 +46,20 @@ def _blank(chars: list[str], start: int, end: int) -> None:
             chars[index] = " "
 
 
+def _indent_columns(value: str) -> int:
+    columns = 0
+    for char in value:
+        columns += 4 - (columns % 4) if char == "\t" else 1
+    return columns
+
+
+def _fence_match(content: str) -> re.Match[str] | None:
+    match = FENCE_LINE.fullmatch(content)
+    if match is None or _indent_columns(content[:match.start(1)]) > 3:
+        return None
+    return match
+
+
 def _blank_inline_code(chars: list[str], text: str) -> None:
     index = 0
     while index < len(text):
@@ -84,7 +98,7 @@ def _fence_parts(
         remainder = _container_body(content, container)
         if remainder is None:
             return None
-    match = FENCE_LINE.fullmatch(remainder)
+    match = _fence_match(remainder)
     if match is None:
         return None
     return container, match.group(1), match.group(2)
@@ -229,18 +243,24 @@ def markdown_body(
     fence_length = 0
     fence_container: tuple[tuple[str, int], ...] | None = None
     html_literal: str | None = None
+    html_container: tuple[tuple[str, int], ...] | None = None
     list_contexts: list[tuple[int, int]] = []
     paragraph_active = False
     for index, (start, end, _line_end, content) in enumerate(lines):
         if index <= frontmatter_end and mask_frontmatter:
             continue
         if html_literal is not None:
-            _blank(chars, start, end)
-            closing = HTML_LITERAL_CLOSE.search(content)
-            if closing is not None and closing.group("tag").casefold() == html_literal:
+            if html_container is not None and not _container_present(content, html_container):
                 html_literal = None
-            paragraph_active = False
-            continue
+                html_container = None
+            else:
+                _blank(chars, start, end)
+                closing = HTML_LITERAL_CLOSE.search(content)
+                if closing is not None and closing.group("tag").casefold() == html_literal:
+                    html_literal = None
+                    html_container = None
+                paragraph_active = False
+                continue
         fence = _fence_parts(content, container=fence_container)
         if fence_char is not None:
             if (
@@ -278,7 +298,7 @@ def markdown_body(
             continue
         if _is_html_literal_open(content):
             _blank(chars, start, end)
-            remainder, _container = _container_prefix(content)
+            remainder, container = _container_prefix(content)
             opening = HTML_LITERAL_OPEN.match(remainder)
             closing = HTML_LITERAL_CLOSE.search(content)
             if opening is not None and (
@@ -286,6 +306,7 @@ def markdown_body(
                 or closing.group("tag").casefold() != opening.group("tag").casefold()
             ):
                 html_literal = opening.group("tag").casefold()
+                html_container = container
             paragraph_active = False
             continue
         indentation = len(content) - len(content.lstrip(" \t"))

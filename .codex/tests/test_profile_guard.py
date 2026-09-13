@@ -159,9 +159,9 @@ class ProfileGuardTests(unittest.TestCase):
 
                     self.assertIn("profile-preference-missing", profile_guard.check_profile(root, text))
 
-    def test_section_masking_and_heading_discovery_agree_on_tab_fences(self) -> None:
+    def test_section_masking_and_heading_discovery_agree_on_fence_indentation(self) -> None:
         preference = next(line for line in PROFILE_TEXT.splitlines() if line.startswith('- Türkçe'))
-        for opening, closing in ((' ```markdown', '\t```'), ('\t```markdown', ' ```')):
+        for opening, closing in ((' ```markdown', ' ```'), ('```markdown', '```')):
             with self.subTest(opening=opening, closing=closing), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 seed_profile(root)
@@ -285,6 +285,19 @@ class ProfileGuardTests(unittest.TestCase):
         for example in (
             '> ~~~\n> model example\n\n[[missing-after-quote-fence]]',
             '- ```\n  model example\n\n[[missing-after-list-fence]]',
+        ):
+            with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                issues: list[str] = []
+
+                profile_guard._check_links(example, root, issues)
+
+            self.assertEqual(issues, ['profile-link-broken'])
+
+    def test_unclosed_literal_html_containers_do_not_hide_following_links(self) -> None:
+        for example in (
+            '> <pre>\n> model example\n\n[[missing-after-quote-html]]',
+            '- <pre>\n  model example\n\n[[missing-after-list-html]]',
         ):
             with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
