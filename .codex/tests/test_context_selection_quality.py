@@ -1322,6 +1322,30 @@ Karar: uzun günlükler. Veri saklama kararı geçmiş uygulamadır.
                     self.assertTrue(any("güncel uygulama" in hit.excerpt for hit in hits))
                     self.assertTrue(any("geçmiş uygulama" in hit.excerpt for hit in hits))
 
+    def test_retrospective_ranking_keeps_topic_ahead_of_question_boilerplate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            relevant = {
+                "🧠 500-Knowledge/yedekleme-guncel.md",
+                "🎯 100-Command-Center/yedekleme-eski.md",
+            }
+            for path, status, body in (
+                ("🧠 500-Knowledge/yedekleme-guncel.md", "active", "Yedekleme: günlük yerel kopya."),
+                ("🎯 100-Command-Center/yedekleme-eski.md", "completed", "Yedekleme: haftalık uzak kopya."),
+                *((f"🎯 100-Command-Center/ilgisiz-{i}.md", "completed",
+                   f"Daha önce başka konuda ne karar vermiştik? Farklı uygulama {i}.") for i in range(3)),
+            ):
+                _write(root, path, f"---\ntitle: Kayıt\nstatus: {status}\ntype: work-packet\n---\n{body}\n")
+            entries = retrieval.build_vault_map(root, write_cache=False)
+            for query in (
+                "Daha önce yedekleme konusunda ne karar vermiştik?",
+                "Önceden yedekleme için hangi seçeneği uygun görmüştük?",
+            ):
+                with self.subTest(query=query):
+                    hits = retrieval.search_vault(entries, query)
+                    self.assertEqual({hit.entry.path for hit in hits}, relevant)
+                    self.assertTrue(all("yedekleme" in hit.matched_terms for hit in hits))
+
     def test_rejected_retrospective_predicates_do_not_rescan_the_clause(self) -> None:
         for body in (
             "kodu, " * 2560,
@@ -1445,7 +1469,7 @@ Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun 
             generic_current = history_first.replace("nedir", "hangisi")
             self.assertEqual(
                 retrieval._split_current_history_query(generic_current),
-                ("güncel karar hangisi? veri saklama konusunda", "Daha önce veri saklama konusunda ne karar vermiştik"),
+                ("güncel karar hangisi? veri saklama", "Daha önce veri saklama konusunda ne karar vermiştik"),
             )
             self.assertEqual(
                 {hit.entry.path for hit in retrieval.search_vault(entries, generic_current, top_k=2)},
@@ -1453,11 +1477,11 @@ Başka proje kararı: daha önce bu kararı vermiştik; başka seçeneği uygun 
             )
             self.assertEqual(
                 retrieval._split_current_history_query(history_first.replace(" ve ", "; ")),
-                ("güncel karar nedir? veri saklama konusunda", "Daha önce veri saklama konusunda ne karar vermiştik"),
+                ("güncel karar nedir? veri saklama", "Daha önce veri saklama konusunda ne karar vermiştik"),
             )
             self.assertEqual(
                 retrieval._split_current_history_query(history_first),
-                ("güncel karar nedir? veri saklama konusunda", "Daha önce veri saklama konusunda ne karar vermiştik"),
+                ("güncel karar nedir? veri saklama", "Daha önce veri saklama konusunda ne karar vermiştik"),
             )
             self.assertEqual(
                 {hit.entry.path for hit in retrieval.search_vault(entries, history_first, top_k=2)},

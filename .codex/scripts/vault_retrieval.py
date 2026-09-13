@@ -203,7 +203,7 @@ HISTORY_TURKISH_NOMINAL_CHANGE_QUERY = re.compile(
 # A past predicate or decision question makes
 # `daha önce`/`önceden` retrospective; imperative forms such as
 # `daha önce bitir` stay current.
-HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS = frozenset({"hangi", "uygun"})
+HISTORY_TURKISH_RETROSPECTIVE_SCAFFOLD_TERMS = frozenset({"hangi", "uygun", "konusunda"})
 HISTORY_TURKISH_RETROSPECTIVE_AUXILIARY = (
     r"m[iu](?:y[dt][iu](?:m|n|k|n[iu]z|lar|ler)?|y[iu][mz]|s[iu]n(?:[iu]z)?)?"
 )
@@ -2365,6 +2365,9 @@ def _rank(
     vault_system_query = 'vault' in query_terms and bool(query_terms & {
         'sistem', 'sistemi', 'sisteminde', 'sisteminin', 'sistemindeki',
     })
+    # Determine scope above, then score the subject rather than question boilerplate.
+    topical_terms = query_terms - _retrospective_topic_cue_terms(query)
+    query_terms = topical_terms or query_terms
     eligible_entries = []
     for entry in entries:
         if (
