@@ -9,6 +9,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import tempfile
 from typing import Any, Callable, Iterator, Sequence
 
 from file_lock import locked
@@ -718,10 +719,13 @@ def _capture_one_core(
             else:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 _write_mapping(mapping_path, candidate)
-                staging = destination.with_suffix('.staging')
-                if staging.is_symlink() or (staging.exists() and not staging.is_file()):
-                    raise ValueError('attachment-note-invalid')
-                staging.unlink(missing_ok=True)
+                staging_fd, staging_name = tempfile.mkstemp(
+                    dir=state_dir,
+                    prefix=f'kaynak-{attachment_id}-',
+                    suffix='.staging',
+                )
+                os.close(staging_fd)
+                staging = Path(staging_name)
                 try:
                     atomic_write_text(staging, rendered, newline='\n')
                     verify_source_snapshot()

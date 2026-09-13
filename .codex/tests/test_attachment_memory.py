@@ -526,7 +526,7 @@ class AttachmentMemoryTests(unittest.TestCase):
             self.assertTrue(destination.is_file())
             self.assertIn('External revision.', destination.read_text(encoding='utf-8'))
 
-    def test_stale_note_staging_is_removed_before_retry(self):
+    def test_stale_note_staging_does_not_block_retry(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             home = root / 'home'
@@ -550,7 +550,8 @@ class AttachmentMemoryTests(unittest.TestCase):
                 )
 
             self.assertTrue(result)
-            self.assertFalse(staging.exists())
+            self.assertTrue(staging.is_file())
+            self.assertEqual(staging.read_text(encoding='utf-8'), 'abandoned staging')
             self.assertTrue(destination.is_file())
 
     def test_source_change_marker_survives_session_only_gate(self):
