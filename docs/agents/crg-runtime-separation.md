@@ -1,9 +1,9 @@
 # CRG runtime sahipliği
 
-Bu dosya henüz kurulmamış taşıma adayını tanımlar. Yerel Windows ortamında
-işlemli kayıt defteri açılışı `ERROR_RM_NOT_ACTIVE (6801)` verdiği için PATH
-değişikliği doğrulanamadı. Task Scheduler güncellemesinde setter aralığındaki
-harici değişikliği koruma açığı da kapanmadı. Bu aday kurulum onayı değildir.
+Bu dosya taşıma sözleşmesini tanımlar; kurulum veya canlı kabul sonucu değildir.
+Hook, görev ve MCP çağrıları canonical Python executable'ının mutlak yolunu
+kullanır. Kullanıcı veya sistem PATH'i okunmaz, değiştirilmez ve rollback'e
+alınmaz. Registry transaction/TxF bu taşımanın parçası değildir.
 
 CRG 2.3.8 mevcut kullanıcı seviyesindeki `~/.codex/cevdet-codex/integrations/crg/.venv`
 ortamından çalışır. Ortam Vault ve code worktree yaşam döngülerinden ayrıdır;
@@ -43,19 +43,22 @@ sınırları bu fiziksel taşıma ile değiştirilmez.
 
 `crg_install.py` sabit başlangıç yedeğini prepare ile üretir, source hash'leriyle
 eşleşen bağımsız review kaydından sonra apply yapar. Aynı state üzerinden
-rollback eski hook/config/task/PATH ve kurulum kimliğini geri getirir. Her yüzey
+rollback eski hook/config/task action ve kurulum kimliğini geri getirir. Her yüzey
 değişmeden önce beklenen içerikle karşılaştırılır; gözlenen yabancı değişiklikte
 durur. Dosya değişiminde gerçek önceki içerik native ReplaceFileW yedeğinde
-korunur. PATH aynı registry transaction içinde okunup karşılaştırılır ve yazılır;
-transaction desteği yoksa yazım durur. Task Scheduler için gözlemler arasındaki
-harici yazımı dışlayan koruma henüz sağlanmamıştır.
-Eski görevlerin action/path değerleri geri getirilir; iki görev de XML içinde
-`Enabled=false` ile kaydedilir. Böylece rollback sırasında bir tetikleyici Vault
+korunur. İki görev önce devre dışı bırakılır ve eski watcher süreçlerinin
+sonlandığı doğrulanır. Görevde yalnız sahip olunan action alanları güncellenir;
+diğer alanlar güncel snapshot'tan korunur. Geri okunan tam tanım hedefle
+karşılaştırılır; beklenmeyen farkta en fazla iki retry yapılır. Bu protokol
+OS seviyesinde compare-and-swap veya CRASH_ATOMICITY garantisi değildir.
+Eski görevlerin action/path değerleri geri getirilir; rollback'te iki görev de
+devre dışı kalır. Böylece rollback sırasında bir tetikleyici Vault
 taramasını veya eski venv'de bytecode yazımını başlatamaz. Bu çalışma-durumu farkı
 kanıtta açıkça belirtilir; birebir process-state rollback diye sunulmaz.
 
 Canlı kabul: gerçek code commit'inde hook isteği, native scheduled watcher'ın
 yenilemesi, yeni HEAD/hash/çağrı ilişkisi ve yeni ortamdan MCP JSON-RPC yanıtı
 birlikte doğrulanır. Sentetik testler tek başına canlı kabul değildir. Kurulum
-raporu ayrıca sekiz istenen bağın dışındaki Vault hook/config ve PATH bağlarını
-saymalıdır. Bu belge kurulum veya canlı kabul sonucu değildir.
+raporu ayrıca sekiz istenen bağın dışındaki Vault hook/config bağlarını belirtir.
+PATH'te kalan tarihsel metin, mutlak executable kullanan bu runtime çağrılarının
+bağımlılığı değildir; PATH temizliği bu işin kapsamı dışındadır.

@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-import uuid
 from unittest.mock import patch
 
 
@@ -16,21 +15,12 @@ SPEC.loader.exec_module(installer)
 
 class FakeWindows:
     def __init__(self):
-        xml = '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Actions><Exec><Command>old.exe</Command><Arguments>watch</Arguments></Exec></Actions></Task>'
+        xml = '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>original</Description></RegistrationInfo><Settings><Enabled>true</Enabled></Settings><Actions Context="Author"><Exec id="build"><Command>old.exe</Command><Arguments>build</Arguments><WorkingDirectory>old-root</WorkingDirectory></Exec><Exec id="watch"><Command>old.exe</Command><Arguments>watch</Arguments><WorkingDirectory>old-root</WorkingDirectory></Exec></Actions></Task>'
         self.tasks = {name: {"xml": xml, "enabled": True, "running": True} for name in ("CEVDET Graph - Code", "CEVDET Graph - Vault")}
-        self.user_path = "keep;old;also-keep"
         self.stopped = []
-
-    def path(self):
-        return self.user_path
 
     def worktree_roots(self, code):
         return [code]
-
-    def set_path(self, value, expected):
-        if self.user_path != expected:
-            raise ValueError("Concurrent user PATH change inside transaction")
-        self.user_path = value
 
     def task(self, name):
         return copy.deepcopy(self.tasks[name])
@@ -47,12 +37,18 @@ class FakeWindows:
         return True
 
     def set_task(self, name, value):
-        self.tasks[name] = copy.deepcopy(value)
+        self.tasks[name] = installer.with_actions(self.tasks[name], value)
 
     def disable_task(self, name):
         value = installer.disabled_task(self.tasks[name])
         value["running"] = self.tasks[name]["running"]
         self.tasks[name] = value
+
+    def enable_task(self, name):
+        self.tasks[name] = installer.enabled_task(self.tasks[name], True)
+
+    def start_task(self, name):
+        self.tasks[name]["running"] = True
 
     def pid_running(self, pid):
         return False
@@ -81,8 +77,6 @@ class InstallerTests(unittest.TestCase):
         (scripts / "pythonw.exe").write_bytes(b"pythonw")
         (canonical / "cevdet_runtime.py").write_bytes(b"old runtime")
         Path(self.plan["runtime_source"]).write_bytes(b"new runtime")
-        self.host.user_path = "keep;" + self.plan["old_venv_scripts"] + ";also-keep"
-        self.original_path = self.host.path()
         self.original_tasks = copy.deepcopy(self.host.tasks)
         self.state_path = self.root / "state.json"
         self.state = installer.prepare(self.plan, self.state_path, self.host)
@@ -94,7 +88,6 @@ class InstallerTests(unittest.TestCase):
     def test_apply_rollback_apply_preserves_fixed_original(self):
         self.assertEqual(len(self.state["files"]), 14)
         self.assertEqual(self.apply()["status"], "applied")
-        self.assertEqual(self.host.path(), "keep;" + str(Path(self.plan["canonical_root"]) / ".venv" / "Scripts") + ";also-keep")
         self.assertFalse(self.host.tasks["CEVDET Graph - Vault"]["running"])
         self.assertIn("protected-status", self.host.tasks["CEVDET Graph - Vault"]["xml"])
         self.assertNotIn(self.plan["vault_root"], self.host.tasks["CEVDET Graph - Vault"]["xml"])
@@ -110,7 +103,6 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(restored["status"], "rolled-back")
         for path, values in self.state["files"].items():
             self.assertEqual(installer.read_bytes(path), installer.unpacked(values["before"]))
-        self.assertEqual(self.host.path(), self.original_path)
         expected_tasks = copy.deepcopy(self.original_tasks)
         expected_tasks["CEVDET Graph - Code"] = installer.disabled_task(expected_tasks["CEVDET Graph - Code"])
         expected_tasks["CEVDET Graph - Vault"] = installer.disabled_task(expected_tasks["CEVDET Graph - Vault"])
@@ -118,7 +110,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(len(restored["runtime_differences"]), 1)
         self.assertEqual(self.apply()["files"], self.state["files"])
 
-    def test_stale_file_path_and_task_refused_before_mutation(self):
+    def test_stale_file_and_task_refused_before_mutation(self):
         config = Path(self.plan["code_root"]) / ".codex" / "config.toml"
         original = config.read_bytes()
         config.write_bytes(b"concurrent edit")
@@ -126,10 +118,6 @@ class InstallerTests(unittest.TestCase):
             self.apply()
         self.assertEqual(self.host.stopped, [])
         config.write_bytes(original)
-        self.host.user_path += ";concurrent"
-        with self.assertRaisesRegex(ValueError, "Concurrent user PATH"):
-            self.apply()
-        self.host.user_path = self.original_path
         self.host.tasks["CEVDET Graph - Code"]["enabled"] = False
         with self.assertRaisesRegex(ValueError, "Concurrent task"):
             self.apply()
@@ -152,7 +140,9 @@ class InstallerTests(unittest.TestCase):
                 self.apply()
         interrupted_state = json.loads(self.state_path.read_text())
         self.assertEqual(interrupted_state["status"], "applying")
-        self.assertFalse(interrupted_state["journal"][-1]["done"])
+        pending = next(e for e in interrupted_state["journal"] if e["kind"] == "file" and not e["done"])
+        self.assertFalse(pending["done"])
+        self.assertTrue(all(not t["enabled"] and not t["running"] for t in self.host.tasks.values()))
         installer.transition(self.state_path, self.host, "before")
         for path, values in self.state["files"].items():
             self.assertEqual(installer.read_bytes(path), installer.unpacked(values["before"]))
@@ -160,7 +150,6 @@ class InstallerTests(unittest.TestCase):
         expected_tasks["CEVDET Graph - Code"] = installer.disabled_task(expected_tasks["CEVDET Graph - Code"])
         expected_tasks["CEVDET Graph - Vault"] = installer.disabled_task(expected_tasks["CEVDET Graph - Vault"])
         self.assertEqual(self.host.tasks, expected_tasks)
-        self.assertEqual(self.host.path(), self.original_path)
         self.assertEqual(unknown.read_bytes(), b"preserve me")
 
     def test_receipt_source_change_and_baseline_overwrite_refused(self):
@@ -217,9 +206,8 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn(str(target), identity["file_sha256"])
         for path, expected in identity["file_sha256"].items():
             self.assertEqual(installer.digest(Path(path).read_bytes()), expected)
-        for name, expected in identity["task_xml_sha256"].items():
-            self.assertEqual(installer.digest(self.host.task(name)["xml"].encode("utf-8")), expected)
-        self.assertEqual(identity["user_path_sha256"], installer.digest(json.dumps(self.host.path(), ensure_ascii=False).encode("utf-8")))
+        for name, expected in identity["task_actions_sha256"].items():
+            self.assertEqual(installer.digest(json.dumps(installer.action_fields(self.host.task(name)), sort_keys=True).encode("utf-8")), expected)
         installer.transition(self.state_path, self.host, "before")
         self.assertEqual(target.read_bytes(), original)
 
@@ -260,7 +248,7 @@ class InstallerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "conflict backup"):
                 self.apply()
         state = json.loads(self.state_path.read_bytes())
-        pending = state["journal"][-1]
+        pending = next(e for e in state["journal"] if e["kind"] == "file" and not e["done"])
         self.assertFalse(pending["done"])
         self.assertEqual(Path(pending["backup"]).read_bytes(), b"late user edit")
         with self.assertRaisesRegex(ValueError, "Unresolved concurrent file preserved"):
@@ -276,7 +264,8 @@ class InstallerTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 self.apply()
         state = json.loads(self.state_path.read_bytes())
-        self.assertEqual(Path(state["journal"][-1]["name"]).read_bytes(), b"late independent creation")
+        pending = next(e for e in state["journal"] if e["kind"] == "file" and not e["done"])
+        self.assertEqual(Path(pending["name"]).read_bytes(), b"late independent creation")
 
     def test_kill_before_result_checkpoint_recovers_marker(self):
         marker = Path(self.state["owner_marker"])
@@ -296,20 +285,6 @@ class InstallerTests(unittest.TestCase):
             restored = installer.transition(self.state_path, self.host, "before")
         self.assertFalse(marker.exists())
         self.assertEqual(restored["status"], "rolled-back")
-
-    def test_path_late_observed_edit_is_saved_and_refused(self):
-        original_save = installer.save
-        def race(path, state):
-            original_save(path, state)
-            if state["journal"] and state["journal"][-1]["kind"] == "path" and "conflicting_observed" not in state["journal"][-1]:
-                self.host.user_path = "concurrent editor path"
-        with patch.object(installer, "save", side_effect=race):
-            with self.assertRaisesRegex(ValueError, "Concurrent user PATH"):
-                self.apply()
-        state = json.loads(self.state_path.read_bytes())
-        self.assertEqual(state["journal"][-1]["actual_before"], self.original_path)
-        self.assertEqual(state["journal"][-1]["conflicting_observed"], "concurrent editor path")
-        self.assertEqual(self.host.path(), "concurrent editor path")
 
     def test_worktree_marker_checkpoint_survives_stop_interruption(self):
         code = Path(self.plan["code_root"])
@@ -334,12 +309,12 @@ class InstallerTests(unittest.TestCase):
         def race(path, state):
             original_save(path, state)
             if state["journal"] and state["journal"][-1]["kind"] == "task" and "conflicting_observed" not in state["journal"][-1]:
-                self.host.tasks[state["journal"][-1]["name"]]["xml"] = self.original_tasks["CEVDET Graph - Code"]["xml"].replace("old.exe", "user-edit.exe")
+                self.host.tasks[state["journal"][-1]["name"]]["xml"] = self.host.tasks[state["journal"][-1]["name"]]["xml"].replace("old.exe", "user-edit.exe")
         with patch.object(installer, "save", side_effect=race):
             with self.assertRaisesRegex(ValueError, "Concurrent task change"):
                 self.apply()
         state = json.loads(self.state_path.read_bytes())
-        entry = state["journal"][-1]
+        entry = next(e for e in state["journal"] if e["kind"] == "task" and not e["done"])
         self.assertIn("old.exe", entry["actual_before"]["xml"])
         self.assertIn("user-edit.exe", entry["conflicting_observed"]["xml"])
         self.assertIn("user-edit.exe", self.host.task(entry["name"])["xml"])
@@ -384,7 +359,7 @@ class InstallerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Reviewed source changed"):
             self.apply()
 
-    def test_vault_rollback_registration_xml_disables_triggers_before_register(self):
+    def test_rollback_partial_action_setters_keep_both_tasks_disabled(self):
         self.apply()
         original = self.host.set_task
         def checked(name, value):
@@ -410,12 +385,12 @@ class InstallerTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "disabled before checkpoint"):
                 self.apply()
         state = json.loads(self.state_path.read_bytes())
-        entry = state["journal"][-1]
+        entry = next(e for e in state["journal"] if e["kind"] == "quiesce" and not e["done"])
         self.assertEqual(entry["kind"], "quiesce")
         self.assertFalse(entry["done"])
         self.assertTrue(entry["actual_before"]["enabled"])
         self.assertFalse(self.host.task(entry["name"])["enabled"])
-        self.assertEqual(self.host.stopped, [])
+        self.assertEqual(set(self.host.stopped), set(self.host.tasks))
         for path, values in self.state["files"].items():
             self.assertEqual(installer.read_bytes(path), installer.unpacked(values["before"]))
         original_stop = self.host.stop
@@ -433,41 +408,184 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(self.host.task("CEVDET Graph - Vault")["enabled"])
         self.assertFalse(self.host.task("CEVDET Graph - Vault")["running"])
 
+    def test_no_environment_path_api_or_journal(self):
+        self.assertFalse(hasattr(installer, "transactional_path"))
+        self.assertFalse(hasattr(installer.Windows, "path"))
+        self.assertFalse(hasattr(installer.Windows, "set_path"))
+        result = self.apply()  # Fake host deliberately has no PATH API.
+        self.assertNotIn("path", result)
+        self.assertNotIn("path", {entry["kind"] for entry in result["journal"]})
+        installer.transition(self.state_path, self.host, "before")
 
-@unittest.skipUnless(os.name == "nt", "native Windows transactional registry test")
-class TransactionalPathTests(unittest.TestCase):
-    def setUp(self):
-        import winreg
-        self.registry = winreg
-        self.subkey = "Software\\CRGInstallerTest-" + uuid.uuid4().hex
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, self.subkey) as key:
-            winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, r"%TEST_ROOT%\old;keep")
-        self.addCleanup(winreg.DeleteKey, winreg.HKEY_CURRENT_USER, self.subkey)
+    def test_enabled_default_omission_preserves_strict_other_fields(self):
+        original = self.host.task("CEVDET Graph - Code")
+        omitted = dict(original, xml=original["xml"].replace("<Enabled>true</Enabled>", ""))
+        self.assertTrue(installer.same_task(original, omitted))
+        changed = dict(omitted, xml=omitted["xml"].replace("original", "foreign"))
+        self.assertFalse(installer.same_task(original, changed))
+        inconsistent = dict(omitted, enabled=False)
+        with self.assertRaisesRegex(ValueError, "Inconsistent task Enabled"):
+            installer.same_task(installer.disabled_task(original), inconsistent)
 
-    def read(self):
-        with self.registry.OpenKey(self.registry.HKEY_CURRENT_USER, self.subkey) as key:
-            return self.registry.QueryValueEx(key, "Path")
+    def test_native_style_enable_export_without_default_completes_roundtrip(self):
+        original_enable = self.host.enable_task
+        def enabled_without_default(name):
+            original_enable(name)
+            task = self.host.tasks[name]
+            task["xml"] = task["xml"].replace("<Enabled>true</Enabled>", "")
+        with patch.object(self.host, "enable_task", side_effect=enabled_without_default):
+            self.assertEqual(self.apply()["status"], "applied")
+            self.assertEqual(installer.transition(self.state_path, self.host, "before")["status"], "rolled-back")
+            self.assertEqual(self.apply()["status"], "applied")
 
-    def test_native_transaction_preserves_raw_value_type_and_expected_check(self):
-        expected, registry_type = self.read()
-        installer.transactional_path(r"%TEST_ROOT%\new;keep", expected, self.subkey)
-        self.assertEqual(self.read(), (r"%TEST_ROOT%\new;keep", registry_type))
-        with self.assertRaisesRegex(ValueError, "inside transaction"):
-            installer.transactional_path("wrong", expected, self.subkey)
-        self.assertEqual(self.read(), (r"%TEST_ROOT%\new;keep", registry_type))
+    def test_native_setter_only_submits_actions(self):
+        with patch.object(installer.Windows, "ps") as ps:
+            installer.Windows().set_task("fixture", self.original_tasks["CEVDET Graph - Code"])
+        script, data = ps.call_args.args
+        self.assertIn("Set-ScheduledTask", script)
+        self.assertIn("-Action $actions", script)
+        self.assertNotIn("Register-ScheduledTask", script)
+        self.assertNotIn("-Xml", script)
+        self.assertNotIn("xml", data)
 
-    def test_nontransactional_interference_preserves_external_write(self):
-        winreg = self.registry
-        expected, registry_type = self.read()
-        original_set = winreg.SetValueEx
-        def race(key, name, reserved, kind, value):
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.subkey, 0, winreg.KEY_SET_VALUE) as outside:
-                original_set(outside, "Path", 0, registry_type, "external writer wins")
-            return original_set(key, name, reserved, kind, value)
-        with patch.object(winreg, "SetValueEx", side_effect=race):
-            with self.assertRaises(OSError):
-                installer.transactional_path("migration must not win", expected, self.subkey)
-        self.assertEqual(self.read(), ("external writer wins", registry_type))
+    def test_unrelated_edit_at_native_setter_survives_apply_and_rollback(self):
+        original = self.host.set_task
+        calls = []
+        def race(name, value):
+            calls.append(name)
+            if len(calls) == 1:
+                self.host.tasks[name]["xml"] = self.host.tasks[name]["xml"].replace(
+                    "<Description>original</Description>", "<Description>external edit</Description>")
+            original(name, value)
+        with patch.object(self.host, "set_task", side_effect=race):
+            result = self.apply()
+        code = "CEVDET Graph - Code"
+        self.assertIn("external edit", self.host.task(code)["xml"])
+        task_entry = next(e for e in result["journal"] if e["kind"] == "task" and e["name"] == code)
+        self.assertEqual(len(task_entry["attempts"]), 2)
+        installer.transition(self.state_path, self.host, "before")
+        self.assertIn("external edit", self.host.task(code)["xml"])
+        self.assertEqual(installer.action_fields(self.host.task(code)), installer.action_fields(self.original_tasks[code]))
+        self.assertFalse(self.host.task(code)["enabled"])
+
+    def test_task_action_ids_and_context_preserved_from_latest_snapshot(self):
+        name = "CEVDET Graph - Code"
+        self.host.tasks[name]["xml"] = self.host.tasks[name]["xml"].replace(
+            'Context="Author"', 'Context="OtherPrincipal"').replace('id="build"', 'id="external-id"')
+        self.apply()
+        self.assertIn('Context="OtherPrincipal"', self.host.task(name)["xml"])
+        self.assertIn('id="external-id"', self.host.task(name)["xml"])
+        self.assertEqual(len(installer.action_fields(self.host.task(name))), 1)
+        installer.transition(self.state_path, self.host, "before")
+        self.assertIn('Context="OtherPrincipal"', self.host.task(name)["xml"])
+        self.assertIn('id="external-id"', self.host.task(name)["xml"])
+        self.assertIn('id="watch"', self.host.task(name)["xml"])
+        self.assertEqual(len(installer.action_fields(self.host.task(name))), 2)
+
+    def test_foreign_postread_changes_stop_after_two_retries(self):
+        original = self.host.set_task
+        count = 0
+        def race(name, value):
+            nonlocal count
+            count += 1
+            original(name, value)
+            self.host.tasks[name]["xml"] = self.host.tasks[name]["xml"].replace(
+                "</Description>", str(count) + "</Description>")
+        with patch.object(self.host, "set_task", side_effect=race):
+            with self.assertRaisesRegex(ValueError, "retry limit"):
+                self.apply()
+        self.assertEqual(count, 3)
+        self.assertTrue(all(not t["enabled"] and not t["running"] for t in self.host.tasks.values()))
+        installer.transition(self.state_path, self.host, "before")
+        self.assertIn("original123", self.host.task("CEVDET Graph - Code")["xml"])
+
+    def test_postset_owned_action_conflict_is_preserved_without_retry(self):
+        original = self.host.set_task
+        count = 0
+        def race(name, value):
+            nonlocal count
+            count += 1
+            original(name, value)
+            root = installer.ET.fromstring(self.host.tasks[name]["xml"])
+            installer.action_nodes(root)[0].find(installer.TASK_NS + "Command").text = "external.exe"
+            self.host.tasks[name]["xml"] = installer.ET.tostring(root, encoding="unicode")
+        with patch.object(self.host, "set_task", side_effect=race):
+            with self.assertRaisesRegex(ValueError, "Concurrent task change after setter"):
+                self.apply()
+        self.assertEqual(count, 1)
+        self.assertIn("external.exe", self.host.task("CEVDET Graph - Code")["xml"])
+        self.assertTrue(all(not t["enabled"] and not t["running"] for t in self.host.tasks.values()))
+
+    def test_all_surfaces_verify_before_enable_or_restart(self):
+        original_replace = installer.preserved_replace
+        original_set = self.host.set_task
+        original_enable = self.host.enable_task
+        def stopped():
+            self.assertEqual(set(self.host.stopped), set(self.host.tasks))
+            self.assertTrue(all(not t["enabled"] and not t["running"] for t in self.host.tasks.values()))
+        def replace(*args):
+            stopped()
+            return original_replace(*args)
+        def set_task(*args):
+            stopped()
+            return original_set(*args)
+        def enable(name):
+            for path, values in self.state["files"].items():
+                self.assertEqual(installer.read_bytes(path), installer.unpacked(values["after"]))
+            for task_name, values in self.state["tasks"].items():
+                self.assertEqual(installer.action_fields(self.host.task(task_name)), installer.action_fields(values["after"]))
+            original_enable(name)
+        with patch.object(installer, "preserved_replace", side_effect=replace), patch.object(
+                self.host, "set_task", side_effect=set_task), patch.object(self.host, "enable_task", side_effect=enable):
+            self.apply()
+
+    def test_enable_failure_compensates_both_tasks_to_disabled_stopped(self):
+        original = self.host.enable_task
+        def fail(name):
+            original(name)
+            if name == "CEVDET Graph - Vault":
+                raise OSError("enable interrupted")
+        with patch.object(self.host, "enable_task", side_effect=fail):
+            with self.assertRaisesRegex(OSError, "enable interrupted"):
+                self.apply()
+        self.assertTrue(all(not t["enabled"] and not t["running"] for t in self.host.tasks.values()))
+        self.assertEqual(installer.transition(self.state_path, self.host, "before")["status"], "rolled-back")
+
+    def test_rollback_external_reenable_is_stopped_without_overwriting_actions(self):
+        self.apply()
+        original = self.host.set_task
+        def reenable(name, value):
+            original(name, value)
+            if name == "CEVDET Graph - Vault":
+                self.host.enable_task(name)
+                self.host.start_task(name)
+        with patch.object(self.host, "set_task", side_effect=reenable):
+            with self.assertRaisesRegex(ValueError, "Concurrent task change after setter"):
+                installer.transition(self.state_path, self.host, "before")
+        self.assertTrue(all(not t["enabled"] and not t["running"] for t in self.host.tasks.values()))
+        self.assertEqual(installer.action_fields(self.host.task("CEVDET Graph - Vault")),
+                         installer.action_fields(self.original_tasks["CEVDET Graph - Vault"]))
+        state = json.loads(self.state_path.read_bytes())
+        self.assertEqual(state["status"], "rolling-back")
+        self.assertEqual(state["compensation_errors"], [])
+        self.assertEqual(installer.transition(self.state_path, self.host, "before")["status"], "rolled-back")
+
+    def test_file_window_external_reenable_triggers_both_task_compensation(self):
+        original = installer.preserved_replace
+        injected = False
+        def reenable(*args):
+            nonlocal injected
+            original(*args)
+            if not injected:
+                injected = True
+                self.host.enable_task("CEVDET Graph - Vault")
+                self.host.start_task("CEVDET Graph - Vault")
+        with patch.object(installer, "preserved_replace", side_effect=reenable):
+            with self.assertRaisesRegex(ValueError, "Task left stopped window"):
+                self.apply()
+        self.assertTrue(all(not t["enabled"] and not t["running"] for t in self.host.tasks.values()))
+        self.assertEqual(installer.transition(self.state_path, self.host, "before")["status"], "rolled-back")
+
 
 
 if __name__ == "__main__":

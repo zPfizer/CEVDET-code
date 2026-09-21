@@ -153,62 +153,8 @@ def hooks_dir(repo):
     raise ValueError("Live target must have a physical .git directory")
 
 
-def transactional_path(value, expected, subkey="Environment"):
-    """Query/compare/write share one transacted HKCU key; preserve REG_SZ/EXPAND_SZ.
-
-    Production calls only Environment/Path. The subkey parameter permits isolated
-    native tests without accessing the real environment value.
-    """
-    import ctypes
-    from ctypes import wintypes
-    import winreg
-    ktm = ctypes.WinDLL("KtmW32", use_last_error=True)
-    registry = ctypes.WinDLL("Advapi32", use_last_error=True)
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    ktm.CreateTransaction.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD,
-        wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.LPWSTR]
-    ktm.CreateTransaction.restype = wintypes.HANDLE
-    ktm.CommitTransaction.argtypes = [wintypes.HANDLE]
-    ktm.CommitTransaction.restype = wintypes.BOOL
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel.CloseHandle.restype = wintypes.BOOL
-    registry.RegOpenKeyTransactedW.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR,
-        wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE), wintypes.HANDLE, ctypes.c_void_p]
-    registry.RegOpenKeyTransactedW.restype = wintypes.LONG
-    transaction = ktm.CreateTransaction(None, None, 0, 0, 0, 10000, "CRG scoped PATH migration")
-    if transaction == ctypes.c_void_p(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
-    key = wintypes.HANDLE()
-    try:
-        # HKEY_CURRENT_USER is a sign-extended predefined Windows handle.
-        status = registry.RegOpenKeyTransactedW(wintypes.HANDLE(-2147483647), subkey, 0,
-            winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE, ctypes.byref(key), transaction, None)
-        if status:
-            raise ctypes.WinError(status)
-        try:
-            current, registry_type = winreg.QueryValueEx(key.value, "Path")
-        except FileNotFoundError:
-            current, registry_type = None, winreg.REG_EXPAND_SZ
-        if current != expected:
-            raise ValueError("Concurrent user PATH change inside transaction")
-        if registry_type not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
-            raise ValueError("Unsupported user PATH registry type")
-        if value is None:
-            if current is not None:
-                winreg.DeleteValue(key.value, "Path")
-        else:
-            winreg.SetValueEx(key.value, "Path", 0, registry_type, value)
-        if not ktm.CommitTransaction(transaction):
-            raise ctypes.WinError(ctypes.get_last_error())
-    finally:
-        if key.value:
-            winreg.CloseKey(key.value)
-        # Closing an uncommitted transaction rolls it back, including exceptions.
-        kernel.CloseHandle(transaction)
-
-
 class Windows:
-    """Only named task operations and the current user's PATH."""
+    """Only explicitly named task operations; environment PATH is out of scope."""
 
     @staticmethod
     def ps(script, data=None):
@@ -218,14 +164,6 @@ class Windows:
             "$ErrorActionPreference='Stop'; $d=$env:CRG_MIGRATION_INPUT|ConvertFrom-Json; " + script],
             env=env, check=True, capture_output=True, text=True)
         return json.loads(result.stdout) if result.stdout.strip() else None
-
-    def path(self):
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
-            try:
-                return winreg.QueryValueEx(key, "Path")[0]
-            except FileNotFoundError:
-                return None
 
     def worktree_roots(self, code):
         output = subprocess.check_output(["git", "-C", str(code), "worktree", "list", "--porcelain", "-z"])
@@ -242,9 +180,6 @@ class Windows:
                 raise ValueError("Unregistered worktree marker scope")
             roots.append(root)
         return roots
-
-    def set_path(self, value, expected):
-        transactional_path(value, expected)
 
     def task(self, name):
         return self.ps("$t=Get-ScheduledTask -TaskName $d.name -TaskPath '\\'; "
@@ -290,11 +225,27 @@ class Windows:
             "($found.Count -eq 0)|ConvertTo-Json", {"snapshot": snapshot})
 
     def set_task(self, name, value):
-        self.ps("Register-ScheduledTask -TaskName $d.name -TaskPath '\\' -Xml $d.value.xml -Force|Out-Null; "
-            "if($d.value.enabled){Enable-ScheduledTask -TaskName $d.name -TaskPath '\\'|Out-Null}" 
-            "else{Disable-ScheduledTask -TaskName $d.name -TaskPath '\\'|Out-Null}; "
-            "if($d.value.running -and $d.value.enabled){Start-ScheduledTask -TaskName $d.name -TaskPath '\\'}",
-            {"name": name, "value": value})
+        # Partial native setter: never submit a stale complete task definition.
+        actions = action_fields(value)
+        nodes = action_nodes(ET.fromstring(value["xml"]))
+        for action, node in zip(actions, nodes):
+            action["Id"] = node.get("id", "")
+        self.ps("$t=Get-ScheduledTask -TaskName $d.name -TaskPath '\\'; "
+            "if($t.Settings.Enabled -or $t.State -eq 'Running'){throw 'Task is not quiescent'}; "
+            "$index=0; $actions=@(foreach($v in $d.actions){ "
+            "$p=@{Execute=$v.Command}; "
+            "if($v.Arguments){$p.Argument=$v.Arguments}; "
+            "if($v.WorkingDirectory){$p.WorkingDirectory=$v.WorkingDirectory}; "
+            "$id=$v.Id; if($index -lt @($t.Actions).Count){$id=$t.Actions[$index].Id}; "
+            "if($id){$p.Id=$id}; $index++; New-ScheduledTaskAction @p }); "
+            "Set-ScheduledTask -TaskName $d.name -TaskPath '\\' -Action $actions|Out-Null",
+            {"name": name, "actions": actions})
+
+    def enable_task(self, name):
+        self.ps("Enable-ScheduledTask -TaskName $d.name -TaskPath '\\'|Out-Null", {"name": name})
+
+    def start_task(self, name):
+        self.ps("Start-ScheduledTask -TaskName $d.name -TaskPath '\\'", {"name": name})
 
     def disable_task(self, name):
         self.ps("Disable-ScheduledTask -TaskName $d.name -TaskPath '\\'|Out-Null", {"name": name})
@@ -303,45 +254,96 @@ class Windows:
         return self.ps("[bool](Get-Process -Id $d.pid -ErrorAction SilentlyContinue)|ConvertTo-Json", {"pid": pid})
 
 
+TASK_NS = "{http://schemas.microsoft.com/windows/2004/02/mit/task}"
+ACTION_FIELDS = ("Command", "Arguments", "WorkingDirectory")
+
+
+def action_nodes(root):
+    actions = root.find(TASK_NS + "Actions")
+    if actions is None or not len(actions) or any(a.tag != TASK_NS + "Exec" for a in actions):
+        raise ValueError("Expected Exec task actions")
+    for action in actions:
+        if any(child.tag not in {TASK_NS + key for key in ACTION_FIELDS} for child in action):
+            raise ValueError("Unsupported task action field")
+    return list(actions)
+
+
+def action_fields(task):
+    return [{key: action.findtext(TASK_NS + key, "") for key in ACTION_FIELDS}
+            for action in action_nodes(ET.fromstring(task["xml"]))]
+
+
+def with_actions(current, desired):
+    """Preserve latest task/Actions metadata and IDs on retained action positions."""
+    root = ET.fromstring(current["xml"])
+    existing = action_nodes(root)
+    source = action_nodes(ET.fromstring(desired["xml"]))
+    actions = root.find(TASK_NS + "Actions")
+    for child in existing:
+        actions.remove(child)
+    for index, node in enumerate(source):
+        attributes = existing[index].attrib if index < len(existing) else node.attrib
+        action = ET.SubElement(actions, TASK_NS + "Exec", attributes)
+        for key in ACTION_FIELDS:
+            field = node.find(TASK_NS + key)
+            if field is not None:
+                ET.SubElement(action, TASK_NS + key).text = field.text
+    return dict(current, xml=ET.tostring(root, encoding="unicode"))
+
+
 def task_target(original, python, runtime, repo, role):
     root = ET.fromstring(original["xml"])
-    ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
-    ET.register_namespace("", ns["t"])
-    actions = root.find("t:Actions", ns)
-    if actions is None:
-        raise ValueError("Task has no actions")
-    for child in list(actions):
+    ET.register_namespace("", TASK_NS[1:-1])
+    existing = action_nodes(root)
+    actions = root.find(TASK_NS + "Actions")
+    for child in existing:
         actions.remove(child)
-    action = ET.SubElement(actions, "{" + ns["t"] + "}Exec")
+    action = ET.SubElement(actions, TASK_NS + "Exec", existing[0].attrib)
     for key, text in (("Command", str(python)), ("Arguments", subprocess.list2cmdline(
             ["-B", str(runtime), role, "--repo", str(repo)])), ("WorkingDirectory", str(repo))):
-        ET.SubElement(action, "{" + ns["t"] + "}" + key).text = text
+        ET.SubElement(action, TASK_NS + key).text = text
     return {"xml": ET.tostring(root, encoding="unicode"), "enabled": original["enabled"],
             "running": original["running"] if role == "watch" else False}
 
 
-def disabled_task(original):
-    """Disable in the XML itself, before registration can activate a trigger."""
+def enabled_task(original, enabled):
     root = ET.fromstring(original["xml"])
-    namespace = "{http://schemas.microsoft.com/windows/2004/02/mit/task}"
-    settings = root.find(namespace + "Settings")
+    settings = root.find(TASK_NS + "Settings")
     if settings is None:
-        settings = ET.SubElement(root, namespace + "Settings")
-    enabled = settings.find(namespace + "Enabled")
-    if enabled is None:
-        enabled = ET.SubElement(settings, namespace + "Enabled")
-    enabled.text = "false"
-    return {"xml": ET.tostring(root, encoding="unicode"), "enabled": False, "running": False}
+        settings = ET.SubElement(root, TASK_NS + "Settings")
+    field = settings.find(TASK_NS + "Enabled")
+    if field is None:
+        field = ET.SubElement(settings, TASK_NS + "Enabled")
+    field.text = "true" if enabled else "false"
+    return dict(original, xml=ET.tostring(root, encoding="unicode"), enabled=enabled)
+
+
+def disabled_task(original):
+    return dict(enabled_task(original, False), running=False)
+
+
+def same_owned_task(a, b):
+    return a["enabled"] == b["enabled"] and action_fields(a) == action_fields(b)
 
 
 def same_task(a, b):
     # Scheduler formatting differs on export. Compare parsed structure, ignore current running state.
-    def shape(xml):
-        node = ET.fromstring(xml)
+    def shape(task):
+        node = ET.fromstring(task["xml"])
+        settings = node.find(TASK_NS + "Settings")
+        if settings is not None:
+            field = settings.find(TASK_NS + "Enabled")
+            text = "true" if field is None else (field.text or "").strip()
+            if text not in ("true", "false", "1", "0") or (text in ("true", "1")) != task["enabled"]:
+                raise ValueError("Inconsistent task Enabled snapshot")
+            # Windows omits Enabled=true (the schema default), and inserts false
+            # at its own position. Compare its value above, all other XML below.
+            if field is not None:
+                settings.remove(field)
         def visit(n):
             return (n.tag, sorted(n.attrib.items()), (n.text or "").strip(), [visit(c) for c in n])
         return visit(node)
-    return a["enabled"] == b["enabled"] and shape(a["xml"]) == shape(b["xml"])
+    return a["enabled"] == b["enabled"] and shape(a) == shape(b)
 
 
 def prepare(plan, state_path, host):
@@ -410,15 +412,11 @@ def prepare(plan, state_path, host):
         tasks[name] = {"before": before, "after": task_target(before, pythonw, runtime, code,
             "watch" if role == "code" else "protected-status")}
         tasks[name]["rollback"] = disabled_task(before)
-    old_path = host.path()
-    new_path = None if old_path is None else ";".join(str(python.parent)
-        if os.path.normcase(part.strip().strip('"').rstrip("\\/")) == os.path.normcase(str(old).rstrip("\\/"))
-        else part for part in old_path.split(";"))
     identity_record = json.loads(desired[identity])
     identity_record.update(
         file_sha256={str(path): digest(data) for path, data in desired.items() if path not in (identity, install_state)},
-        task_xml_sha256={name: digest(value["after"]["xml"].encode("utf-8")) for name, value in tasks.items()},
-        user_path_sha256=digest(json.dumps(new_path, ensure_ascii=False).encode("utf-8")))
+        task_actions_sha256={name: digest(json.dumps(action_fields(value["after"]), sort_keys=True).encode("utf-8"))
+                             for name, value in tasks.items()})
     desired[identity] = json.dumps(identity_record, indent=2, ensure_ascii=False).encode("utf-8")
     if install_state is not None:
         record["integrations"]["crg_runtime_separation"].update(
@@ -430,7 +428,7 @@ def prepare(plan, state_path, host):
         "install_state": str(install_state) if install_state else None, "roots": {
             "code": str(code), "vault": str(vault), "canonical": str(canonical)},
         "owner_marker": str(code / ".code-review-graph" / "crg-freshness.lock"),
-        "path": {"before": old_path, "after": new_path}, "journal": [],
+        "journal": [],
         "source_hashes": {str(Path(__file__).resolve()): digest(installer_bytes),
                           str(source): digest(source_bytes)}}
     save(state_path, state)
@@ -490,8 +488,6 @@ def _transition(state_path, host, direction, receipt):
     for path, values in state["files"].items():
         if packed(read_bytes(path)) not in [values[key] for key in allowed]:
             raise ValueError(f"Concurrent file change: {path}")
-    if host.path() not in [state["path"][key] for key in allowed]:
-        raise ValueError("Concurrent user PATH change")
     for name, values in state["tasks"].items():
         task_allowed = list(allowed)
         if "rollback" in values and (mixed or state["status"] == "rolled-back"):
@@ -499,7 +495,7 @@ def _transition(state_path, host, direction, receipt):
         candidates = [values[key] for key in task_allowed]
         if mixed:
             candidates.extend(disabled_task(value) for value in values.values())
-        if not any(same_task(host.task(name), value) for value in candidates):
+        if not any(same_owned_task(host.task(name), value) for value in candidates):
             raise ValueError(f"Concurrent task change: {name}")
     state["status"] = "applying" if direction == "after" else "rolling-back"
     save(state_path, state)
@@ -520,111 +516,156 @@ def _transition(state_path, host, direction, receipt):
         elif kind in ("file", "owner-marker"):
             entry["expected"] = packed(read_bytes(name))
             entry["backup"] = str(Path(name).with_name(Path(name).name + ".crg-" + uuid.uuid4().hex + ".bak"))
-        elif kind == "path":
-            entry["actual_before"] = host.path()
-        elif kind in ("task", "quiesce"):
+        elif kind in ("task", "quiesce", "enable", "start"):
             entry["actual_before"] = host.task(name)
         save(state_path, state)
         result = action()
         state["journal"][-1].update(done=True, result=result)
         save(state_path, state)
-    # Disable all triggers before stopping any process or changing runtime files.
-    # Stop alone is insufficient: a still-enabled old task could restart mid-copy.
-    for name in state["tasks"]:
-        def quiesce(name=name):
-            entry = state["journal"][-1]
-            observed = host.task(name)
-            values = state["tasks"][name]
-            candidates = list(values.values()) + [disabled_task(value) for value in values.values()]
-            if not same_task(observed, entry["actual_before"]) or not any(same_task(observed, candidate) for candidate in candidates):
-                entry["conflicting_observed"] = observed
-                save(state_path, state)
-                raise ValueError(f"Concurrent task change before quiesce: {name}")
-            host.disable_task(name)
-            observed = host.task(name)
-            if not same_task(observed, disabled_task(entry["actual_before"])):
-                entry["conflicting_observed"] = observed
-                save(state_path, state)
-                raise ValueError(f"Task quiesce verification failed: {name}")
-        operation("quiesce", name, quiesce)
-    for name in state["tasks"]:
-        operation("stop", name, lambda name=name: host.stop(name, state["journal"][-1]["process_snapshot"]))
-    markers = {path for item in state["journal"] if item["kind"] == "stop" for path in item.get("markers", {})}
-    for marker_name in sorted(markers):
-        marker = physical(marker_name)
-        root = marker.parent.parent
-        if marker.name != "crg-freshness.lock" or marker.parent.name != ".code-review-graph" or (root != code and not (root.parent == code.parent and root.name.startswith(code.name + "-"))):
-            raise ValueError("Unexpected saved worktree marker scope")
-        if not marker.exists():
-            continue
-        marker_data = read_bytes(marker)
-        owner = json.loads(marker_data)
-        terminated = {process["pid"] for item in state["journal"] if item["kind"] == "stop"
-                      and item.get("markers", {}).get(str(marker)) == digest(marker_data)
-                      and host.processes_absent(item.get("process_snapshot", []))
-                      for process in item.get("process_snapshot", [])}
-        if (owner.get("owner") != "cevdet-native-watch" or owner.get("pid") not in terminated
-                or host.pid_running(owner["pid"])):
-            raise ValueError("Owner marker has no verified terminated watcher")
-        def clear_marker():
-            if read_bytes(marker) != marker_data:
-                raise ValueError("Concurrent owner marker change")
-            entry = state["journal"][-1]
-            preserved_replace(marker, None, marker_data, entry["backup"])
-        operation("owner-marker", str(marker), clear_marker)
-    for path, values in state["files"].items():
-        def replace(path=path, values=values):
-            entry = state["journal"][-1]
-            if entry["expected"] not in (values["before"], values["after"]):
-                raise ValueError(f"Concurrent file change: {path}")
-            preserved_replace(path, unpacked(values[direction]), unpacked(entry["expected"]), entry["backup"])
-        operation("file", path, replace)
-    def replace_path():
+    def checked_update(name, desired, setter, owned_check):
         entry = state["journal"][-1]
-        observed = host.path()
-        if observed != entry["actual_before"] or observed not in (state["path"]["before"], state["path"]["after"]):
-            entry["conflicting_observed"] = observed
-            save(state_path, state)
-            raise ValueError("Concurrent user PATH change")
-        host.set_path(state["path"][direction], expected=entry["actual_before"])
-        observed = host.path()
-        if observed != state["path"][direction]:
-            entry["conflicting_observed"] = observed
-            save(state_path, state)
-            raise ValueError("Concurrent user PATH change after setter")
-    operation("path", "User", replace_path)
-    for name, values in state["tasks"].items():
-        def replace_task(name=name, values=values):
-            entry = state["journal"][-1]
-            observed = host.task(name)
-            candidates = list(values.values()) + [disabled_task(value) for value in values.values()]
-            if not same_task(observed, entry["actual_before"]) or not any(same_task(observed, candidate) for candidate in candidates):
-                entry["conflicting_observed"] = observed
+        entry["attempts"] = []
+        for attempt in range(3):  # Initial attempt plus at most two observed-difference retries.
+            before = host.task(name)
+            if not owned_check(before):
+                entry["conflicting_observed"] = before
                 save(state_path, state)
                 raise ValueError(f"Concurrent task change: {name}")
-            value = values["rollback"] if direction == "before" else values[direction]
-            host.set_task(name, value)
+            expected = desired(before)
+            observation = {"before": before, "expected": expected}
+            entry["attempts"].append(observation)
+            save(state_path, state)
+            setter(expected)
             observed = host.task(name)
-            if not same_task(observed, value):
-                entry["conflicting_observed"] = observed
-                save(state_path, state)
+            observation["after"] = observed
+            save(state_path, state)
+            if same_task(observed, expected):
+                return observed
+            entry["conflicting_observed"] = observed
+            save(state_path, state)
+            if not same_owned_task(observed, expected) or observed["running"] != expected["running"]:
                 raise ValueError(f"Concurrent task change after setter: {name}")
-        operation("task", name, replace_task)
-    for path, values in state["files"].items():
-        if read_bytes(path) != unpacked(values[direction]):
-            raise ValueError(f"File verification failed: {path}")
-    if host.path() != state["path"][direction]:
-        raise ValueError("PATH verification failed")
-    for name, values in state["tasks"].items():
-        expected_task = values["rollback"] if direction == "before" else values[direction]
-        if not same_task(host.task(name), expected_task):
-            raise ValueError(f"Task verification failed: {name}")
-    state["status"] = "applied" if direction == "after" else "rolled-back"
-    state["runtime_differences"] = (["Both original task actions restored with Enabled=false in registration XML; triggers and restart paused to protect Vault and keep the old environment untouched"]
-        if direction == "before" else [])
-    state["platform_limitations"] = ["Task Scheduler exposes no compare-and-swap: journaled immediate pre/post observations do not exclude an unobserved external write during the native setter."]
-    save(state_path, state)
-    return state
+            # Only foreign differences are rebased. Never overwrite conflicting owned actions.
+        raise ValueError(f"Task readback retry limit: {name}")
+
+    try:
+        # Disable every trigger, then stop both tasks before any file/action mutation.
+        for name, values in state["tasks"].items():
+            def quiesce(name=name, values=values):
+                candidates = list(values.values()) + [disabled_task(value) for value in values.values()]
+                return checked_update(name, lambda current: enabled_task(current, False),
+                    lambda value: host.disable_task(name),
+                    lambda current: any(same_owned_task(current, value) for value in candidates))
+            operation("quiesce", name, quiesce)
+        for name in state["tasks"]:
+            operation("stop", name, lambda name=name: host.stop(name, state["journal"][-1]["process_snapshot"]))
+
+        def ensure_stopped():
+            for name in state["tasks"]:
+                current = host.task(name)
+                if current["enabled"] or current["running"]:
+                    raise ValueError(f"Task left stopped window: {name}")
+        ensure_stopped()
+        markers = {path for item in state["journal"] if item["kind"] == "stop" for path in item.get("markers", {})}
+        for marker_name in sorted(markers):
+            marker = physical(marker_name)
+            root = marker.parent.parent
+            if marker.name != "crg-freshness.lock" or marker.parent.name != ".code-review-graph" or (root != code and not (root.parent == code.parent and root.name.startswith(code.name + "-"))):
+                raise ValueError("Unexpected saved worktree marker scope")
+            if not marker.exists():
+                continue
+            marker_data = read_bytes(marker)
+            owner = json.loads(marker_data)
+            terminated = {process["pid"] for item in state["journal"] if item["kind"] == "stop"
+                          and item.get("markers", {}).get(str(marker)) == digest(marker_data)
+                          and host.processes_absent(item.get("process_snapshot", []))
+                          for process in item.get("process_snapshot", [])}
+            if (owner.get("owner") != "cevdet-native-watch" or owner.get("pid") not in terminated
+                    or host.pid_running(owner["pid"])):
+                raise ValueError("Owner marker has no verified terminated watcher")
+            def clear_marker():
+                if read_bytes(marker) != marker_data:
+                    raise ValueError("Concurrent owner marker change")
+                entry = state["journal"][-1]
+                preserved_replace(marker, None, marker_data, entry["backup"])
+            operation("owner-marker", str(marker), clear_marker)
+        for path, values in state["files"].items():
+            def replace(path=path, values=values):
+                ensure_stopped()
+                entry = state["journal"][-1]
+                if entry["expected"] not in (values["before"], values["after"]):
+                    raise ValueError(f"Concurrent file change: {path}")
+                preserved_replace(path, unpacked(values[direction]), unpacked(entry["expected"]), entry["backup"])
+            operation("file", path, replace)
+        verified_tasks = {}
+        for name, values in state["tasks"].items():
+            def replace_task(name=name, values=values):
+                target = values["before"] if direction == "before" else values["after"]
+                def setter(value):
+                    ensure_stopped()
+                    host.set_task(name, value)
+                verified_tasks[name] = checked_update(name,
+                    lambda current: with_actions(current, target), setter,
+                    lambda current: not current["enabled"] and not current["running"] and
+                        any(action_fields(current) == action_fields(value) for value in values.values()))
+            operation("task", name, replace_task)
+
+        def verify_surfaces():
+            for path, values in state["files"].items():
+                if read_bytes(path) != unpacked(values[direction]):
+                    raise ValueError(f"File verification failed: {path}")
+            for name, expected in verified_tasks.items():
+                current = host.task(name)
+                if not same_task(current, expected):
+                    raise ValueError(f"Task verification failed: {name}")
+        ensure_stopped()
+        verify_surfaces()
+        # Enabling and restarting are separate, journaled steps after all surfaces verify.
+        if direction == "after":
+            for name, values in state["tasks"].items():
+                if values["after"]["enabled"]:
+                    def enable(name=name):
+                        verify_surfaces()
+                        verified_tasks[name] = checked_update(name,
+                            lambda current: enabled_task(current, True),
+                            lambda value: host.enable_task(name),
+                            lambda current: action_fields(current) == action_fields(verified_tasks[name]))
+                    operation("enable", name, enable)
+            verify_surfaces()
+            for name, values in state["tasks"].items():
+                if values["after"]["enabled"] and values["after"]["running"]:
+                    def start(name=name):
+                        verify_surfaces()
+                        host.start_task(name)
+                        verify_surfaces()
+                    operation("start", name, start)
+        state["status"] = "applied" if direction == "after" else "rolled-back"
+        state["runtime_differences"] = (["Both original task actions restored through partial setters with Enabled=false; triggers and restart paused to protect Vault and keep the old environment untouched"]
+            if direction == "before" else [])
+        state["platform_limitations"] = ["Task Scheduler exposes no compare-and-swap: journaled immediate pre/post observations do not exclude an unobserved external write during the native setter."]
+        save(state_path, state)
+        return state
+    except Exception as failure:
+        # Any observed mutation-window failure, including rollback, must close
+        # both task launch paths. Keep actions/metadata intact for later recovery.
+        state["status"] = "applying" if direction == "after" else "rolling-back"
+        errors = []
+        for name in state["tasks"]:
+            try:
+                operation("quiesce", name, lambda name=name: host.disable_task(name))
+            except Exception as exc:
+                errors.append({"name": name, "operation": "disable", "error": str(exc)})
+        for name in state["tasks"]:
+            try:
+                operation("stop", name, lambda name=name: host.stop(name, state["journal"][-1]["process_snapshot"]))
+            except Exception as exc:
+                errors.append({"name": name, "operation": "stop", "error": str(exc)})
+        state["compensation_errors"] = errors
+        save(state_path, state)
+        if errors:
+            failure.add_note("Task compensation incomplete; details retained in the journal")
+        raise
+
 
 
 def main():
