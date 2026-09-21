@@ -1,2 +1,9 @@
 [features]
 hooks = false
+
+[mcp_servers.code-review-graph]
+enabled = true
+command = "C:\\Users\\levent\\.codex\\cevdet-codex\\integrations\\crg\\.venv\\Scripts\\python.exe"
+args = ["-B", "C:\\Users\\levent\\.codex\\cevdet-codex\\integrations\\crg\\cevdet_runtime.py", "serve", "--repo", "C:\\Users\\levent\\Desktop\\CEVDET\\CEVDET-code"]
+cwd = "C:\\Users\\levent\\Desktop\\CEVDET\\CEVDET-code"
+enabled_tools = ["query_graph_tool", "get_impact_radius_tool"]
