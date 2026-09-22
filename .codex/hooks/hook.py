@@ -519,6 +519,7 @@ def build_session_context(
     now: dt.datetime | None = None,
     write_views: bool = True,
     deadline: float | None = None,
+    cwd: str | None = None,
 ) -> str:
     sections: list[str] = []
     if has_pending_reflection(state_dir):
@@ -528,6 +529,16 @@ def build_session_context(
 
     with memory_read(vault_root) as memory:
         import companion_memory
+        import execution_state
+        try:
+            binding = execution_state.identity(vault_root, cwd)
+            if binding is not None:
+                execution_context = execution_state.render(
+                    companion_memory.execution_snapshot(vault_root), binding, memory)
+                if execution_context:
+                    sections.append(execution_context)
+        except (OSError, ValueError, TypeError, KeyError):
+            sections.append('[Yürütme uyarısı] Önceki işin durumu doğrulanamadı; başarı veya aktif yol varsayılmaz.')
         companion_views = companion_memory.ensure_views(
             vault_root,
             state_dir,
@@ -1245,6 +1256,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         STATE_DIR,
                         write_views=not read_only,
                         deadline=hook_deadline,
+                        **({'cwd': payload['cwd']} if isinstance(payload.get('cwd'), str)
+                           and Path(payload['cwd']).resolve() != VAULT_ROOT.resolve() else {}),
                     )
                 except MemoryPreferenceError as exc:
                     if not str(exc).startswith('memory-publication-'):

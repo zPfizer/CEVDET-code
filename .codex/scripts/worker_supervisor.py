@@ -247,6 +247,8 @@ def enqueue_flush(
         "reason": reason,
         "event_iso": event_iso,
     }
+    if isinstance(payload.get('cwd'), str) and payload['cwd']:
+        transport['cwd'] = payload['cwd']
     for field in FLUSH_CONTINUATION_FIELDS:
         if field in payload:
             transport[field] = payload[field]
@@ -2255,6 +2257,18 @@ def _finish_job(
         destination = _job_root(state_dir) / terminal / running.name
         os.replace(running, destination)
         if terminal == "succeeded":
+            # A durable successor receipt is technical recovery, never user-task PASS.
+            for failed_path in (_job_root(state_dir) / 'dead-letter').glob('*.json'):
+                try:
+                    failed = _load_job(failed_path)
+                except ValueError:
+                    continue
+                if (failed.get('kind') == current.get('kind')
+                        and failed.get('payload') == current.get('payload')
+                        and failed.get('terminal_reason') not in REDRIVE_CONFLICT_REASONS):
+                    failed.update(terminal_reason='recovered-by-successor', retryable=False,
+                                  recovery_job_id=current['job_id'])
+                    atomic_write_json(failed_path, failed)
             _cleanup_succeeded_hook_inputs_locked(state_dir)
         _prune_succeeded_jobs_locked(state_dir, observed_now)
         _report_terminal_maintenance(state_dir, current)
