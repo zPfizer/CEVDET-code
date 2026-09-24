@@ -147,6 +147,7 @@
 !/.codex/tests/test_repair_file_identity.py
 !/.codex/tests/test_retrieval_frontmatter.py
 !/.codex/tests/test_runner_environment.py
+!/.codex/tests/test_public_repository_privacy.py
 !/.codex/tests/test_second_brain_acceptance.py
 !/.codex/tests/test_semantic_retrieval_properties.py
 !/.codex/tests/test_semantic_tag_repair.py

@@ -38,7 +38,7 @@ class MemoryDirectiveTests(unittest.TestCase):
         )
 
     def test_all_supported_quoted_target_pairs_keep_bounds(self) -> None:
-        path = r"C:\Users\Me\My Project\app.py"
+        path = r"C:\Fixtures\Me\My Project\app.py"
         directory = r"C:\Program Files (x86)\Project / R&D"
         drive_relative_directory = r"C:Program Files\Project"
         unc_root = r"\\server\share"
@@ -129,10 +129,10 @@ class MemoryDirectiveTests(unittest.TestCase):
             "read-only.py'deki hatayı düzelt.",
             "unut.py'deki hatayı düzelt.",
             "saklama.py'daki hatayı düzelt.",
-            r"'C:\Users\O'Brien\app.py' dosyasını düzelt.",
-            r"'C:\Users\O'Brien\app.py'yi düzelt.",
+            r"'C:\Fixtures\O'Brien\app.py' dosyasını düzelt.",
+            r"'C:\Fixtures\O'Brien\app.py'yi düzelt.",
             r"'O'Brien' klasörünü değiştir.",
-            r"'C:\Users\O'Brien\Project' klasöründeki dosyayı düzelt.",
+            r"'C:\Fixtures\O'Brien\Project' klasöründeki dosyayı düzelt.",
             "Tamam. Dosyayı düzelt.",
             "Okay. src/app.py dosyasını düzelt.",
             "Tamam! Dosyayı düzelt.",
@@ -247,8 +247,8 @@ class MemoryDirectiveTests(unittest.TestCase):
             r"src/ dosyasını düzelt.",
             r"Onaylansa C:\src\ klasörünü değiştir.",
             'Onaylansa "src" klasöründeki hatayı düzelt.',
-            r"Onaylansa 'C:\Users\O'Brien\app.py' dosyasını düzelt.",
-            r"'C:\Users\O'Brien\app.py' dosyasını düzelt. Do not modify files or settings. 'not'",
+            r"Onaylansa 'C:\Fixtures\O'Brien\app.py' dosyasını düzelt.",
+            r"'C:\Fixtures\O'Brien\app.py' dosyasını düzelt. Do not modify files or settings. 'not'",
             "Onaylansa README.md'deki hatayı düzelt.",
             "read-only.py'yi düzelt. Do not modify files or settings.",
             "read-only.py'deki hatayı düzelt. Do not modify files or settings.",
@@ -468,7 +468,7 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Lütfen src/app.py dosyasını düzelt.": ("correct", ""),
             "parse.py dosyasını düzelt.": ("correct", ""),
             "ne.py dosyasını düzelt.": ("correct", ""),
-            '"C:\\Users\\Me\\My Project\\app.py" dosyasını düzelt.': ("correct", ""),
+            '"C:\\Fixtures\\Me\\My Project\\app.py" dosyasını düzelt.': ("correct", ""),
             '"app.py" dosyasını düzelt.': ("correct", ""),
             '"My File.py" dosyasını düzelt.': ("correct", ""),
             "Bunları değiştir.": ("write-intent", ""),
@@ -550,9 +550,9 @@ class MemoryDirectiveTests(unittest.TestCase):
             "Yanıtındaki kodu düzelt.",
             "Bu cümledeki hatayı düzelt.",
             "Komut örneği olarak Atlas projesindeki hatayı düzelt.",
-            '"C:\\Users\\Me\\My Project\\app.py dosyasını düzelt."',
+            '"C:\\Fixtures\\Me\\My Project\\app.py dosyasını düzelt."',
             '"README.md\'yi düzenle."',
-            '```text\n"C:\\Users\\Me\\My Project" klasörünü değiştir.\n```',
+            '```text\n"C:\\Fixtures\\Me\\My Project" klasörünü değiştir.\n```',
             '"Dockerfile dosyasını düzelt."',
             '"LICENSE dosyasını düzenle."',
             '“src/app.py dosyasını düzelt ve testleri çalıştır.”',
@@ -619,14 +619,14 @@ class MemoryDirectiveTests(unittest.TestCase):
             '"LICENSE" dosyasını düzenle.',
             '“app.py” dosyasını düzelt.',
             '‘app.py’ dosyasını düzelt.',
-            '‘C:\\Users\\Me\\My Project\\app.py’yi düzelt.',
+            '‘C:\\Fixtures\\Me\\My Project\\app.py’yi düzelt.',
             '"C:\\Program Files (x86)\\Project / R&D" klasörünü değiştir.',
             'src/app.py dosyasını düzelt ve testleri çalıştır.',
             'src/app.py dosyasını düzelt. Sonra testleri çalıştır.',
-            '"C:\\Users\\Me\\My Project" klasörünü değiştir.',
-            '"C:\\Users\\Me\\My Project\\app.py"\'yi düzelt.',
-            r"'C:\Users\Me\My Project\app.py'yi düzelt.",
-            '"C:\\Users\\Me\\My Project\\app.py" dosyasını düzelt.',
+            '"C:\\Fixtures\\Me\\My Project" klasörünü değiştir.',
+            '"C:\\Fixtures\\Me\\My Project\\app.py"\'yi düzelt.',
+            r"'C:\Fixtures\Me\My Project\app.py'yi düzelt.",
+            '"C:\\Fixtures\\Me\\My Project\\app.py" dosyasını düzelt.',
             '"app.py" dosyasını düzelt.',
             '"My File.py" dosyasını düzelt.',
         ):
