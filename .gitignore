@@ -43,6 +43,7 @@
 !/.agents/skills/gecmis-import/references/providers.md
 !/.beyin-version
 !/.codex/config.toml
+!/.codex/config.example.toml
 !/.codex/hooks.json
 !/.codex/hooks/hook.py
 !/.codex/scripts/attachment_memory.py

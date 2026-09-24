@@ -1,6 +1,40 @@
 # CRG runtime sahipliği
 
 Bu dosya taşıma sözleşmesini tanımlar; kurulum veya canlı kabul sonucu değildir.
+
+## Taşınabilir depo ayarı ve yerel kurulum
+
+İzlenen `.codex/config.toml` makineye özel MCP yolları taşımaz.
+`.codex/config.example.toml` yalnız devre dışı bir şablondur; otomatik yüklenen
+config değildir. Yer tutucular ortam değişkeni veya çalıştırılabilir yol sayılmaz.
+
+Yetkili yerel kurulumda ajan mevcut kurulum kaydından canonical Python,
+kurulu CRG runtime script'i ve doğrulanmış code kökünü çözer. Şablondaki
+`<PYTHON_EXECUTABLE>`, `<CRG_RUNTIME_SCRIPT>` ve `<CODE_ROOT>` değerleri bu
+yerel yollarla doldurulur. Runtime script'i aşağıdaki `serve` sözleşmesini
+uygulamalıdır; global guarded sunucu onun yerine geçirilmez. Eksik kurulumda
+şablon etkinleştirilmez, yeni servis kurulmaz.
+
+Mevcut yerel `.codex/config.toml` korunur; şablon dosyanın tamamının üzerine
+kopyalanmaz. Plan ve bağımsız review sonrasında yalnız ilgili MCP bloğu mevcut
+kurucunun prepare/apply sözleşmesiyle güncellenir. Bu kurucu hook ve görev
+yüzeylerine de dokunduğundan yalnız MCP örneğini denemek için çalıştırılmaz;
+ayrı yerel kurulum yetkisi gerekir. Yerel değerler ve kurulum kanıtı commit
+edilmez. Commit öncesi tracked-text koruma testi bu tür yolları reddeder.
+Yalnız taşınabilir kaynak değişiklikleri açık depoya gönderilir.
+
+Codex'in [MCP belgesi](https://learn.chatgpt.com/docs/extend/mcp), `command`,
+`args`, `cwd` ve ayrı `env`/`env_vars` alanlarını açıklar.
+[Config referansı](https://learn.chatgpt.com/docs/config-file/config-reference)
+bu alanların türlerini tanımlar. [Gelişmiş yapılandırma belgesi](https://learn.chatgpt.com/docs/config-file/config-advanced)
+proje config'indeki göreli yolların `.codex/` klasörüne göre çözüldüğünü
+belirtir. Bu genel kural, her `args` öğesinde yol çözümleme veya üç alanda
+kabuk değişkeni genişletmesi garantisi değildir; bu davranış doğrulanmadı.
+Canonical runtime repo dışında bulunduğundan şablon böyle bir varsayıma
+dayanmaz ve yerel kurulum değerlerini depoya gömmez.
+
+## Runtime ve taşıma sözleşmesi
+
 Hook, görev ve MCP çağrıları canonical Python executable'ının mutlak yolunu
 kullanır. Kullanıcı veya sistem PATH'i okunmaz, değiştirilmez ve rollback'e
 alınmaz. Registry transaction/TxF bu taşımanın parçası değildir.
