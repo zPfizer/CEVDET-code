@@ -1,0 +1,11 @@
+# Documentation only; Codex does not load this example as project config.
+# Replace placeholders locally after reviewing the scoped installation plan.
+[features]
+hooks = false
+
+[mcp_servers.code-review-graph]
+enabled = false
+command = "<PYTHON_EXECUTABLE>"
+args = ["-B", "<CRG_RUNTIME_SCRIPT>", "serve", "--repo", "<CODE_ROOT>"]
+cwd = "<CODE_ROOT>"
+enabled_tools = ["query_graph_tool", "get_impact_radius_tool"]

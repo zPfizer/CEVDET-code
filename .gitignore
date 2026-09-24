@@ -43,6 +43,7 @@
 !/.agents/skills/gecmis-import/references/providers.md
 !/.beyin-version
 !/.codex/config.toml
+!/.codex/config.example.toml
 !/.codex/hooks.json
 !/.codex/hooks/hook.py
 !/.codex/scripts/attachment_memory.py
@@ -227,3 +228,8 @@
 !/.codex/tests/test_concurrency_compile_cleanup.py
 !/docs/agents/concurrency-integration-20260909.md
 !/docs/agents/live-memory-acceptance.md
+!/.codex/scripts/crg_runtime.py
+!/.codex/scripts/crg_install.py
+!/.codex/tests/test_crg_runtime.py
+!/.codex/tests/test_crg_install.py
+!/docs/agents/crg-runtime-separation.md
