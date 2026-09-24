@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 from dataclasses import dataclass
 from functools import cached_property
 import json
@@ -22,7 +23,10 @@ from graph_integrity import graph_notes, graph_summary
 from knowledge_schema import WIKILINK, validate_knowledge_tree, wikilink_target
 from process_control import pid_is_alive
 from worker_supervisor import (
+    FLUSH_CONTINUATION_FIELDS,
+    FLUSH_REASON_PRIORITY,
     STALE_HOOK_INPUT_SECONDS,
+    HOOK_INPUT_SCHEMA_VERSION,
     SUPERVISOR_SCHEMA_VERSION,
     _process_owner_classification,
     inspect_worker_queue,
@@ -49,7 +53,7 @@ from vault_corpus import (
     vault_notes,
 )
 from vault_retrieval import MAX_CACHE_BYTES, build_vault_map
-from memory_ledger import MemoryPreferenceError, memory_read
+from memory_ledger import MemoryPreferenceError, contains_secret, memory_read
 
 
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
@@ -681,6 +685,137 @@ def _brain_health_check(ctx: Context) -> Check:
     return Check("Beyin sağlığı", status, f"{component}: {error}")
 
 
+def _is_current_hook_input_delivery(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    allowed = {
+        "delivery_schema_version",
+        "session_id",
+        "transcript_path",
+        "reason",
+        "event_iso",
+        *FLUSH_CONTINUATION_FIELDS,
+    }
+    if not set(payload).issubset(allowed):
+        return False
+    forbidden = {
+        "content",
+        "excerpt",
+        "message",
+        "messages",
+        "prompt",
+        "session_id",
+        "thread_id",
+        "transcript",
+    }
+
+    def is_token(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and not contains_secret(value)
+            and re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{0,63}", value) is not None
+        )
+
+    def is_bounded_count(value: object) -> bool:
+        return type(value) is int and 0 <= value <= (2**63 - 1)
+
+    def is_coverage(value: object) -> bool:
+        if is_bounded_count(value):
+            return True
+        if not isinstance(value, dict) or len(value) > 32:
+            return False
+        if not all(
+            isinstance(key, str)
+            and key.casefold() not in forbidden
+            and is_token(key)
+            and is_bounded_count(item)
+            for key, item in value.items()
+        ):
+            return False
+        try:
+            encoded = json.dumps(
+                value, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+            ).encode("ascii")
+        except (TypeError, ValueError, UnicodeError):
+            return False
+        return len(encoded) <= 4_096
+
+    def is_event_iso(value: object) -> bool:
+        if not isinstance(value, str) or not value:
+            return False
+        try:
+            timestamp = dt.datetime.fromisoformat(value)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return (
+            timestamp.tzinfo is not None
+            and timestamp.utcoffset() is not None
+            and timestamp.isoformat() == value
+        )
+
+    def is_transcript_path(value: object) -> bool:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 32_767
+            or any(char in value for char in "\x00\r\n")
+            or contains_secret(value)
+        ):
+            return False
+        try:
+            name = Path(value).expanduser().name
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return name.casefold().endswith(".jsonl") and name.casefold() != ".jsonl"
+
+    def is_session_id(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and not contains_secret(value)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value)
+            is not None
+        )
+
+    def is_continuation_field(field: str) -> bool:
+        value = payload[field]
+        if field == "continuation_reason":
+            return is_token(value)
+        if field == "continuation":
+            return type(value) is bool or is_token(value)
+        if field in {"coverage_count", "coverage_end"}:
+            return is_bounded_count(value)
+        if field == "coverage_digest":
+            return (
+                isinstance(value, str)
+                and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+            )
+        return is_coverage(value)
+
+    return (
+        type(payload.get("delivery_schema_version")) is int
+        and payload["delivery_schema_version"] == HOOK_INPUT_SCHEMA_VERSION
+        and is_session_id(payload.get("session_id"))
+        and isinstance(payload.get("reason"), str)
+        and payload["reason"] in FLUSH_REASON_PRIORITY
+        and is_event_iso(payload.get("event_iso"))
+        and "transcript_path" in payload
+        and (
+            (
+                is_transcript_path(payload.get("transcript_path"))
+            )
+            or (
+                payload["reason"] == "sessionend"
+                and payload["transcript_path"] is None
+            )
+        )
+        and all(
+            is_continuation_field(field)
+            for field in FLUSH_CONTINUATION_FIELDS
+            if field in payload
+        )
+    )
+
+
 def _state_privacy_check(ctx: Context) -> Check:
     forbidden = {
         "content",
@@ -721,13 +856,27 @@ def _state_privacy_check(ctx: Context) -> Check:
                 "FAIL",
                 f"okunamadı: {path.name} ({exc.__class__.__name__})",
             )
-        if (re.fullmatch(r'hookin-[0-9a-f]{32}\.json', path.name)
-            and isinstance(payload, dict)
-            and set(payload) == {'session_id', 'transcript_path'}
-            and isinstance(payload.get('session_id'), str)
-            and isinstance(payload.get('transcript_path'), str)
-            and 0 <= ctx.now - modified <= STALE_HOOK_INPUT_SECONDS):
-            # Bounded worker transport, removed after processing; no user text.
+        if re.fullmatch(r'hookin-[0-9a-f]{32}\.json', path.name):
+            legacy = (
+                isinstance(payload, dict)
+                and set(payload) == {'session_id', 'transcript_path'}
+                and isinstance(payload.get('session_id'), str)
+                and isinstance(payload.get('transcript_path'), str)
+            )
+            current = _is_current_hook_input_delivery(payload)
+            if (legacy or current) and 0 <= ctx.now - modified <= STALE_HOOK_INPUT_SECONDS:
+                # Bounded worker transport, removed after processing; no user text.
+                if current:
+                    inspect(
+                        {
+                            key: item
+                            for key, item in payload.items()
+                            if key not in {'session_id', 'transcript_path'}
+                        },
+                        path.name,
+                    )
+                continue
+            violations.append(f"{path.name}: geçici taşıma girdisi geçersiz")
             continue
         inspect(payload, path.name)
     if violations:

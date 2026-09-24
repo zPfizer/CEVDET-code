@@ -867,6 +867,165 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(check.status, "FAIL")
         self.assertIn("hookin-active.json", check.evidence)
 
+    def test_state_privacy_accepts_current_worker_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            supported = (
+                ("continuation", True),
+                ("continuation", "latest"),
+                ("continuation_reason", "tail"),
+                ("coverage", 3),
+                ("coverage", {"end": 42}),
+                ("coverage_count", 3),
+                ("coverage_end", 42),
+                ("coverage_digest", "a" * 64),
+            )
+            with mock.patch.object(workers, "enqueue_job", return_value=None):
+                for field, value in supported:
+                    workers.enqueue_flush(
+                        state,
+                        {
+                            "session_id": "current-session",
+                            "transcript_path": "transcript.jsonl",
+                            field: value,
+                        },
+                        "turnend",
+                        vault_root=state,
+                    )
+            paths = tuple(state.glob("hookin-*.json"))
+            check = doctor._state_privacy_check(
+                doctor.Context(
+                    state_dir=state,
+                    now=max(path.stat().st_mtime for path in paths) + 1,
+                )
+            )
+
+        self.assertEqual(len(paths), len(supported))
+        self.assertEqual(check.status, "OK")
+
+    def test_state_privacy_accepts_transcriptless_session_end_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            with mock.patch.object(workers, "enqueue_job", return_value=None):
+                workers.enqueue_flush(
+                    state,
+                    {"session_id": "session-end"},
+                    "sessionend",
+                    vault_root=state,
+                )
+            path = next(state.glob("hookin-*.json"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            check = doctor._state_privacy_check(
+                doctor.Context(state_dir=state, now=path.stat().st_mtime + 1)
+            )
+
+        self.assertIsNone(payload["transcript_path"])
+        self.assertEqual(check.status, "OK")
+
+    def test_state_privacy_rejects_current_worker_delivery_extra_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            path = state / ("hookin-" + "b" * 32 + ".json")
+            payload = {
+                "delivery_schema_version": workers.HOOK_INPUT_SCHEMA_VERSION,
+                "session_id": "current-session",
+                "transcript_path": "transcript.jsonl",
+                "reason": "turnend",
+                "event_iso": "2026-09-13T00:00:00+00:00",
+            }
+            canonical_secret_tokens = {
+                "sk-proj-abc123secret",
+                "AKIAABCDEFGHIJKLMNOPQRSTUV",
+            }
+            oversized_coverage = {
+                f"metric-{index}": index for index in range(33)
+            }
+            for field, value in (
+                ("prompt", "private prompt"),
+                ("message", "private message"),
+                ("unknown", "private value"),
+                ("session_id", "private prompt"),
+                ("session_id", "sk-proj-abc123secret"),
+                ("continuation", "private prompt"),
+                ("continuation_reason", "private continuation reason"),
+                ("continuation_reason", "sk-proj-abc123secret"),
+                ("continuation_reason", "AKIAABCDEFGHIJKLMNOPQRSTUV"),
+                ("continuation", "ghp_abc123secretvalue"),
+                ("coverage", {"message": "private message"}),
+                ("coverage", oversized_coverage),
+                ("coverage", 2**63),
+                ("continuation_reason", 7),
+                ("continuation_reason", "a" * 65),
+                ("coverage_count", 2**63),
+                ("coverage_digest", "sk-proj-ABC123SECRET"),
+                ("coverage", {"api_key": "sk-proj-ABC123SECRET"}),
+            ):
+                with self.subTest(field=field):
+                    if isinstance(value, str) and value in canonical_secret_tokens:
+                        self.assertTrue(memory_ledger.contains_secret(value))
+                    path.write_text(
+                        json.dumps({**payload, field: value}), encoding="utf-8"
+                    )
+                    check = doctor._state_privacy_check(
+                        doctor.Context(state_dir=state, now=path.stat().st_mtime + 1)
+                    )
+                    self.assertEqual(check.status, "FAIL")
+
+    def test_state_privacy_rejects_current_worker_delivery_bad_schema_or_types(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            path = state / ("hookin-" + "c" * 32 + ".json")
+            payload = {
+                "delivery_schema_version": workers.HOOK_INPUT_SCHEMA_VERSION,
+                "session_id": "current-session",
+                "transcript_path": "transcript.jsonl",
+                "reason": "turnend",
+                "event_iso": "2026-09-13T00:00:00+00:00",
+            }
+            for field, value in (
+                ("delivery_schema_version", "1"),
+                ("session_id", 7),
+                ("transcript_path", None),
+                ("transcript_path", "private prompt"),
+                ("transcript_path", "sk-proj-abc123secret"),
+                ("reason", "unknown"),
+                ("event_iso", 7),
+                ("event_iso", "private prompt"),
+            ):
+                with self.subTest(field=field):
+                    path.write_text(
+                        json.dumps({**payload, field: value}), encoding="utf-8"
+                    )
+                    check = doctor._state_privacy_check(
+                        doctor.Context(state_dir=state, now=path.stat().st_mtime + 1)
+                    )
+                    self.assertEqual(check.status, "FAIL")
+
+    def test_state_privacy_rejects_stale_current_worker_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            path = state / ("hookin-" + "d" * 32 + ".json")
+            path.write_text(
+                json.dumps(
+                    {
+                        "delivery_schema_version": workers.HOOK_INPUT_SCHEMA_VERSION,
+                        "session_id": "current-session",
+                        "transcript_path": "transcript.jsonl",
+                        "reason": "turnend",
+                        "event_iso": "2026-09-13T00:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            check = doctor._state_privacy_check(
+                doctor.Context(
+                    state_dir=state,
+                    now=path.stat().st_mtime + workers.STALE_HOOK_INPUT_SECONDS + 1,
+                )
+            )
+
+        self.assertEqual(check.status, "FAIL")
+
     def test_doctor_fails_when_machine_knowledge_schema_is_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
