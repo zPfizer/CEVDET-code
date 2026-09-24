@@ -30,7 +30,7 @@ class HookInputGuards(unittest.TestCase):
     def test_invalid_escape_repair_and_non_dict_input(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "hookin.json"
-            path.write_text('{"a": "C:\\Users\\x", "b": "\\uZZZZ"}', encoding="utf-8")
+            path.write_text('{"a": "C:\\Fixtures\\x", "b": "\\uZZZZ"}', encoding="utf-8")
             value = workers.load_hook_input(path)
             self.assertIn("a", value)
             path.write_text("[1]", encoding="utf-8")

@@ -127,22 +127,22 @@ class NaturalRecallTests(unittest.TestCase):
             vault = Path(temporary)
             _seed_vault(vault)
             prompts = (
-                ('"[$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md) BIB?"',
-                 '"[$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md) BIB?"'),
-                ('```[$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md) BIB?```',
-                 '```[$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md) BIB?```'),
-                ('> BIB? [$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md)',
-                 '> BIB? [$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md)'),
-                ('BIB? `[$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md)',
-                 'BIB? `[$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md)'),
-                ('```\nBIB? [$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md)',
-                 '```\nBIB? [$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md)'),
-                ('~~~\nBIB? [$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md)',
-                 '~~~\nBIB? [$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md)'),
-                ('“BIB? [$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md)',
-                 '“BIB? [$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md)'),
-                ('BIB? [$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md) karar?',
-                 'BIB? [$skill](C:\\Users\\demo\\.codex\\skills\\x\\SKILL.md) karar?'),
+                ('"[$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md) BIB?"',
+                 '"[$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md) BIB?"'),
+                ('```[$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md) BIB?```',
+                 '```[$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md) BIB?```'),
+                ('> BIB? [$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md)',
+                 '> BIB? [$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md)'),
+                ('BIB? `[$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md)',
+                 'BIB? `[$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md)'),
+                ('```\nBIB? [$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md)',
+                 '```\nBIB? [$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md)'),
+                ('~~~\nBIB? [$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md)',
+                 '~~~\nBIB? [$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md)'),
+                ('“BIB? [$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md)',
+                 '“BIB? [$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md)'),
+                ('BIB? [$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md) karar?',
+                 'BIB? [$skill](C:\\Fixtures\\demo\\.codex\\skills\\x\\SKILL.md) karar?'),
             )
             for prompt, expected in prompts:
                 with self.subTest(prompt=prompt):
