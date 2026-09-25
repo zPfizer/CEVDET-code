@@ -48,6 +48,7 @@
 !/.codex/scripts/attachment_memory.py
 !/.codex/scripts/codex_runner.py
 !/.codex/scripts/companion_memory.py
+!/.codex/scripts/execution_state.py
 !/.codex/scripts/compile.py
 !/.codex/scripts/compile_state.py
 !/.codex/scripts/daily_store.py
@@ -153,6 +154,7 @@
 !/.codex/tests/test_semantic_tag_repair.py
 !/.codex/tests/test_session_access_removal.py
 !/.codex/tests/test_session_snapshots.py
+!/.codex/tests/test_execution_state.py
 !/.codex/tests/test_stale_review.py
 !/.codex/tests/test_startup_index_boundary.py
 !/.codex/tests/test_state_store.py
@@ -227,3 +229,13 @@
 !/.codex/tests/test_concurrency_compile_cleanup.py
 !/docs/agents/concurrency-integration-20260909.md
 !/docs/agents/live-memory-acceptance.md
+!/evals/
+/evals/*
+!/evals/execution-state/
+/evals/execution-state/*
+!/evals/execution-state/adapter.py
+!/evals/execution-state/evidence.py
+!/evals/execution-state/fixtures.py
+!/evals/execution-state/test_adapter.py
+!/evals/execution-state/README.md
+!/evals/execution-state/worker_cases.py

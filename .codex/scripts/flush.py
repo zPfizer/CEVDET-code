@@ -1628,6 +1628,19 @@ def flush_once(
             index = refreshed
             all_chunks = index.chunks
         incomplete_tail = index.counters['partial_lines'] > 0
+        execution_update = None
+        try:
+            import execution_state
+            binding = execution_state.identity(vault_root, hook_input.get('cwd'))
+            if binding is not None:
+                # Same bounded, filtered transcript input as the actual summary path.
+                execution_update = execution_state.propose(
+                    vault_root, binding, companion_memory.execution_snapshot(vault_root),
+                    session_id, event_time.isoformat(), evidence_turns, run_codex,
+                )
+        except (OSError, ValueError, TypeError, KeyError):
+            _record_flush_failure(state_dir, session_id, now_epoch, 'execution-update-unverified')
+            return 1
         try:
             append_daily(
                 vault_root,
@@ -1649,6 +1662,7 @@ def flush_once(
             companion_memory.publish(
                 vault_root, state_dir, summary, event_time,
                 idempotency_key, session_id, hashes,
+                execution_update=execution_update,
             )
             _write_flush_state(
                 state_dir,

@@ -269,13 +269,30 @@ def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _catalog_payload(records, manual) -> dict[str, Any]:
-    return {
+def _catalog_payload(records, manual, *, root: Path | None = None) -> dict[str, Any]:
+    payload = {
         'schema': CANONICAL_SCHEMA,
         'records': {identity: {'event': event.isoformat(), 'key': key, 'summary': value}
                     for identity, (event, key, value) in sorted(records.items())},
         'manual': {name: manual[name] for name in sorted(manual)},
     }
+    if root is not None:
+        execution = execution_snapshot(root)
+        if execution['scopes']:
+            payload['execution'] = execution
+    return payload
+
+
+def execution_snapshot(root: Path) -> dict:
+    """Read the canonical extension, rejecting corrupt state even in legacy writers."""
+    import execution_state
+    path = _canonical_path(root)
+    if not path.is_file():
+        return execution_state.empty()
+    payload = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(payload, dict) or payload.get('schema') != CANONICAL_SCHEMA:
+        raise ValueError('companion-canonical-invalid')
+    return execution_state.validate(payload.get('execution', execution_state.empty()))
 
 
 def _load_catalog(root: Path):
@@ -288,6 +305,9 @@ def _load_catalog(root: Path):
         raise ValueError('companion-canonical-unreadable') from exc
     if not isinstance(payload, dict) or payload.get('schema') != CANONICAL_SCHEMA:
         raise ValueError('companion-canonical-invalid')
+    if 'execution' in payload:
+        import execution_state
+        execution_state.validate(payload['execution'])
     records = {}
     for identity, row in payload.get('records', {}).items() if isinstance(payload.get('records'), dict) else ():
         if not re.fullmatch(r'[a-f0-9]{64}', identity) or not isinstance(row, dict):
@@ -514,7 +534,7 @@ def ensure_views(
             metadata[name] = meta
         atomic_write_json(
             _canonical_path(root),
-            _catalog_payload(records, previous_metadata),
+            _catalog_payload(records, previous_metadata, root=root),
             sort_keys=True,
             deadline=deadline,
         )
@@ -526,7 +546,7 @@ def ensure_views(
             result[name] = payload.decode('utf-8')
         atomic_write_json(
             _canonical_path(root),
-            _catalog_payload(records, metadata),
+            _catalog_payload(records, metadata, root=root),
             sort_keys=True,
             deadline=deadline,
         )
@@ -643,7 +663,7 @@ def migrate(root: Path, *, state: Path | None = None) -> dict[str, int | str]:
                 source_path.parent.mkdir(parents=True, exist_ok=True)
                 _write_manual(source_path, source)
         canonical_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(canonical_path, _catalog_payload(records, manual), sort_keys=True)
+        atomic_write_json(canonical_path, _catalog_payload(records, manual, root=root), sort_keys=True)
     return {'status': 'migrated', 'records': len(records), 'sources': len(VIEW_NAMES)}
 
 
@@ -670,7 +690,7 @@ def previous_summary(root: Path, session_id: str, *, state: Path | None = None) 
 
 
 def publish(root: Path, state: Path, summary: str, event: dt.datetime,
-            key: str, session_id: str, hashes: frozenset[str]) -> None:
+            key: str, session_id: str, hashes: frozenset[str], *, execution_update: dict | None = None) -> None:
     from flush import SessionSummary
     companion = root / '🔮 850-Companion'
     if not companion.is_dir():
@@ -696,6 +716,20 @@ def publish(root: Path, state: Path, summary: str, event: dt.datetime,
             else:
                 _reconcile_current(root, records, hashes)
             previous_metadata = dict(metadata)
+            execution = None
+            if execution_update is not None:
+                import execution_state
+                binding = execution_update['binding']
+                project = root / binding['project']
+                if (execution_state.identity(root, str(project)) != binding
+                        or execution_update['event']['session'] != session_id):
+                    raise ValueError('execution-identity-changed')
+                for operation in execution_update['event']['operations']:
+                    if (contains_suppressed_unit(operation['quote'], hashes)
+                            or sanitize_text(operation['quote'])[0] != operation['quote']):
+                        raise ValueError('execution-source-excluded')
+                execution = execution_state.advance(execution_snapshot(root), binding,
+                    execution_update['revision'], execution_update['event'])
             manuals = {}
             for name in VIEW_NAMES:
                 if contains_suppressed_unit(f'🔮 850-Companion/{name}', hashes):
@@ -709,12 +743,15 @@ def publish(root: Path, state: Path, summary: str, event: dt.datetime,
                 records[session_key] = event, key, value
             canonical_path = _canonical_path(root)
             canonical_path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(canonical_path, _catalog_payload(records, previous_metadata), sort_keys=True)
+            payload = _catalog_payload(records, previous_metadata, root=root)
+            if execution is not None:
+                payload['execution'] = execution
+            atomic_write_json(canonical_path, payload, sort_keys=True)
             for name, payload in _render(records, manuals, hashes).items():
                 path = _view_path(root, name)
                 if not path.is_file() or path.read_bytes() != payload:
                     _write_projection(path, payload)
-            atomic_write_json(canonical_path, _catalog_payload(records, metadata), sort_keys=True)
+            atomic_write_json(canonical_path, _catalog_payload(records, metadata, root=root), sort_keys=True)
 
 
 def _main(argv: list[str] | None = None) -> int:
