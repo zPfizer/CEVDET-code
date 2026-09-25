@@ -21,7 +21,21 @@ CONNECTION_HEADINGS = ("## Bağlantı", "## Ana Fikir")
 IMPORTANT_POINTS = (3, 5)
 RELATED_LINKS_MIN = 2
 INDEX_HEADER = "| Makale | Özet | Kaynak | Güncellendi |"
-INDEX_ROW = re.compile(r"\| \[\[concepts/([^\\|\]]+)\\\|")
+_INDEX_ESCAPED_PIPE = r"\\(?:\\\\)*+\|"
+_INDEX_CELL = (
+    rf"(?=[^|\r\n]*[^\s|])"
+    rf"(?:\\\\|{_INDEX_ESCAPED_PIPE}|\\(?![\\|])|[^|\\\r\n])*+"
+)
+_INDEX_LINK_TITLE = (
+    rf"(?=[^\]\r\n]*[^\s\]])"
+    rf"(?:\\\\|{_INDEX_ESCAPED_PIPE}|\\(?![\\|])|[^|\\\]\r\n])++"
+)
+INDEX_ROW = re.compile(
+    rf"\| \[\[concepts/([^\\|\]]+)\\\|{_INDEX_LINK_TITLE}\]\] "
+    rf"\| {_INDEX_CELL}(?<= )\| "
+    rf"{_INDEX_CELL}(?<= )\| "
+    rf"{_INDEX_CELL}(?<= )\|[ \t]*"
+)
 LOG_HEADER = "# Derleme Günlüğü"
 DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 DAILY_SOURCE = re.compile(r"\d{4}-\d{2}-\d{2}\.md\Z")
@@ -407,6 +421,10 @@ def _index_rows(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.startswith("| [[")]
 
 
+def _parse_index_rows(rows: Sequence[str]) -> tuple[re.Match[str] | None, ...]:
+    return tuple(INDEX_ROW.fullmatch(row) for row in rows)
+
+
 def _concept_points_ok(path: Path, text: str) -> bool:
     if not _ordered(text, CONCEPT_HEADINGS):
         return True  # the headings rule already owns this failure
@@ -525,7 +543,7 @@ STRUCTURAL_RULES: tuple[StructuralRule, ...] = (
             "  kaçırılmalı, yoksa satır tabloyu bozar."
         ),
         holds=lambda path, text: all(
-            INDEX_ROW.match(row) for row in _index_rows(text)
+            match is not None for match in _parse_index_rows(_index_rows(text))
         ),
     ),
     StructuralRule(
@@ -641,11 +659,25 @@ def _knowledge_file(
     return True
 
 
-def _apply_rules(scope: str, path: Path, text: str, issues: list[str]) -> bool:
+def _apply_rules(
+    scope: str,
+    path: Path,
+    text: str,
+    issues: list[str],
+    *,
+    rule_results: Mapping[str, bool] | None = None,
+) -> bool:
     """Append this scope's violations; return True when the scope held."""
     before = len(issues)
     for rule in STRUCTURAL_RULES:
-        if rule.scope == scope and not rule.holds(path, text):
+        if rule.scope != scope:
+            continue
+        held = (
+            rule_results[rule.key]
+            if rule_results is not None and rule.key in rule_results
+            else rule.holds(path, text)
+        )
+        if not held:
             issues.append(f"{_issue_path(path)}:{rule.key}")
     return len(issues) == before
 
@@ -910,12 +942,21 @@ def _validate_knowledge_tree(
     index_rows: list[str] = []
     if _knowledge_file(index_path, root, issues):
         index = index_path.read_text(encoding="utf-8")
-        _apply_rules("index", index_path, index, issues)
         index_rows = _index_rows(index)
+        parsed_index_rows = _parse_index_rows(index_rows)
+        _apply_rules(
+            "index",
+            index_path,
+            index,
+            issues,
+            rule_results={
+                "row": all(match is not None for match in parsed_index_rows),
+            },
+        )
         indexed = [
             match.group(1)
-            for row in index_rows
-            if (match := INDEX_ROW.match(row))
+            for match in parsed_index_rows
+            if match is not None
         ]
         expected = sorted(path.stem for path in concepts)
         if sorted(indexed) != expected:
