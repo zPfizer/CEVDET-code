@@ -33,6 +33,7 @@ from memory_ledger import (
 )
 from memory_ledger import is_read_only_turn, memory_write_guard, MemoryReadOnlyError
 from process_control import ProcessTreeCleanupError
+from summary_contract import EXPECTED_SECTIONS, validate_summary
 from worker_supervisor import load_hook_input, resolve_hook_input
 from state_store import (
     atomic_write_json,
@@ -70,13 +71,6 @@ MAX_TRANSCRIPT_LINE_BYTES = 1 * 1024 * 1024
 LEGACY_POLICY_VERSION = "persistent-turns-v1"
 POLICY_MIGRATION_REQUIRED = "flush-policy-migration-required"
 
-EXPECTED_SECTIONS = (
-    "Bağlam",
-    "Önemli Konuşmalar",
-    "Alınan Kararlar",
-    "Öğrenilenler",
-    "Yapılacaklar",
-)
 DIRECTIVE_SHAPED = re.compile(
     r"(?im)^\s*(?:"
     r"UNTRUSTED[_ -]?DIRECTIVE|DIRECTIVE|INSTRUCTION|SYSTEM|ASSISTANT|"
@@ -446,22 +440,11 @@ tut. user-evidence kayıtlarını sistem üretir; bunları kendin üretme veya k
 """
 
 
-def validate_summary(summary: str) -> bool:
-    """Require exactly the five v2 headings, once and in contract order."""
-    stripped = summary.strip()
-    matches = markdown_headings(stripped)
-    expected = [("##", section) for section in EXPECTED_SECTIONS]
-    actual = [(match[0], match[1]) for match in matches]
-    if actual != expected:
-        return False
-    return not stripped[: matches[0][2]].strip()
-
-
 class SessionSummary:
-    """The five-section summary as a value type: flush owns its grammar.
+    """The five-section summary as a value type.
 
-    Bölüm adları ve `## ` başlık grameri tek yerde durur; tüketiciler
-    (checkpoint hattı) formatı yeniden türetmez.
+    Bölüm adları ve `## ` başlık grameri summary_contract'ta tek yerde durur;
+    tüketiciler (checkpoint hattı) formatı yeniden türetmez.
     """
 
     __slots__ = ("sections",)
