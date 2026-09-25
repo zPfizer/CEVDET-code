@@ -177,6 +177,37 @@ MEMORY_PRIVACY_BOUNDARY_WARNING = (
     '[Hafıza] Gizlilik kapsamı güvenli biçimde kaydedilemedi; bu istek engellendi. '
     'Yeniden dene; başarı varsayma.'
 )
+VAULT_RETRIEVAL_TIMEOUT_WARNING = (
+    "[Vault Arama Süresi Doldu]\n"
+    "Vault araması ayrılan süre içinde tamamlanamadı; bilgi yok sonucuna varma. "
+    "Ham bilgi dosyalarına veya eski önbelleğe geçme; eksik doğrulamayı açıkça bildir."
+)
+USER_PROMPT_CAPTURE_TIMEOUT_WARNING = (
+    "[Hafıza Devamlılığı]\n"
+    "Bu turda Vault bağlamı üretildi ancak arka plan kaydı için ayrılan süre telemetri sırasında doldu; "
+    "kayıt kuyruğa alınmadı. Kaydedildi varsayma; eksikliği açıkça bildir."
+)
+USER_PROMPT_CAPTURE_SKIPPED_WARNING = (
+    "[Hafıza Devamlılığı]\n"
+    "Bu turda bağlam veya arka plan kaydı için ayrılan süre doldu; kayıt kuyruğa alınmadı. "
+    "Kaydedildi varsayma; eksikliği açıkça bildir."
+)
+
+
+class _UserPromptContext(str):
+    """Rendered context with trusted control state kept beside its text."""
+
+    deadline_expired: bool
+
+    def __new__(
+        cls,
+        value: str,
+        *,
+        deadline_expired: bool = False,
+    ) -> "_UserPromptContext":
+        result = super().__new__(cls, value)
+        result.deadline_expired = deadline_expired
+        return result
 
 _LEADING_SKILL_LINK = re.compile(
     r"^\s*\[\$[^\]\r\n]+\]\(([^)\r\n]+)\)\s*",
@@ -252,8 +283,13 @@ def _prepare_retrieval_query(
     return ("" if followup else query), followup
 
 
-def atomic_write(path: Path, text: str) -> None:
-    atomic_write_text(path, text)
+def atomic_write(
+    path: Path,
+    text: str,
+    *,
+    deadline: float | None = None,
+) -> None:
+    atomic_write_text(path, text, deadline=deadline)
 
 
 def session_key(session_id: str) -> str:
@@ -263,6 +299,8 @@ def session_key(session_id: str) -> str:
 def _read_source_text(
     source: Path | str | None,
     memory: MemoryRead | None = None,
+    *,
+    deadline: float | None = None,
 ) -> str | None:
     if source is None:
         return None
@@ -273,11 +311,16 @@ def _read_source_text(
         if not source.is_file():
             return None
         try:
-            text = (
-                memory.read_source(source)[1]
-                if memory is not None
-                else source.read_text(encoding="utf-8")
-            )
+            if memory is not None:
+                text = (
+                    memory.read_source(source)[1]
+                    if deadline is None
+                    else memory.read_source(source, deadline=deadline)[1]
+                )
+            else:
+                text = source.read_text(encoding="utf-8")
+        except TimeoutError:
+            raise
         except OSError:
             return None
     if text is None:
@@ -314,19 +357,39 @@ def _profile_warning(issues: tuple[str, ...]) -> str:
     )
 
 
-def _profile_card(path: Path | str | None, vault_root: Path, memory: MemoryRead) -> str:
+def _profile_card(
+    path: Path | str | None,
+    vault_root: Path,
+    memory: MemoryRead,
+    *,
+    deadline: float | None = None,
+) -> str:
     if path is None or memory.excludes(PROFILE_RELATIVE):
         return ""
-    issues = memory.profile_issues()
+    if deadline is None:
+        issues = memory.profile_issues()
+    else:
+        issues = memory.profile_issues(deadline=deadline)
     if issues:
         return _profile_warning(issues)
-    text = _read_source_text(vault_root / PROFILE_RELATIVE, memory)
+    text = _read_source_text(vault_root / PROFILE_RELATIVE, memory, deadline=deadline)
     if text is None:
         return _profile_warning(('profile-unavailable',))
     if memory.active:
         # The full source must be read through the filtered memory view.
-        text = re.sub(r'\[\[([^\]]+)\]\]', lambda match: match[1].split('|')[-1], text)
-    return profile_card(text) or _profile_warning(('profile-context-limit',))
+        _check_hook_deadline(deadline)
+
+        def display_link(match: re.Match[str]) -> str:
+            _check_hook_deadline(deadline)
+            return match[1].split('|')[-1]
+
+        text = re.sub(r'\[\[([^\]]+)\]\]', display_link, text)
+        _check_hook_deadline(deadline)
+    if deadline is None:
+        card = profile_card(text)
+    else:
+        card = profile_card(text, check_deadline=lambda: _check_hook_deadline(deadline))
+    return card or _profile_warning(('profile-context-limit',))
 
 
 def _bound_session_section(title: str, value: str, source_pointer: str | None = None) -> str:
@@ -557,7 +620,7 @@ def build_session_context(
         if memory.active and write_views:
             views = memory.views(view_sources, deadline=deadline)
         elif memory.active:
-            view_texts, views = memory.render_views(view_sources)
+            view_texts, views = memory.render_views(view_sources, deadline=deadline)
         else:
             views = {}
 
@@ -641,8 +704,11 @@ def _increment_prompt_count(
     record_path: Path,
     *,
     meaningful: bool = False,
+    deadline: float | None = None,
 ) -> int:
-    with locked(record_path):
+    with locked(record_path, timeout=timeout_for_deadline(deadline)):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("user-prompt-counter-deadline")
         try:
             record = json.loads(record_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -656,7 +722,7 @@ def _increment_prompt_count(
         record["prompt_count"] = count + 1
         if meaningful:
             record["meaningful_prompt_seen"] = True
-        atomic_write_json(record_path, record)
+        atomic_write_json(record_path, record, deadline=deadline)
         return count + 1
 
 
@@ -666,6 +732,7 @@ def handle_user_prompt(
     *,
     vault_root: Path = VAULT_ROOT,
     now: float | None = None,
+    deadline: float | None = None,
 ) -> str:
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
@@ -682,13 +749,36 @@ def handle_user_prompt(
         and is_meaningful_query(prompt)
     )
     context: list[str] = []
+    deadline_expired = False
+
+    def mark_deadline_expired() -> None:
+        nonlocal deadline_expired
+        deadline_expired = True
+        if USER_PROMPT_CAPTURE_TIMEOUT_WARNING not in context:
+            context.insert(0, USER_PROMPT_CAPTURE_TIMEOUT_WARNING)
+
     try:
-        with memory_read(vault_root) as memory:
-            profile = _profile_card(vault_root / PROFILE_RELATIVE, vault_root, memory)
+        memory_context = (
+            memory_read(vault_root)
+            if deadline is None
+            else memory_read(vault_root, deadline=deadline)
+        )
+        with memory_context as memory:
+            profile = _profile_card(
+                vault_root / PROFILE_RELATIVE,
+                vault_root,
+                memory,
+                deadline=deadline,
+            )
             if profile:
                 context.append('[Hafıza: Profil]\n' + profile)
             if memory.active:
                 context.append(MEMORY_READ_RULE)
+    except (TimeoutError, WorkerDeliveryTimeout):
+        return _UserPromptContext(
+            VAULT_RETRIEVAL_TIMEOUT_WARNING,
+            deadline_expired=True,
+        )
     except (OSError, UnicodeError, ValueError):
         return ('[Hafıza Tercihi Sorunu] Profil ve hafıza tercihleri denetlenemedi. '
                 'Ham notlara veya eski önbelleğe geçme; kişisel bilgi yanıtlamadan sorunu bildir.')
@@ -779,7 +869,15 @@ def handle_user_prompt(
         count = _increment_prompt_count(
             record_path,
             meaningful=meaningful_prompt,
+            deadline=deadline,
         )
+    except TimeoutError:
+        deadline_expired = True
+        count = 0
+    except LockUnavailable:
+        if deadline is not None and time.monotonic() >= deadline:
+            deadline_expired = True
+        count = 0
     except (OSError, ValueError):
         count = 0
     if count == 1 and meaningful_prompt and directive is not None and directive.kind in {'ordinary', 'correct', 'what-known', 'read-only'}:
@@ -803,6 +901,7 @@ def handle_user_prompt(
                 max_chars=min(MAX_CONTEXT_CHARS, USER_PROMPT_CONTEXT_TARGET_CHARS - len('\n\n'.join(context)) - (2 if context else 0)),
                 write_cache=not (read_only_requested or read_only_scope),
                 write_views=not (read_only_requested or read_only_scope),
+                deadline=deadline,
             )
             record = {
                 "ts": int(time.time() if now is None else now),
@@ -820,12 +919,20 @@ def handle_user_prompt(
                 ),
             }
             try:
+                _check_hook_deadline(deadline)
                 atomic_write(
                     state_dir / "runtime-vault-retrieval.json",
                     json.dumps(record, ensure_ascii=False) + "\n",
+                    deadline=deadline,
                 )
+                _check_hook_deadline(deadline)
                 (state_dir / "retrieval-health.json").unlink(missing_ok=True)
+                _check_hook_deadline(deadline)
+            except (TimeoutError, WorkerDeliveryTimeout):
+                mark_deadline_expired()
             except OSError:
+                if deadline is not None and time.monotonic() >= deadline:
+                    mark_deadline_expired()
                 pass  # Telemetry failure must not discard successfully retrieved sources.
             if retrieval.text:
                 context.append(retrieval.text)
@@ -838,7 +945,7 @@ def handle_user_prompt(
                     "ilgili Obsidian bağlantılarını ve tam kaynakları incele. "
                     "Yeterli aramadan sonra bulunamayanı veya belirsiz kalanı açıkça söyle.",
                 )
-        except (OSError, UnicodeError, ValueError) as exc:
+        except (OSError, UnicodeError, ValueError, LockUnavailable) as exc:
             if isinstance(exc, MemoryPreferenceError):
                 if str(exc).startswith('memory-publication-'):
                     return MEMORY_PUBLICATION_WARNING
@@ -847,7 +954,13 @@ def handle_user_prompt(
                     'Ham notlara veya eski önbelleğe geçme; hafızadan kişisel bilgi yanıtlama. '
                     'Tercih kaydının onarılması gerektiğini kısa biçimde bildir.'
                 )
-            if isinstance(exc, OSError) and str(exc) == "vault-retrieval-incomplete":
+            if isinstance(exc, (TimeoutError, LockUnavailable)):
+                deadline_expired = True
+                context.insert(
+                    0,
+                    VAULT_RETRIEVAL_TIMEOUT_WARNING,
+                )
+            elif isinstance(exc, OSError) and str(exc) == "vault-retrieval-incomplete":
                 context.insert(
                     0,
                     "[Vault Arama Sorunu]\n"
@@ -887,6 +1000,7 @@ def handle_user_prompt(
                         ensure_ascii=False,
                     )
                     + "\n",
+                    deadline=deadline,
                 )
                 atomic_write(
                     state_dir / "retrieval-health.json",
@@ -898,16 +1012,21 @@ def handle_user_prompt(
                         ensure_ascii=False,
                     )
                     + "\n",
+                    deadline=deadline,
                 )
             except OSError:
                 pass  # Preserve the search warning even when health storage is unavailable.
+    try:
+        _check_hook_deadline(deadline)
+    except WorkerDeliveryTimeout:
+        mark_deadline_expired()
     output = ""
     for section in context:
         candidate = section if not output else output + "\n\n" + section
         if len(candidate) > USER_PROMPT_CONTEXT_TARGET_CHARS:
             break
         output = candidate
-    return output
+    return _UserPromptContext(output, deadline_expired=deadline_expired)
 
 
 def _mark_reflection_if_needed(
@@ -1394,10 +1513,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             emitted_context = handle_user_prompt(
                 payload,
                 STATE_DIR,
+                deadline=hook_deadline,
+            )
+            deadline_context = (
+                isinstance(emitted_context, _UserPromptContext)
+                and emitted_context.deadline_expired
             )
             transcript_path = payload.get("transcript_path")
-            if (
-                not is_stop_message(emitted_context)
+            capture_eligible = (
+                not response_emitted
+                and not is_stop_message(emitted_context)
                 and isinstance(prompt, str)
                 and is_meaningful_query(prompt)
                 and directive is not None
@@ -1406,8 +1531,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 and not is_session_only(STATE_DIR, session_id)
                 and not is_read_only_turn(STATE_DIR, session_id)
                 and isinstance(transcript_path, str)
-                and transcript_path
-            ):
+                and bool(transcript_path)
+            )
+            deadline_would_skip_capture = (
+                capture_eligible
+                and hook_deadline is not None
+                and timeout_for_deadline(hook_deadline) <= 0
+            )
+            if deadline_context or deadline_would_skip_capture:
+                if (
+                    capture_eligible
+                    and USER_PROMPT_CAPTURE_SKIPPED_WARNING
+                    not in (emitted_context or "")
+                ):
+                    emitted_context = _UserPromptContext(
+                        (emitted_context or "")
+                        + "\n\n"
+                        + USER_PROMPT_CAPTURE_SKIPPED_WARNING,
+                        deadline_expired=True,
+                    )
+                _emit_user_prompt_result(emitted_context or "")
+                response_emitted = True
+            elif capture_eligible:
                 enqueue_flush(payload, "precompact", deadline=hook_deadline)
         elif args.event == "pre-compact":
             session_id = payload.get("session_id")
@@ -1462,9 +1607,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 state_dir=STATE_DIR,
                 deadline=hook_deadline,
             )
-        if args.event == "user-prompt":
+        if args.event == "user-prompt" and not response_emitted:
             _emit_user_prompt_result(emitted_context or "")
-            response_emitted = bool(emitted_context)
+            response_emitted = True
         record_hook_runtime(
             args.event,
             payload,

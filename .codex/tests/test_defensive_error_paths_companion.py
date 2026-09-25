@@ -261,6 +261,38 @@ class ManualViewGuards(unittest.TestCase):
             self.assertEqual(target.read_bytes(), bytes([255, 254, 250]))
         del marker
 
+    def test_render_views_forwards_deadline_through_canonical_renderer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _companion_root(Path(temporary))
+            companion.publish(
+                root,
+                root / ".state",
+                SUMMARY,
+                dt.datetime.fromisoformat(STAMP),
+                KEY,
+                "oturum",
+                frozenset(),
+            )
+            deadline = time.monotonic() + 30
+            with memory_read(root) as memory:
+                with (
+                    mock.patch.object(
+                        companion, "_bodies", wraps=companion._bodies
+                    ) as bodies,
+                    mock.patch.object(
+                        companion, "_project_views", wraps=companion._project_views
+                    ) as project,
+                ):
+                    rendered = companion.render_views(
+                        root,
+                        memory=memory,
+                        deadline=deadline,
+                    )
+
+        self.assertIn("Last-Session.md", rendered)
+        self.assertEqual(bodies.call_args.kwargs["deadline"], deadline)
+        self.assertEqual(project.call_args.kwargs["deadline"], deadline)
+
     def test_render_and_ensure_reject_stale_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = _companion_root(Path(temporary))

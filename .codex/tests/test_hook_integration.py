@@ -38,6 +38,126 @@ def _queue_report(*, pending: int = 0) -> dict[str, object]:
 
 
 class HookIntegrationTests(unittest.TestCase):
+    def test_user_prompt_handler_receives_shared_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            deadline = time.monotonic() + 30
+            payload = {
+                "session_id": "user-prompt-deadline",
+                "cwd": str(vault),
+                "prompt": "ok",
+            }
+            with (
+                mock.patch.object(hook, "VAULT_ROOT", vault),
+                mock.patch.object(hook, "STATE_DIR", state),
+                mock.patch.object(hook, "_validate_hook_scope"),
+                mock.patch.object(hook, "_hook_deadline", return_value=deadline),
+                mock.patch.object(hook, "handle_user_prompt", return_value="ctx") as handle,
+                mock.patch.object(hook, "record_hook_runtime"),
+                mock.patch.object(hook, "clear_hook_health"),
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                mock.patch.object(sys, "stdout", io.StringIO()),
+            ):
+                result = hook.main(["user-prompt", "--strict"])
+
+        self.assertEqual(result, 0)
+        handle.assert_called_once_with(payload, state, deadline=deadline)
+
+    def test_user_prompt_literal_timeout_text_does_not_skip_normal_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            transcript = vault / "transcript.jsonl"
+            deadline = time.monotonic() + 30
+            payload = {
+                "session_id": "literal-timeout-text",
+                "cwd": str(vault),
+                "prompt": "Atlas kararı",
+                "transcript_path": str(transcript),
+            }
+            with (
+                mock.patch.object(hook, "VAULT_ROOT", vault),
+                mock.patch.object(hook, "STATE_DIR", state),
+                mock.patch.object(hook, "_validate_hook_scope"),
+                mock.patch.object(hook, "_hook_deadline", return_value=deadline),
+                mock.patch.object(
+                    hook,
+                    "handle_user_prompt",
+                    return_value="[Vault Arama Süresi Doldu] quoted source text",
+                ),
+                mock.patch.object(hook, "enqueue_flush") as enqueue,
+                mock.patch.object(hook, "record_hook_runtime"),
+                mock.patch.object(hook, "clear_hook_health"),
+                mock.patch.object(hook, "_emit_user_prompt_result"),
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                mock.patch.object(sys, "stdout", io.StringIO()),
+            ):
+                result = hook.main(["user-prompt", "--strict"])
+
+        self.assertEqual(result, 0)
+        enqueue.assert_called_once_with(payload, "precompact", deadline=deadline)
+
+    def test_user_prompt_counter_lock_contention_respects_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            session_id = "counter-contention"
+            record = state / f"conversation-{hook.session_key(session_id)}.json"
+            ready = state / "counter-lock-ready"
+            holder_script = (
+                "import sys,time;"
+                "from pathlib import Path;"
+                "sys.path.insert(0,sys.argv[1]);"
+                "from file_lock import locked;"
+                "resource=Path(sys.argv[2]);ready=Path(sys.argv[3]);"
+                "guard=locked(resource);guard.__enter__();"
+                "ready.write_text('ready', encoding='ascii');"
+                "time.sleep(float(sys.argv[4]));"
+                "guard.__exit__(None,None,None)"
+            )
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    holder_script,
+                    str(SCRIPTS_DIR),
+                    str(record),
+                    str(ready),
+                    "0.8",
+                ],
+                cwd=vault,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            try:
+                limit = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < limit:
+                    time.sleep(0.01)
+                if not ready.exists():
+                    raise AssertionError("counter lock holder did not start")
+                deadline = time.monotonic() + 0.12
+                started = time.monotonic()
+                context = hook.handle_user_prompt(
+                    {
+                        "session_id": session_id,
+                        "cwd": str(vault),
+                        "prompt": "devam et",
+                    },
+                    state,
+                    vault_root=vault,
+                    deadline=deadline,
+                )
+                elapsed = time.monotonic() - started
+            finally:
+                child.wait(timeout=5)
+
+        self.assertLess(elapsed, 0.45)
+        self.assertIn("Profil kontrolü başarısız", context)
+        self.assertTrue(getattr(context, "deadline_expired", False))
+
     def test_session_start_propagates_one_deadline_to_context_queue_and_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)

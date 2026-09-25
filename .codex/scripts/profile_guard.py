@@ -24,33 +24,58 @@ _PREFERENCE = re.compile(
 )
 _EMPTY_SECTION = re.compile(r"(?m)^#{2,3}[ \t]*\r?$")
 _ReadSource = Callable[[Path], str | None]
+_DeadlineCheck = Callable[[], None]
 
 
-def _heading(text: str, title: str) -> list[tuple[str, str, int, int]]:
-    return [
-        match
-        for match in markdown_headings(_markdown_body(text, mask_inline_code=False))
-        if match[0] == "##" and match[1] == title
-    ]
+def _check_deadline(check_deadline: _DeadlineCheck | None) -> None:
+    if check_deadline is not None:
+        check_deadline()
 
 
-def _section(text: str, match: tuple[str, str, int, int]) -> str:
+def _heading(
+    text: str,
+    title: str,
+    *,
+    check_deadline: _DeadlineCheck | None = None,
+) -> list[tuple[str, str, int, int]]:
+    _check_deadline(check_deadline)
+    matches: list[tuple[str, str, int, int]] = []
+    for match in markdown_headings(_markdown_body(text, mask_inline_code=False)):
+        _check_deadline(check_deadline)
+        if match[0] == "##" and match[1] == title:
+            matches.append(match)
+    return matches
+
+
+def _section(
+    text: str,
+    match: tuple[str, str, int, int],
+    *,
+    check_deadline: _DeadlineCheck | None = None,
+) -> str:
+    _check_deadline(check_deadline)
     start = match[3]
     masked = _markdown_body(text, mask_inline_code=False)
-    boundaries = [
-        heading[2]
-        for heading in markdown_headings(masked)
-        if heading[0] in ("##", "###") and heading[2] > match[2]
-    ]
+    boundaries: list[int] = []
+    for heading in markdown_headings(masked):
+        _check_deadline(check_deadline)
+        if heading[0] in ("##", "###") and heading[2] > match[2]:
+            boundaries.append(heading[2])
     if empty := _EMPTY_SECTION.search(masked, start):
         boundaries.append(empty.start())
     end = min(boundaries, default=len(text))
     return text[start:end]
 
 
-def _structured_section(text: str, match: tuple[str, str, int, int]) -> str:
+def _structured_section(
+    text: str,
+    match: tuple[str, str, int, int],
+    *,
+    check_deadline: _DeadlineCheck | None = None,
+) -> str:
+    _check_deadline(check_deadline)
     return _markdown_body(
-        _section(text, match),
+        _section(text, match, check_deadline=check_deadline),
         mask_frontmatter=False,
         mask_inline_code=False,
     )
@@ -72,7 +97,12 @@ def _normal_claim(value: str) -> str:
     return value
 
 
-def _frontmatter_updated(text: str) -> date | None:
+def _frontmatter_updated(
+    text: str,
+    *,
+    check_deadline: _DeadlineCheck | None = None,
+) -> date | None:
+    _check_deadline(check_deadline)
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return None
@@ -82,13 +112,23 @@ def _frontmatter_updated(text: str) -> date | None:
         return None
     values = []
     for line in lines[1:end]:
+        _check_deadline(check_deadline)
         match = re.fullmatch(r"\s*updated\s*:\s*(.*?)\s*", line)
         if match:
             values.append(match.group(1).strip("'\""))
     return _iso(values[0]) if len(values) == 1 else None
 
 
-def _read(root: Path, path: Path, reader: _ReadSource | None, missing: str, unavailable: str) -> tuple[str | None, str | None]:
+def _read(
+    root: Path,
+    path: Path,
+    reader: _ReadSource | None,
+    missing: str,
+    unavailable: str,
+    *,
+    check_deadline: _DeadlineCheck | None = None,
+) -> tuple[str | None, str | None]:
+    _check_deadline(check_deadline)
     try:
         if _reparse(path, root) or not path.resolve().is_relative_to(root):
             return None, unavailable
@@ -98,12 +138,21 @@ def _read(root: Path, path: Path, reader: _ReadSource | None, missing: str, unav
         return None, missing
     if reader is not None:
         try:
+            _check_deadline(check_deadline)
             value = reader(path)
+            _check_deadline(check_deadline)
+        except TimeoutError:
+            raise
         except (OSError, UnicodeError, ValueError, RuntimeError):
             return None, unavailable
         return (value, None) if isinstance(value, str) else (None, unavailable)
     try:
-        return path.read_text(encoding="utf-8"), None
+        _check_deadline(check_deadline)
+        value = path.read_text(encoding="utf-8")
+        _check_deadline(check_deadline)
+        return value, None
+    except TimeoutError:
+        raise
     except (OSError, UnicodeError):
         return None, unavailable
 
@@ -129,13 +178,21 @@ def _reparse(path: Path, root: Path) -> bool:
     return False
 
 
-def _check_links(text: str, root: Path, issues: list[str]) -> None:
+def _check_links(
+    text: str,
+    root: Path,
+    issues: list[str],
+    *,
+    check_deadline: _DeadlineCheck | None = None,
+) -> None:
+    _check_deadline(check_deadline)
     try:
         resolved_root = root.resolve()
     except (OSError, RuntimeError):
         issues.append("profile-link-invalid")
         return
     for match in WIKILINK.finditer(text):
+        _check_deadline(check_deadline)
         raw = _target(match.group(1))
         if not raw:  # [[#fragment]] is a safe intra-document link.
             continue
@@ -172,26 +229,41 @@ def _check_links(text: str, root: Path, issues: list[str]) -> None:
             issues.append("profile-link-broken")
 
 
-def portrait(text: str) -> str:
+def portrait(
+    text: str,
+    *,
+    check_deadline: _DeadlineCheck | None = None,
+) -> str:
+    _check_deadline(check_deadline)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    matches = _heading(text, _PORTRAIT_TITLE)
+    matches = _heading(text, _PORTRAIT_TITLE, check_deadline=check_deadline)
     if len(matches) != 1:
         return ""
-    body = _section(text, matches[0]).strip()
+    body = _section(text, matches[0], check_deadline=check_deadline).strip()
     card = f"## {_PORTRAIT_TITLE}\n\n{body}" if body else ""
     return card if card and len(card) <= PROFILE_CONTEXT_LIMIT else ""
 
 
-def _claim_rows(text: str) -> list[tuple[str, ...]]:
+def _claim_rows(
+    text: str,
+    *,
+    check_deadline: _DeadlineCheck | None = None,
+) -> list[tuple[str, ...]]:
+    _check_deadline(check_deadline)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    headings = _heading(text, "Kayıtlar")
+    headings = _heading(text, "Kayıtlar", check_deadline=check_deadline)
     if len(headings) != 1:
         return []
-    return [
-        match.groups()
-        for line in _structured_section(text, headings[0]).splitlines()
-        if (match := CLAIM_ROW.fullmatch(line)) is not None
-    ]
+    rows: list[tuple[str, ...]] = []
+    for line in _structured_section(
+        text,
+        headings[0],
+        check_deadline=check_deadline,
+    ).splitlines():
+        _check_deadline(check_deadline)
+        if (match := CLAIM_ROW.fullmatch(line)) is not None:
+            rows.append(match.groups())
+    return rows
 
 
 def _check_preference(
@@ -202,42 +274,70 @@ def _check_preference(
     updated: date,
     reader: _ReadSource | None,
     issues: list[str],
+    *,
+    check_deadline: _DeadlineCheck | None = None,
 ) -> None:
+    _check_deadline(check_deadline)
     parsed_date = _iso(claim_date)
     if parsed_date is None or parsed_date > updated:
         issues.append("profile-claim-date")
         return
     source_path = root / "knowledge" / "concepts" / f"{slug}.md"
-    source, error = _read(root, source_path, reader, "profile-source-missing", "profile-source-unavailable")
+    source, error = _read(
+        root,
+        source_path,
+        reader,
+        "profile-source-missing",
+        "profile-source-unavailable",
+        check_deadline=check_deadline,
+    )
     if error:
         issues.append(error)
         return
-    rows = _claim_rows(source or "")
-    qualified = [
-        row for row in rows
-        if row[0] == "gecerli" and row[1] == "kullanici-dusuncesi"
-        and row[2] == "guncel" and row[3] == claim_date
-    ]
+    rows = _claim_rows(source or "", check_deadline=check_deadline)
+    qualified: list[tuple[str, ...]] = []
+    for row in rows:
+        _check_deadline(check_deadline)
+        if (
+            row[0] == "gecerli"
+            and row[1] == "kullanici-dusuncesi"
+            and row[2] == "guncel"
+            and row[3] == claim_date
+        ):
+            qualified.append(row)
     if not qualified:
         issues.append("profile-claim-provenance")
         return
-    matching = [row for row in qualified if _normal_claim(row[5]) == _normal_claim(claim)]
+    matching: list[tuple[str, ...]] = []
+    for row in qualified:
+        _check_deadline(check_deadline)
+        if _normal_claim(row[5]) == _normal_claim(claim):
+            matching.append(row)
     if not matching:
         issues.append("profile-claim-mismatch")
         return
     for row in matching:
+        _check_deadline(check_deadline)
         source_date = _iso(row[4])
         if source_date is None or source_date > updated:
             issues.append("profile-source-date")
             continue
         daily_path = root / "daily" / f"{row[4]}.md"
-        _daily, error = _read(root, daily_path, reader, "profile-daily-missing", "profile-daily-unavailable")
+        _daily, error = _read(
+            root,
+            daily_path,
+            reader,
+            "profile-daily-missing",
+            "profile-daily-unavailable",
+            check_deadline=check_deadline,
+        )
         if error:
             issues.append(error)
         for line in _markdown_body(
             source or '',
             mask_inline_code=False,
         ).splitlines():
+            _check_deadline(check_deadline)
             parsed = CLAIM_ROW.fullmatch(line)
             if parsed and parsed.groups() == row and USER_LINK.search(line):
                 proof = proof_for_link(root, line, reader=reader)
@@ -252,41 +352,70 @@ def check_profile(
     text: str | None = None,
     *,
     read_source: _ReadSource | None = None,
+    check_deadline: _DeadlineCheck | None = None,
 ) -> tuple[str, ...]:
     """Return stable, content-free diagnostics for the active profile snapshot."""
     issues: list[str] = []
+    _check_deadline(check_deadline)
     try:
         root = Path(vault_root).resolve()
     except (OSError, RuntimeError):
         return ("profile-unavailable",)
     profile_path = root / PROFILE_RELATIVE
     if text is None:
-        text, error = _read(root, profile_path, read_source, "profile-missing", "profile-unavailable")
+        text, error = _read(
+            root,
+            profile_path,
+            read_source,
+            "profile-missing",
+            "profile-unavailable",
+            check_deadline=check_deadline,
+        )
         if error:
             return (error,)
     if not text:
         return ("profile-empty",)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    updated = _frontmatter_updated(text)
+    _check_deadline(check_deadline)
+    updated = _frontmatter_updated(text, check_deadline=check_deadline)
     if updated is None:
         issues.append("profile-frontmatter")
-    portrait_matches = _heading(text, _PORTRAIT_TITLE)
-    if len(portrait_matches) != 1 or not _section(text, portrait_matches[0]).strip():
+    portrait_matches = _heading(
+        text,
+        _PORTRAIT_TITLE,
+        check_deadline=check_deadline,
+    )
+    if len(portrait_matches) != 1 or not _section(
+        text,
+        portrait_matches[0],
+        check_deadline=check_deadline,
+    ).strip():
         issues.append("profile-portrait")
-    elif len(portrait(text)) > PROFILE_CONTEXT_LIMIT or not portrait(text):
+    elif (
+        len(portrait(text, check_deadline=check_deadline)) > PROFILE_CONTEXT_LIMIT
+        or not portrait(text, check_deadline=check_deadline)
+    ):
         issues.append("profile-context-limit")
-    style_matches = _heading(text, _STYLE_TITLE)
+    style_matches = _heading(text, _STYLE_TITLE, check_deadline=check_deadline)
     if len(style_matches) != 1:
         issues.append("profile-style-section")
-    _check_links(text, root, issues)
+    _check_links(text, root, issues, check_deadline=check_deadline)
     if updated is None or len(style_matches) != 1:
         return tuple(dict.fromkeys(issues))
-    bullets = [line for line in _structured_section(text, style_matches[0]).splitlines()
-               if re.match(r"^\s*(?:[-+*]|\d+[.)])\s+", line)]
+    bullets: list[str] = []
+    for line in _structured_section(
+        text,
+        style_matches[0],
+        check_deadline=check_deadline,
+    ).splitlines():
+        _check_deadline(check_deadline)
+        if re.match(r"^\s*(?:[-+*]|\d+[.)])\s+", line):
+            bullets.append(line)
     if not bullets:
         issues.append("profile-preference-missing")
     claims: set[str] = set()
     for line in bullets:
+        _check_deadline(check_deadline)
         match = _PREFERENCE.fullmatch(line)
         if match is None:
             issues.append("profile-preference-format")
@@ -296,7 +425,16 @@ def check_profile(
         if normalized in claims:
             issues.append("profile-claim-duplicate")
         claims.add(normalized)
-        _check_preference(root, values["claim"], values["slug"], values["date"], updated, read_source, issues)
+        _check_preference(
+            root,
+            values["claim"],
+            values["slug"],
+            values["date"],
+            updated,
+            read_source,
+            issues,
+            check_deadline=check_deadline,
+        )
     return tuple(dict.fromkeys(issues))
 
 

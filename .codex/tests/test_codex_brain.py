@@ -4167,6 +4167,35 @@ class HookTests(unittest.TestCase):
         self.assertEqual(enqueue.call_args.args, (payload, "precompact"))
         self.assertIn("deadline", enqueue.call_args.kwargs)
 
+    def test_expired_user_prompt_emits_timeout_context_before_flush_admission(self) -> None:
+        payload = {
+            "session_id": "expired-capture",
+            "cwd": str(CODEX_DIR.parent),
+            "prompt": "Kararım: haftalık planı pazartesi sabahı yapacağım.",
+            "transcript_path": str(CODEX_DIR / "tests" / "fixture.jsonl"),
+        }
+        deadline = time.monotonic() - 1
+
+        with (
+            mock.patch.object(hook, "_hook_deadline", return_value=deadline),
+            mock.patch.object(hook, "_validate_hook_scope"),
+            mock.patch.object(hook, "handle_user_prompt", return_value="[Vault Arama Süresi Doldu]"),
+            mock.patch.object(hook, "enqueue_flush") as enqueue,
+            mock.patch.object(hook, "record_hook_runtime"),
+            mock.patch.object(hook, "clear_hook_health"),
+            mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+            mock.patch.object(sys, "stdout", io.StringIO()) as stdout,
+        ):
+            exit_code = hook.main(["user-prompt"])
+
+        self.assertEqual(exit_code, 0)
+        enqueue.assert_not_called()
+        emitted = json.loads(stdout.getvalue())
+        self.assertIn(
+            "Vault Arama Süresi Doldu",
+            emitted["hookSpecificOutput"]["additionalContext"],
+        )
+
     def test_transient_user_prompt_does_not_start_conversation_flush(self) -> None:
         payload = {
             "session_id": "transient-capture",
@@ -4390,6 +4419,231 @@ Analysis Lifecycle yalnız branded updateImpactPreviewId tüketir.
         self.assertEqual(receipt["paths"], [])
         self.assertEqual(receipt["chars"], 0)
         self.assertNotIn("prompt", receipt)
+
+    def test_user_prompt_profile_deadline_bounds_cooperative_slow_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            state.mkdir(parents=True)
+            payload = {
+                "session_id": "slow-profile",
+                "cwd": str(vault),
+                "prompt": "Atlas kararı",
+            }
+            observed_deadlines: list[float | None] = []
+            deadline = time.monotonic() + 0.08
+            started = time.monotonic()
+
+            def slow_profile(*, deadline: float | None = None):
+                observed_deadlines.append(deadline)
+                while deadline is not None and time.monotonic() < deadline + 0.05:
+                    time.sleep(0.005)
+                raise TimeoutError("profile-deadline")
+
+            with mock.patch.object(
+                hook.MemoryRead,
+                "profile_issues",
+                side_effect=slow_profile,
+            ):
+                context = hook.handle_user_prompt(
+                    payload,
+                    state,
+                    vault_root=vault,
+                    deadline=deadline,
+                )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.4)
+        self.assertEqual(observed_deadlines, [deadline])
+        self.assertIn("[Vault Arama Süresi Doldu]", context)
+        self.assertTrue(getattr(context, "deadline_expired", False))
+
+    def test_user_prompt_profile_worker_timeout_keeps_structured_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            state.mkdir(parents=True)
+            payload = {
+                "session_id": "profile-worker-timeout",
+                "cwd": str(vault),
+                "prompt": "Atlas kararı",
+            }
+            with mock.patch.object(
+                hook.MemoryRead,
+                "profile_issues",
+                side_effect=hook.WorkerDeliveryTimeout("profile-deadline"),
+            ):
+                context = hook.handle_user_prompt(
+                    payload,
+                    state,
+                    vault_root=vault,
+                    deadline=time.monotonic() + 30,
+                )
+
+        self.assertIn("[Vault Arama Süresi Doldu]", context)
+        self.assertTrue(getattr(context, "deadline_expired", False))
+
+    def test_expired_plain_user_prompt_failure_surfaces_capture_warning(self) -> None:
+        payload = {
+            "session_id": "preference-deadline",
+            "cwd": str(CODEX_DIR.parent),
+            "prompt": "Kararım: haftalık planı pazartesi sabahı yapacağım.",
+            "transcript_path": str(CODEX_DIR / "tests" / "fixture.jsonl"),
+        }
+        deadline = time.monotonic() - 1
+
+        with (
+            mock.patch.object(hook, "_hook_deadline", return_value=deadline),
+            mock.patch.object(hook, "_validate_hook_scope"),
+            mock.patch.object(
+                hook,
+                "handle_user_prompt",
+                return_value="[Hafıza Tercihi Sorunu] Profil ve hafıza tercihleri denetlenemedi.",
+            ),
+            mock.patch.object(hook, "enqueue_flush") as enqueue,
+            mock.patch.object(hook, "record_hook_runtime"),
+            mock.patch.object(hook, "clear_hook_health"),
+            mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+            mock.patch.object(sys, "stdout", io.StringIO()) as stdout,
+        ):
+            exit_code = hook.main(["user-prompt"])
+
+        self.assertEqual(exit_code, 0)
+        enqueue.assert_not_called()
+        emitted = json.loads(stdout.getvalue())
+        context = emitted["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Hafıza Tercihi Sorunu", context)
+        self.assertIn("kuyruğa alınmadı", context)
+
+    def test_user_prompt_telemetry_deadline_is_visible_and_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            state.mkdir(parents=True)
+            payload = {
+                "session_id": "slow-telemetry",
+                "cwd": str(vault),
+                "prompt": "Atlas kararı",
+            }
+            retrieval = vault_retrieval.VaultContextResult(
+                "emitted",
+                "[Vault Retrieval]\nsuccess",
+                1,
+                1,
+                ("x.md",),
+                100,
+            )
+            deadline = time.monotonic() + 0.08
+            started = time.monotonic()
+
+            def slow_telemetry(*_args: object, **_kwargs: object) -> None:
+                while time.monotonic() < deadline + 0.05:
+                    time.sleep(0.005)
+
+            with (
+                mock.patch.object(
+                    hook,
+                    "retrieve_vault_context_detailed",
+                    return_value=retrieval,
+                ),
+                mock.patch.object(hook, "atomic_write", side_effect=slow_telemetry),
+            ):
+                context = hook.handle_user_prompt(
+                    payload,
+                    state,
+                    vault_root=vault,
+                    deadline=deadline,
+                )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.4)
+        self.assertIn("[Hafıza Devamlılığı]", context)
+        self.assertTrue(getattr(context, "deadline_expired", False))
+
+    def test_user_prompt_retrieval_deadline_bounds_cooperative_slow_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            command = vault / "🎯 100-Command-Center"
+            state.mkdir(parents=True)
+            command.mkdir(parents=True)
+            (command / "Active Work.md").write_text(
+                "# Aktif İşler\n\n## Primary\n",
+                encoding="utf-8",
+            )
+            payload = {
+                "session_id": "slow-retrieval",
+                "cwd": str(vault),
+                "prompt": "Atlas kararı için yavaş retrieval denemesi",
+            }
+            observed_deadlines: list[float | None] = []
+            started = time.monotonic()
+
+            def slow_retrieval(*_args: object, **kwargs: object):
+                deadline = kwargs.get("deadline")
+                observed_deadlines.append(deadline if isinstance(deadline, float) else None)
+                while time.monotonic() - started < 0.6:
+                    if isinstance(deadline, float) and time.monotonic() >= deadline:
+                        raise TimeoutError("retrieval-deadline")
+                    time.sleep(0.01)
+                return vault_retrieval.VaultContextResult(
+                    "emitted", "slow result", 1, 1, ("x.md",), 100,
+                )
+
+            deadline = time.monotonic() + 0.08
+            with mock.patch.object(
+                hook,
+                "retrieve_vault_context_detailed",
+                side_effect=slow_retrieval,
+            ):
+                context = hook.handle_user_prompt(
+                    payload,
+                    state,
+                    vault_root=vault,
+                    deadline=deadline,
+                )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.4)
+        self.assertEqual(observed_deadlines, [deadline])
+        self.assertIn("[Vault Arama Süresi Doldu]", context)
+        self.assertNotIn("Mevcut dosya aramasıyla", context)
+
+    def test_user_prompt_retrieval_deadline_preserves_successful_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            state = vault / ".codex/scripts/.state"
+            state.mkdir(parents=True)
+            result = vault_retrieval.VaultContextResult(
+                "emitted", "[Vault Retrieval]\nbounded success", 1, 1, ("x.md",), 100,
+            )
+            payload = {
+                "session_id": "successful-retrieval",
+                "cwd": str(vault),
+                "prompt": "Atlas kararı",
+            }
+            deadline = time.monotonic() + 30
+            with mock.patch.object(
+                hook,
+                "retrieve_vault_context_detailed",
+                return_value=result,
+            ) as retrieve:
+                context = hook.handle_user_prompt(
+                    payload,
+                    state,
+                    vault_root=vault,
+                    deadline=deadline,
+                )
+
+        retrieve.assert_called_once_with(
+            vault,
+            "Atlas kararı",
+            max_chars=mock.ANY,
+            write_cache=True,
+            write_views=True,
+            deadline=deadline,
+        )
+        self.assertIn("bounded success", context)
 
     def test_user_prompt_skips_local_retrieval_for_noise(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
