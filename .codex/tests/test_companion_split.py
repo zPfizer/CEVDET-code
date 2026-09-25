@@ -1,6 +1,7 @@
 import datetime as dt
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -15,6 +16,7 @@ import hook
 import vault_retrieval
 import memory_ledger
 import doctor
+import state_store
 
 
 EVENT = dt.datetime(2026, 9, 8, 12, tzinfo=dt.timezone.utc)
@@ -299,6 +301,303 @@ class CompanionSplitTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
                 companion_memory.publish(root, root / ".state", _summary(),
                                          EVENT + dt.timedelta(minutes=1), "b" * 64, "one", frozenset())
+
+    def test_source_edit_before_guarded_manual_write_is_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            companion = _seed(root)
+            companion_memory.migrate(root)
+            companion_memory.publish(root, root / ".state", _summary(), EVENT, "a" * 64, "one", frozenset())
+            view = companion / "Last-Session.md"
+            raw = view.read_bytes()
+            start = raw.find(companion_memory.BEGIN.encode())
+            view.write_bytes(b"# User edited prefix\r\n" + raw[start:])
+            source = companion / "Sources/Last-Session.md"
+            user_bytes = b"# Concurrent source edit\r\n" + source.read_bytes()
+            real_write = companion_memory._write_manual
+            injected = False
+
+            def inject(path, payload, **kwargs):
+                nonlocal injected
+                if path == source and not injected:
+                    injected = True
+                    path.write_bytes(user_bytes)
+                return real_write(path, payload, **kwargs)
+
+            with mock.patch.object(companion_memory, "_write_manual", side_effect=inject):
+                with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
+                    companion_memory.publish(
+                        root, root / ".state", _summary("İkinci bağlam"),
+                        EVENT + dt.timedelta(minutes=1), "b" * 64, "one", frozenset(),
+                    )
+            self.assertTrue(injected)
+            self.assertEqual(source.read_bytes(), user_bytes)
+
+    def test_view_edit_before_guarded_projection_is_preserved(self):
+        for operation in ("ensure", "publish"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                companion = _seed(root)
+                companion_memory.migrate(root)
+                companion_memory.publish(root, root / ".state", _summary(), EVENT, "a" * 64, "one", frozenset())
+                source = companion / "Sources/Last-Session.md"
+                source.write_bytes(source.read_bytes().replace(b"# Last", b"# Source edit", 1))
+                target = companion / "Last-Session.md"
+                user_bytes = b"# Concurrent view edit\r\n" + target.read_bytes()
+                real_write = companion_memory._write_projection
+                injected = False
+
+                def inject(path, payload, **kwargs):
+                    nonlocal injected
+                    if path == target and not injected:
+                        injected = True
+                        path.write_bytes(user_bytes)
+                    return real_write(path, payload, **kwargs)
+
+                with mock.patch.object(companion_memory, "_write_projection", side_effect=inject):
+                    with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
+                        if operation == "ensure":
+                            companion_memory.ensure_views(root, root / ".state", write=True)
+                        else:
+                            companion_memory.publish(
+                                root, root / ".state", _summary("İkinci bağlam"),
+                                EVENT + dt.timedelta(minutes=1), "b" * 64, "one", frozenset(),
+                            )
+                self.assertTrue(injected)
+                self.assertEqual(target.read_bytes(), user_bytes)
+
+    @unittest.skipUnless(os.name == "nt", "requires a Windows guarded replacement")
+    def test_guarded_projection_keeps_backup_after_backup_digest_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "Last-Session.md"
+            state = root / ".state"
+            original = b"user content\r\n"
+            target.write_bytes(original)
+
+            with mock.patch.object(
+                state_store,
+                "_locked_windows_digest",
+                side_effect=OSError("backup digest unavailable"),
+            ):
+                with self.assertRaisesRegex(OSError, "backup digest unavailable"):
+                    companion_memory._write_projection(
+                        target,
+                        b"generated\n",
+                        expected_digest=companion_memory._sha(original),
+                        state=state,
+                    )
+
+            backups = list(state.glob(".Last-Session.md.companion-*.bak"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_bytes(), original)
+            self.assertEqual(target.read_bytes(), b"generated\n")
+            target.write_bytes(original)
+            with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
+                companion_memory._write_projection(
+                    target,
+                    b"retry\n",
+                    expected_digest=companion_memory._sha(original),
+                    state=state,
+                )
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual(backups[0].read_bytes(), original)
+
+    @unittest.skipUnless(os.name == "nt", "requires a Windows guarded replacement")
+    def test_guarded_projection_keeps_backup_after_output_digest_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "Last-Session.md"
+            state = root / ".state"
+            original = b"user content\r\n"
+            target.write_bytes(original)
+            real_sha = state_store.sha256_file
+            calls = 0
+
+            def fail_output(path):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("output digest unavailable")
+                return real_sha(path)
+
+            with mock.patch.object(state_store, "sha256_file", side_effect=fail_output):
+                with self.assertRaisesRegex(OSError, "output digest unavailable"):
+                    companion_memory._write_projection(
+                        target,
+                        b"generated\n",
+                        expected_digest=companion_memory._sha(original),
+                        state=state,
+                    )
+
+            backups = list(state.glob(".Last-Session.md.companion-*.bak"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_bytes(), original)
+            self.assertEqual(target.read_bytes(), b"generated\n")
+
+    @unittest.skipUnless(os.name == "nt", "requires a Windows guarded replacement")
+    def test_publish_rejects_retry_with_unresolved_guarded_backup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            companion = _seed(root)
+            state = root / ".state"
+            companion_memory.migrate(root)
+            companion_memory.publish(root, state, _summary(), EVENT, "a" * 64, "one", frozenset())
+            source = companion / "Sources/Last-Session.md"
+            source.write_bytes(source.read_bytes().replace(b"# Last", b"# Source edit", 1))
+
+            with mock.patch.object(
+                state_store,
+                "_locked_windows_digest",
+                side_effect=OSError("backup digest unavailable"),
+            ):
+                with self.assertRaisesRegex(OSError, "backup digest unavailable"):
+                    companion_memory.publish(
+                        root,
+                        state,
+                        _summary("Yeni bağlam"),
+                        EVENT + dt.timedelta(minutes=1),
+                        "b" * 64,
+                        "one",
+                        frozenset(),
+                    )
+
+            backups = list(state.glob(".Last-Session.md.companion-*.bak"))
+            self.assertEqual(len(backups), 1)
+            with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
+                companion_memory.publish(
+                    root,
+                    state,
+                    _summary("Yeni bağlam"),
+                    EVENT + dt.timedelta(minutes=1),
+                    "b" * 64,
+                    "one",
+                    frozenset(),
+                )
+            self.assertTrue(backups[0].is_file())
+
+    def test_guarded_create_conflict_removes_owned_generated_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "Last-Session.md"
+            state = root / ".state"
+            generated = b"generated\n"
+            user_bytes = b"user created the target\n"
+
+            def create_then_conflict(source, destination, **kwargs):
+                os.link(source, kwargs["backup"])
+                kwargs["on_marker_created"]()
+                destination.write_bytes(user_bytes)
+                raise state_store.ReplacementConflict("replace-target-created")
+
+            with mock.patch.object(
+                state_store,
+                "replace_with_retry",
+                side_effect=create_then_conflict,
+            ):
+                with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
+                    companion_memory._write_projection(
+                        target,
+                        generated,
+                        expected_digest=None,
+                        state=state,
+                    )
+
+            backup = companion_memory._guarded_create_marker_path(target, state)
+            self.assertEqual(target.read_bytes(), user_bytes)
+            self.assertFalse(backup.exists())
+
+            companion_memory._write_projection(
+                target,
+                b"retry\n",
+                expected_digest=companion_memory._sha(user_bytes),
+                state=state,
+            )
+            self.assertEqual(target.read_bytes(), b"retry\n")
+
+    def test_guarded_create_retry_guard_failure_removes_owned_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "Last-Session.md"
+            state = root / ".state"
+            generated = b"generated\n"
+            user_bytes = b"user created during retry\n"
+
+            def retry_then_guard_failure(source, _destination, **kwargs):
+                kwargs["before_replace"]()
+                os.link(source, kwargs["backup"])
+                kwargs["on_marker_created"]()
+                target.write_bytes(user_bytes)
+                kwargs["before_replace"]()
+
+            with mock.patch.object(
+                state_store,
+                "replace_with_retry",
+                side_effect=retry_then_guard_failure,
+            ):
+                with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
+                    companion_memory._write_projection(
+                        target,
+                        generated,
+                        expected_digest=None,
+                        state=state,
+                    )
+
+            backup = companion_memory._guarded_create_marker_path(target, state)
+            self.assertEqual(target.read_bytes(), user_bytes)
+            self.assertFalse(backup.exists())
+
+    def test_interrupted_create_marker_is_reconciled(self):
+        payload = b"generated\n"
+        for outcome in ("absent", "generated", "user"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                target = root / "Last-Session.md"
+                state = root / ".state"
+                marker = companion_memory._guarded_create_marker_path(target, state)
+                marker.parent.mkdir(parents=True)
+                marker.write_bytes(payload)
+                if outcome == "generated":
+                    target.write_bytes(payload)
+                elif outcome == "user":
+                    user_bytes = b"user content\n"
+                    target.write_bytes(user_bytes)
+
+                if outcome == "user":
+                    with self.assertRaisesRegex(ValueError, "companion-manual-view-conflict"):
+                        companion_memory._write_projection(
+                            target,
+                            payload,
+                            expected_digest=None,
+                            state=state,
+                        )
+                    self.assertEqual(target.read_bytes(), user_bytes)
+                else:
+                    companion_memory._write_projection(
+                        target,
+                        payload,
+                        expected_digest=None,
+                        state=state,
+                    )
+                    self.assertEqual(target.read_bytes(), payload)
+                self.assertFalse(marker.exists())
+
+    def test_ensure_reconciles_interrupted_create_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            companion = _seed(root)
+            state = root / ".state"
+            companion_memory.migrate(root)
+            companion_memory.publish(root, state, _summary(), EVENT, "a" * 64, "one", frozenset())
+            target = companion / "Last-Session.md"
+            payload = target.read_bytes()
+            marker = companion_memory._guarded_create_marker_path(target, state)
+            marker.write_bytes(payload)
+
+            companion_memory.ensure_views(root, state)
+
+            self.assertEqual(target.read_bytes(), payload)
+            self.assertFalse(marker.exists())
 
     def test_anonymous_legacy_block_remains_tracked_manual_source(self):
         with tempfile.TemporaryDirectory() as temporary:
