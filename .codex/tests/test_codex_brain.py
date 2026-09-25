@@ -4545,6 +4545,34 @@ class VaultRetrievalTests(unittest.TestCase):
         self.assertEqual(reader.paths, [])
         self.assertEqual(after, before)
 
+    def test_cache_rebuilds_entry_with_malformed_counter_value(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            note = vault / "🧠 500-Knowledge/Not.md"
+            note.parent.mkdir(parents=True)
+            note.write_text("# Not\nkaynak cache terimi\n", encoding="utf-8")
+            vault_retrieval.build_vault_map(vault)
+            cache_path = vault / vault_retrieval.CACHE_RELATIVE_PATH
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            relative = note.relative_to(vault).as_posix()
+            payload["files"][relative]["entry"]["body_terms"]["kaynak"] = ["bozuk"]
+            cache_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            reader = _CountingReader()
+            entries = vault_retrieval.build_vault_map(vault, read_entry=reader)
+            corrected = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        self.assertEqual([path.name for path in reader.paths], ["Not.md"])
+        self.assertIn("kaynak", entries[0].body_terms)
+        self.assertEqual(
+            vault_retrieval.search_vault(entries, "kaynak cache terimi")[0].entry.path,
+            relative,
+        )
+        self.assertEqual(
+            corrected["files"][relative]["entry"]["body_terms"]["kaynak"],
+            entries[0].body_terms["kaynak"],
+        )
+
     def test_cache_entry_uses_stable_post_stat_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             vault = Path(temporary)
