@@ -11,6 +11,7 @@ import sys
 from typing import Sequence
 
 from file_lock import locked
+from markdown_boundary import markdown_body
 from state_store import atomic_write_text
 from vault_corpus import DAILY_ROOT, NoteIndex, vault_notes
 
@@ -346,20 +347,10 @@ def audit_vault(
 
 def _inline_tag_violations(note: NoteIndex) -> list[InlineTagViolation]:
     path = note.path
-    lines = note.text.splitlines()
+    lines = markdown_body(note.text).splitlines()
     violations: list[InlineTagViolation] = []
-    in_frontmatter = bool(lines and lines[0] == "---")
-    in_fence = False
     for line_number, source in enumerate(lines, start=1):
-        stripped = source.strip()
-        if in_frontmatter:
-            if line_number > 1 and stripped == "---":
-                in_frontmatter = False
-            continue
-        if stripped.startswith(("```", "~~~")):
-            in_fence = not in_fence
-            continue
-        if in_fence or re.match(r"^\s*#{1,6}\s+", source):
+        if re.match(r"^\s*#{1,6}\s+", source):
             continue
         scrubbed = INLINE_CODE.sub("", source)
         scrubbed = WIKILINK_ANCHOR.sub("", scrubbed)

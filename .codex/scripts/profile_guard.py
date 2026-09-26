@@ -6,8 +6,8 @@ from pathlib import Path
 import re
 import unicodedata
 
-from graph_integrity import _markdown_body
-from knowledge_schema import CLAIM_ROW, WIKILINK, markdown_headings
+from markdown_boundary import markdown_body as _markdown_body, wikilinks
+from knowledge_schema import CLAIM_ROW, markdown_headings
 from user_evidence import USER_LINK, proof_for_link
 
 
@@ -135,7 +135,7 @@ def _check_links(text: str, root: Path, issues: list[str]) -> None:
     except (OSError, RuntimeError):
         issues.append("profile-link-invalid")
         return
-    for match in WIKILINK.finditer(text):
+    for match in wikilinks(_markdown_body(text)):
         raw = _target(match.group(1))
         if not raw:  # [[#fragment]] is a safe intra-document link.
             continue
@@ -282,7 +282,7 @@ def check_profile(
     if updated is None or len(style_matches) != 1:
         return tuple(dict.fromkeys(issues))
     bullets = [line for line in _structured_section(text, style_matches[0]).splitlines()
-               if re.match(r"^\s*(?:[-+*]|\d+[.)])\s+", line)]
+               if re.match(r"^\s*(?:[-+*]|[0-9]{1,9}[.)])\s+", line)]
     if not bullets:
         issues.append("profile-preference-missing")
     claims: set[str] = set()

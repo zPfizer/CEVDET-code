@@ -94,6 +94,17 @@ class ProfileGuardTests(unittest.TestCase):
             self.assertEqual(profile_guard.check_profile(root, crlf), ())
             self.assertIn("Kısa ve doğal", profile_guard.portrait(crlf))
 
+    def test_frontmatter_closing_whitespace_preserves_profile_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seed_profile(root)
+            for closing in ('---   ', '---\t'):
+                for newline in ('\n', '\r\n'):
+                    with self.subTest(closing=closing, newline=newline):
+                        text = PROFILE_TEXT.replace('\n---\n', '\n' + closing + '\n', 1).replace('\n', newline)
+                        self.assertEqual(profile_guard.check_profile(root, text), ())
+                        self.assertEqual(profile_guard.portrait(text).replace('\r\n', '\n'), profile_guard.portrait(PROFILE_TEXT))
+
     def test_fenced_headings_do_not_hide_or_end_the_portrait(self) -> None:
         text = PROFILE_TEXT.replace(
             "Kısa ve doğal bir oturum özeti.\n\n",
@@ -159,9 +170,9 @@ class ProfileGuardTests(unittest.TestCase):
 
                     self.assertIn("profile-preference-missing", profile_guard.check_profile(root, text))
 
-    def test_section_masking_and_heading_discovery_agree_on_tab_fences(self) -> None:
+    def test_section_masking_and_heading_discovery_agree_on_fence_indentation(self) -> None:
         preference = next(line for line in PROFILE_TEXT.splitlines() if line.startswith('- Türkçe'))
-        for opening, closing in ((' ```markdown', '\t```'), ('\t```markdown', ' ```')):
+        for opening, closing in ((' ```markdown', ' ```'), ('```markdown', '```')):
             with self.subTest(opening=opening, closing=closing), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 seed_profile(root)
@@ -240,6 +251,207 @@ class ProfileGuardTests(unittest.TestCase):
             seed_profile(root)
             self.assertIn("profile-claim-mismatch", profile_guard.check_profile(root, mismatch))
             self.assertIn("profile-claim-duplicate", profile_guard.check_profile(root, duplicate))
+
+    def test_check_links_ignores_fenced_and_inline_example_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                '```text\n[[missing-example]]\n```\n'
+                '`[[missing-inline]]`\n[[missing-real]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-broken'])
+
+    def test_escaped_html_code_openers_keep_links_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                r'\<code>[[../secret]]</code>',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-traversal'])
+
+    def test_blockquoted_links_remain_visible_to_profile_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                '> [[../secret]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-traversal'])
+
+    def test_html_code_text_inside_comments_does_not_hide_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                '<!-- literal <code> -->\n[[../secret]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-traversal'])
+
+    def test_html_code_text_inside_markdown_link_title_does_not_hide_links(self) -> None:
+        for example, expected in (
+            ('[x](url "<code>")\n[[../secret]]', ['profile-link-traversal']),
+            ('[x](url "<script>")\n<code>[[../secret]]</code>', []),
+            ('[<code>[[../secret]]</code>](url)', []),
+        ):
+            with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                issues: list[str] = []
+
+                profile_guard._check_links(example, root, issues)
+
+            self.assertEqual(issues, expected)
+
+    def test_tab_indented_html_blocks_do_not_hide_following_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                '\t<pre>\nmodel example\n[[../secret]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-traversal'])
+
+    def test_active_html_block_uses_its_own_closing_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                '<pre>\nmodel example\n</script></pre>\n[[../secret]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-traversal'])
+
+    def test_check_links_keeps_nested_list_links_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                '- Ana madde\n    [[missing-nested]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-broken'])
+
+    def test_check_links_keeps_paragraph_continuation_links_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                'Paragraf devam ediyor.\n    [[missing-continuation]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-broken'])
+
+    def test_unclosed_container_fences_do_not_hide_following_links(self) -> None:
+        for example in (
+            '> ~~~\n> model example\n\n[[missing-after-quote-fence]]',
+            '- ```\n  model example\n\n[[missing-after-list-fence]]',
+            '- item\n  ```\n  model example\n\n[[missing-after-list-continuation-fence]]',
+        ):
+            with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                issues: list[str] = []
+
+                profile_guard._check_links(example, root, issues)
+
+            self.assertEqual(issues, ['profile-link-broken'])
+
+    def test_unclosed_literal_html_containers_do_not_hide_following_links(self) -> None:
+        for example in (
+            '> <pre>\n> model example\n\n[[missing-after-quote-html]]',
+            '- <pre>\n  model example\n\n[[missing-after-list-html]]',
+        ):
+            with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                issues: list[str] = []
+
+                profile_guard._check_links(example, root, issues)
+
+            self.assertEqual(issues, ['profile-link-broken'])
+
+    def test_list_continuation_html_containers_do_not_hide_following_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            issues: list[str] = []
+
+            profile_guard._check_links(
+                '- item\n  <pre>\n  model example\n[[../secret]]',
+                root,
+                issues,
+            )
+
+        self.assertEqual(issues, ['profile-link-traversal'])
+
+    def test_malformed_ordered_markers_do_not_hide_following_links(self) -> None:
+        for example in (
+            '1234567890. ```\n    [[../secret]]',
+            '١. ```\n    [[../secret]]',
+        ):
+            with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                issues: list[str] = []
+
+                profile_guard._check_links(example, root, issues)
+
+            self.assertEqual(issues, ['profile-link-traversal'])
+
+    def test_malformed_html_openers_do_not_change_following_visibility(self) -> None:
+        for example, expected in (
+            ('<code foo=>[[../secret]]</code>', ['profile-link-traversal']),
+            ('<code foo=""bar>[[../secret]]</code>', ['profile-link-traversal']),
+            ('<code 1foo="x">[[../secret]]</code>', ['profile-link-traversal']),
+            ('prefix <script foo=>\n<code>[[../secret]]</code>', []),
+        ):
+            with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                issues: list[str] = []
+
+                profile_guard._check_links(example, root, issues)
+
+            self.assertEqual(issues, expected)
+
+    def test_valid_html_attribute_spacing_keeps_code_links_masked(self) -> None:
+        for example in (
+            '<code foo= "">[[../secret]]</code>',
+            '<code title="x a= >">[[../secret]]</code>',
+            '<code class="x" title="y">[[../secret]]</code>',
+        ):
+            with self.subTest(example=example), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                issues: list[str] = []
+
+                profile_guard._check_links(example, root, issues)
+
+            self.assertEqual(issues, [])
 
     def test_broken_and_outside_links_are_rejected_without_echoing_content(self) -> None:
         broken = PROFILE_TEXT.replace("tercih-kisa#Kayıtlar", "kayip#Kayıtlar")

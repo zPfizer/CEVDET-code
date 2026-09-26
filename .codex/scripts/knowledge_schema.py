@@ -6,6 +6,14 @@ from pathlib import Path
 import re
 import stat
 import unicodedata
+from markdown_boundary import (
+    FENCE_LINE as _FENCE_LINE,
+    WIKILINK,
+    is_escaped as _is_escaped,
+    markdown_body as _markdown_body,
+    markdown_link_spans,
+    wikilinks as _wikilinks,
+)
 from user_evidence import USER_ANCHOR, USER_LINK, proof_for_link
 from compile_state import PolicyError, require_publication_snapshot
 
@@ -26,7 +34,6 @@ LOG_HEADER = "# Derleme Günlüğü"
 DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 DAILY_SOURCE = re.compile(r"\d{4}-\d{2}-\d{2}\.md\Z")
 SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
-WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 CONCEPT_TARGET_PREFIX = "knowledge/concepts/"
 DERIVED_SCHEMA = "knowledge-v2"
 CLAIM_KINDS = (
@@ -49,8 +56,6 @@ SOURCE_LINK = re.compile(
     r"\[\[daily/(\d{4}-\d{2}-\d{2})" + USER_ANCHOR + r"(?:\|[^\]]+)?\]\]"
 )
 _HEADING_LINE = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$")
-_FENCE_LINE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^\r\n]*)$")
-
 DERIVED_RULES = (
     'Yeni kullanıcı düşüncesi kayıtları, daily içindeki sistem üretimi user-evidence kaydının '
     'claim metnini aynen ve [[daily/YYYY-MM-DD#user-ID|Kaynak]] bağlantısıyla taşımalı. '
@@ -175,27 +180,19 @@ def wikilink_target(inner: str) -> str:
     return target.split("#", 1)[0].strip().replace("\\", "/")
 
 
-def _is_escaped(text: str, index: int) -> bool:
-    slashes = 0
-    index -= 1
-    while index >= 0 and text[index] == "\\":
-        slashes += 1
-        index -= 1
-    return slashes % 2 == 1
-
-
-def _wikilinks(text: str) -> Iterator[re.Match[str]]:
+def _visible_wikilinks(text: str, *, mask_frontmatter: bool = True) -> Iterator[re.Match[str]]:
+    body = _markdown_body(text, mask_frontmatter=mask_frontmatter)
+    metadata = markdown_link_spans(body, include_labels=False)
     return (
-        match
-        for match in WIKILINK.finditer(text)
-        if not _is_escaped(text, match.start())
+        match for match in _wikilinks(body)
+        if not any(start < match.end() and match.start() < end for start, end in metadata)
     )
 
 
 def _link_slugs(text: str) -> set[str]:
     return {
         target
-        for match in _wikilinks(text)
+        for match in _visible_wikilinks(text)
         if (target := wikilink_target(match.group(1)))
     }
 
@@ -203,25 +200,10 @@ def _link_slugs(text: str) -> set[str]:
 def markdown_headings(text: str) -> list[tuple[str, str, int, int]]:
     """Return real Markdown headings outside fenced code blocks."""
     headings: list[tuple[str, str, int, int]] = []
-    fenced: tuple[str, int] | None = None
+    masked = _markdown_body(text, mask_inline_code=False)
     offset = 0
-    for raw_line in text.splitlines(keepends=True):
+    for raw_line in masked.splitlines(keepends=True):
         line = raw_line.rstrip("\r\n")
-        fence = _FENCE_LINE.fullmatch(line)
-        if fenced is not None:
-            if fence:
-                marker = fence.group(1)
-                suffix = fence.group(2)
-                if marker[0] == fenced[0] and len(marker) >= fenced[1] and not suffix.strip():
-                    fenced = None
-            offset += len(raw_line)
-            continue
-        if fence:
-            marker = fence.group(1)
-            if marker[0] != "`" or "`" not in fence.group(2):
-                fenced = (marker[0], len(marker))
-            offset += len(raw_line)
-            continue
         heading = _HEADING_LINE.fullmatch(line)
         if heading:
             title = heading.group(2).strip()
@@ -384,7 +366,11 @@ def source_link_details(text: str) -> str:
 
 
 def _source_links(text: str) -> set[str]:
-    return {f"{match.group(1)}.md" for match in SOURCE_LINK.finditer(text)}
+    return {
+        f"{source.group(1)}.md"
+        for match in _visible_wikilinks(text)
+        if (source := SOURCE_LINK.fullmatch(match.group(0))) is not None
+    }
 
 
 def _connects(text: str) -> list[str] | None:
@@ -419,7 +405,10 @@ def _concept_related_ok(path: Path, text: str) -> bool:
     if not _ordered(text, CONCEPT_HEADINGS):
         return True  # the headings rule already owns this failure
     related = _section(text, CONCEPT_HEADINGS[2], CONCEPT_HEADINGS[3])
-    return sum(1 for _ in _wikilinks(related)) >= RELATED_LINKS_MIN
+    return sum(
+        1
+        for _ in _visible_wikilinks(related, mask_frontmatter=False)
+    ) >= RELATED_LINKS_MIN
 
 
 def _connection_path_ok(path: Path, text: str) -> bool:

@@ -9,11 +9,27 @@ import json
 import re
 from typing import TypedDict
 
+from markdown_boundary import (
+    ATX_HEADING_LINE,
+    FENCE_LINE,
+    HTML_LITERAL_OPEN,
+    HTML_TAG,
+    LIST_ITEM,
+    THEMATIC_BREAK,
+    _blank,
+    _container_body,
+    _container_prefix,
+    _indent_columns,
+    is_escaped,
+    markdown_body,
+    markdown_link_spans,
+)
 from quote_grammar import QUOTED_CONTENT
 
 
 SOURCE = re.compile(r'<!-- user-source:\s*(\{[^\n]*\})\s*-->')
 EVIDENCE = re.compile(r'<!-- user-evidence:\s*(\{[^\n]*\})\s*-->')
+LIST_PREFIX = re.compile(r'^[ \t]*(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)')
 USER_ANCHOR = r'(?:#user-[a-f0-9]{64})?'
 USER_LINK = re.compile(r'\[\[daily/(\d{4}-\d{2}-\d{2})#user-([a-f0-9]{64})(?:\|[^\]]+)?\]\]')
 SCOPES = frozenset({'general', 'project', 'session', 'unspecified'})
@@ -137,6 +153,94 @@ def _authored_quote(message: str, quote: str) -> bool:
     return False
 
 
+def _visible_source_body(text: str) -> str:
+    """Keep visible source markers while hiding examples and code spans."""
+    masked = markdown_body(text, mask_frontmatter=False)
+    chars = list(masked)
+    prefix = '<!-- user-source:'
+
+    def is_lazy_paragraph(line: str, *, continuation: bool = False) -> bool:
+        stripped = line.lstrip(' \t')
+        if not stripped:
+            return False
+        if _indent_columns(line[:len(line) - len(stripped)]) >= 4:
+            return continuation
+        return bool(stripped) and not (
+            FENCE_LINE.fullmatch(line) is not None
+            or LIST_PREFIX.match(line) is not None
+            or stripped.startswith('>')
+            or ATX_HEADING_LINE.match(line) is not None
+            or THEMATIC_BREAK.fullmatch(stripped) is not None
+            or re.fullmatch(r'=+[ \t]*', stripped) is not None
+            or HTML_LITERAL_OPEN.match(line) is not None
+        )
+
+    blockquote_starts: set[int] = set()
+    quote_paragraph = False
+    list_contexts: list[int] = []
+    offset = 0
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip('\r\n')
+        explicit_list = LIST_ITEM.match(line)
+        if explicit_list is not None:
+            remainder, containers = _container_prefix(line)
+            list_contexts = [
+                value for kind, value in containers if kind == 'list'
+            ]
+            in_blockquote = any(kind == 'quote' for kind, _value in containers)
+        else:
+            remainder = line
+            in_blockquote = False
+            for content_indent in reversed(list_contexts):
+                candidate = _container_body(
+                    line, (('list', content_indent),)
+                )
+                if candidate is None:
+                    continue
+                remainder, containers = _container_prefix(candidate)
+                in_blockquote = any(kind == 'quote' for kind, _value in containers)
+                break
+            else:
+                remainder, containers = _container_prefix(line)
+                in_blockquote = any(kind == 'quote' for kind, _value in containers)
+                if line.strip():
+                    list_contexts = [
+                        value for kind, value in containers if kind == 'list'
+                    ]
+        if in_blockquote:
+            blockquote_starts.add(offset)
+            quote_paragraph = is_lazy_paragraph(remainder, continuation=quote_paragraph)
+        elif not line.strip():
+            quote_paragraph = False
+        elif quote_paragraph and is_lazy_paragraph(line, continuation=True):
+            blockquote_starts.add(offset)
+        else:
+            quote_paragraph = False
+        if line.strip() and not explicit_list and list_contexts and remainder == line:
+            list_contexts = []
+        if offset in blockquote_starts:
+            chars[offset:offset + len(line)] = ' ' * len(line)
+        offset += len(raw_line)
+    link_spans = markdown_link_spans(text)
+    html_spans = tuple((tag.start(), tag.end()) for tag in HTML_TAG.finditer(text))
+    for start, end in link_spans + html_spans:
+        _blank(chars, start, end)
+    for match in SOURCE.finditer(text):
+        line_start = text.rfind('\n', 0, match.start()) + 1
+        if (
+            line_start in blockquote_starts
+            or is_escaped(text, match.start())
+            or any(start < match.start() < end for start, end in link_spans)
+            or any(start < match.start() < end for start, end in html_spans)
+        ):
+            chars[match.start():match.end()] = ' ' * (match.end() - match.start())
+            continue
+        end = match.start() + len(prefix)
+        if masked[match.start():end] == text[match.start():end]:
+            chars[match.start():match.end()] = text[match.start():match.end()]
+    return ''.join(chars)
+
+
 def _record(
     claim: str,
     citation: Mapping[str, object],
@@ -202,23 +306,34 @@ def bind_evidence(
         # Model output cannot mint a trusted record or reuse an old evidence link.
         body = EVIDENCE.sub('', body)
         body = USER_LINK.sub('', body)
-        logical_lines: list[str] = []
-        for line in body.splitlines():
+        visible_body = _visible_source_body(body)
+        logical_lines: list[tuple[str, str]] = []
+        for line, visible_line in zip(body.splitlines(), visible_body.splitlines()):
             # Models sometimes put the citation directly below its list item.
             # Never cross a blank line/section or silently choose among citations.
-            if (SOURCE.fullmatch(line.strip()) and logical_lines
-                    and logical_lines[-1].lstrip().startswith(('- ', '* ', '+ '))):
-                logical_lines[-1] += ' ' + line.strip()
+            if (SOURCE.fullmatch(visible_line.strip()) and logical_lines
+                    and logical_lines[-1][1].lstrip().startswith(('- ', '* ', '+ '))):
+                raw, visible = logical_lines[-1]
+                logical_lines[-1] = (
+                    raw + ' ' + line.strip(),
+                    visible + ' ' + visible_line.strip(),
+                )
             else:
-                logical_lines.append(line)
-        for line in logical_lines:
-            citations = list(SOURCE.finditer(line))
+                logical_lines.append((line, visible_line))
+        for line, visible_line in logical_lines:
+            citations = list(SOURCE.finditer(visible_line))
             clean = SOURCE.sub('', line).strip()
             claim = re.sub(r'^[-*+]\s+', '', clean).strip()
             record = None
             if len(citations) == 1 and claim:
                 try:
-                    citation = _json_object(json.loads(citations[0].group(1)))
+                    raw_marker = line[citations[0].start():citations[0].end()]
+                    raw_match = SOURCE.fullmatch(raw_marker)
+                    citation = (
+                        _json_object(json.loads(raw_match.group(1)))
+                        if raw_match is not None
+                        else None
+                    )
                     if citation is not None:
                         record = _record(claim, citation, turns, captured_at)
                 except (ValueError, TypeError):
@@ -226,7 +341,10 @@ def bind_evidence(
             if record:
                 records[record['id']] = record
                 lines.append(f'- {claim} [[daily/{day}#user-{record["id"]}|Kullanıcı dayanağı; kapsam: {record["scope"]}]]')
-            elif (retained := prior.get(normalize(claim))) is not None:
+            elif (
+                visible_line.strip()
+                and (retained := prior.get(normalize(claim))) is not None
+            ):
                 # Only an unchanged claim with a freshly verified source may survive
                 # transcript compaction. Model-supplied evidence identities stay ignored.
                 records[retained['id']] = retained
