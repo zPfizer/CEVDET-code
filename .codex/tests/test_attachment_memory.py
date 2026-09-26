@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import datetime as dt
 import json
 from pathlib import Path
@@ -160,6 +161,655 @@ class AttachmentMemoryTests(unittest.TestCase):
                     source.unlink()
                     self.assertEqual(capture(), initial)
                     self.assertEqual(summarize.call_count, 1)
+
+    def test_source_change_during_summary_is_rejected_before_publication(self):
+        summary = '\n\n'.join('## ' + h + '\nSummary.' for h in flush.EXPECTED_SECTIONS)
+        for replacement_content in ('Changed source.', 'Original source.', None):
+            for outcome in ('FLUSH_BOS', summary):
+                with self.subTest(replacement_content=replacement_content, empty=outcome == 'FLUSH_BOS'), \
+                     tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    home = root / 'home'
+                    source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+                    source.parent.mkdir(parents=True)
+                    source.write_text('Original source.', encoding='utf-8')
+                    text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+                    state = root / 'state'
+
+                    def summarize_and_change(_prompt: str) -> str:
+                        if replacement_content is None:
+                            source.unlink()
+                        else:
+                            replacement = source.with_name('replacement.txt')
+                            replacement.write_text(replacement_content, encoding='utf-8')
+                            replacement.replace(source)
+                        return outcome
+
+                    with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                        with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                            attachment_memory.capture_sources(
+                                [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                                frozenset(), summarize_and_change, state_dir=state,
+                            )
+
+                    self.assertEqual(list((root / attachment_memory.SOURCE_DIR).glob('*.md')), [])
+                    self.assertEqual(list(state.glob('attachment-memory-*.json')), [])
+
+    def test_model_source_change_marks_mapping_and_blocks_missing_recovery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                attachment_memory.capture_sources(
+                    [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                )
+                suppress_derived_memory(root / '.codex/private-memory', 'Stored summary.')
+                hashes = load_suppressed_hashes(root / '.codex/private-memory')
+
+                def summarize_fails(_prompt: str) -> str:
+                    raise RuntimeError('model failed')
+
+                with self.assertRaisesRegex(RuntimeError, 'model failed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        hashes, summarize_fails, state_dir=state,
+                    )
+
+                def summarize_and_remove(_prompt: str) -> str:
+                    source.unlink()
+                    return summary
+
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        hashes, summarize_and_remove, state_dir=state,
+                    )
+
+                mapping_path = attachment_memory._mapping_path(
+                    state, source.parent.name, attachment_memory._attachment_digest(text.rstrip()),
+                )
+                mapping = json.loads(mapping_path.read_text(encoding='utf-8'))
+                self.assertTrue(mapping['source_changed'])
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        hashes, mock.Mock(return_value=summary), state_dir=state,
+                    )
+
+    def test_model_failure_after_source_change_marks_mapping_and_blocks_recovery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                attachment_memory.capture_sources(
+                    [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                )
+                suppress_derived_memory(root / '.codex/private-memory', 'Stored summary.')
+                hashes = load_suppressed_hashes(root / '.codex/private-memory')
+
+                def summarize_and_remove(_prompt: str) -> str:
+                    source.unlink()
+                    raise RuntimeError('model failed')
+
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        hashes, summarize_and_remove, state_dir=state,
+                    )
+
+                mapping_path = attachment_memory._mapping_path(
+                    state, source.parent.name, attachment_memory._attachment_digest(text.rstrip()),
+                )
+                mapping = json.loads(mapping_path.read_text(encoding='utf-8'))
+                self.assertTrue(mapping['source_changed'])
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        hashes, mock.Mock(return_value=summary), state_dir=state,
+                    )
+
+    def test_source_disappearance_during_preload_marks_mapping_and_blocks_recovery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                attachment_memory.capture_sources(
+                    [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                )
+                real_open = Path.open
+                removed = False
+
+                def disappear_on_open(path, *args, **kwargs):
+                    nonlocal removed
+                    if path == source and not removed:
+                        removed = True
+                        source.unlink()
+                    return real_open(path, *args, **kwargs)
+
+                with mock.patch.object(Path, 'open', autospec=True, side_effect=disappear_on_open):
+                    with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                        attachment_memory.capture_sources(
+                            [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                            frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                        )
+
+                mapping_path = attachment_memory._mapping_path(
+                    state, source.parent.name, attachment_memory._attachment_digest(text.rstrip()),
+                )
+                mapping = json.loads(mapping_path.read_text(encoding='utf-8'))
+                self.assertTrue(mapping['source_changed'])
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                    )
+
+    def test_source_disappearance_during_preopen_validation_marks_mapping(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                attachment_memory.capture_sources(
+                    [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                )
+                real_is_file = Path.is_file
+                removed = False
+
+                def disappear_on_is_file(path: Path) -> bool:
+                    nonlocal removed
+                    if path == source and not removed:
+                        removed = True
+                        source.unlink()
+                    return real_is_file(path)
+
+                with mock.patch.object(Path, 'is_file', autospec=True, side_effect=disappear_on_is_file):
+                    with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                        attachment_memory.capture_sources(
+                            [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                            frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                        )
+
+                marker = attachment_memory._source_changed_marker_path(
+                    state, source.parent.name,
+                )
+                self.assertTrue(marker.is_file())
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                    )
+
+    def test_source_change_survives_concurrent_suppression_update(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                attachment_memory.capture_sources(
+                    [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                )
+                suppress_derived_memory(root / '.codex/private-memory', 'Stored summary.')
+                hashes = load_suppressed_hashes(root / '.codex/private-memory')
+
+                def summarize_and_update(_prompt: str) -> str:
+                    source.unlink()
+                    suppress_derived_memory(root / '.codex/private-memory', 'Concurrent preference.')
+                    return summary
+
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        hashes, summarize_and_update, state_dir=state,
+                    )
+
+                mapping_path = attachment_memory._mapping_path(
+                    state, source.parent.name, attachment_memory._attachment_digest(text.rstrip()),
+                )
+                mapping = json.loads(mapping_path.read_text(encoding='utf-8'))
+                self.assertTrue(mapping['source_changed'])
+                current_hashes = load_suppressed_hashes(root / '.codex/private-memory')
+                self.assertNotEqual(current_hashes, hashes)
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        current_hashes, mock.Mock(return_value=summary), state_dir=state,
+                    )
+
+    def test_source_change_invalidates_all_envelope_mappings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            first_text = f'# Files pasted by the user:\n\n## "First": {source}\n\n## My request:\nFirst request.\n'
+            second_text = f'# Files pasted by the user:\n\n## "Second": {source}\n\n## My request:\nSecond request.\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                attachment_memory.capture_sources(
+                    [('user', first_text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                )
+                attachment_memory.capture_sources(
+                    [('user', second_text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                )
+                suppress_derived_memory(root / '.codex/private-memory', 'Stored summary.')
+                hashes = load_suppressed_hashes(root / '.codex/private-memory')
+
+                def summarize_and_remove(_prompt: str) -> str:
+                    source.unlink()
+                    return summary
+
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', second_text)], root, dt.datetime.now(dt.timezone.utc),
+                        hashes, summarize_and_remove, state_dir=state,
+                    )
+
+                mapping_paths = [
+                    attachment_memory._mapping_path(
+                        state, source.parent.name,
+                        attachment_memory._attachment_digest(envelope.rstrip()),
+                    )
+                    for envelope in (first_text, second_text)
+                ]
+                for mapping_path in mapping_paths:
+                    mapping = json.loads(mapping_path.read_text(encoding='utf-8'))
+                    self.assertTrue(mapping['source_changed'])
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', first_text)], root, dt.datetime.now(dt.timezone.utc),
+                        hashes, mock.Mock(return_value=summary), state_dir=state,
+                    )
+
+    def test_source_change_after_recheck_is_rejected_before_publication(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            real_validate = attachment_memory._validate_destination_parent
+
+            def validate_then_replace(vault_root: Path, destination: Path) -> None:
+                real_validate(vault_root, destination)
+                replacement = source.with_name('replacement.txt')
+                replacement.write_text('Changed source.', encoding='utf-8')
+                replacement.replace(source)
+
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}), \
+                 mock.patch.object(
+                     attachment_memory,
+                     '_validate_destination_parent',
+                     side_effect=validate_then_replace,
+                 ):
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                    )
+
+            self.assertEqual(list((root / attachment_memory.SOURCE_DIR).glob('*.md')), [])
+            self.assertEqual(list(state.glob('attachment-memory-*.json')), [])
+            self.assertTrue(
+                attachment_memory._source_changed_marker_path(state, source.parent.name).is_file()
+            )
+
+    def test_source_change_during_note_staging_leaves_no_note(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            real_write = attachment_memory.atomic_write_text
+
+            def write_then_replace(path: Path, value: str, **kwargs) -> None:
+                real_write(path, value, **kwargs)
+                if Path(path).suffix == '.staging':
+                    replacement = source.with_name('replacement.txt')
+                    replacement.write_text('Changed source.', encoding='utf-8')
+                    replacement.replace(source)
+
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}), \
+                 mock.patch.object(
+                     attachment_memory,
+                     'atomic_write_text',
+                     side_effect=write_then_replace,
+                 ):
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                    )
+
+            self.assertEqual(list((root / attachment_memory.SOURCE_DIR).glob('*.md')), [])
+            self.assertEqual(list(root.rglob('*.staging')), [])
+
+    def test_source_drift_does_not_delete_external_note_edit_on_rollback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            destination = root / attachment_memory._note_relative(
+                source.parent.name, attachment_memory._attachment_digest('Stable source.'),
+            )
+            real_replace = attachment_memory.replace_with_retry
+
+            def replace_then_edit(source_path: Path, destination_path: Path, **kwargs) -> None:
+                real_replace(source_path, destination_path, **kwargs)
+                destination_path.write_text(
+                    destination_path.read_text(encoding='utf-8') + '\nExternal revision.\n',
+                    encoding='utf-8',
+                )
+                replacement = source.with_name('replacement.txt')
+                replacement.write_text('Changed source.', encoding='utf-8')
+                replacement.replace(source)
+
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}), \
+                 mock.patch.object(
+                     attachment_memory,
+                     'replace_with_retry',
+                     side_effect=replace_then_edit,
+                 ):
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                    )
+
+            self.assertTrue(destination.is_file())
+            self.assertIn('External revision.', destination.read_text(encoding='utf-8'))
+
+    def test_stale_note_staging_does_not_block_retry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            destination = root / attachment_memory._note_relative(
+                source.parent.name, attachment_memory._attachment_digest('Stable source.'),
+            )
+            staging = destination.with_suffix('.staging')
+            staging.parent.mkdir(parents=True)
+            staging.write_text('abandoned staging', encoding='utf-8')
+
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                result = attachment_memory.capture_sources(
+                    [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                )
+
+            self.assertTrue(result)
+            self.assertTrue(staging.is_file())
+            self.assertEqual(staging.read_text(encoding='utf-8'), 'abandoned staging')
+            self.assertTrue(destination.is_file())
+
+    def test_source_change_marker_survives_session_only_gate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+
+            def summarize_and_exclude(_prompt: str) -> str:
+                mark_session_only(state, 'session')
+                source.unlink()
+                return summary
+
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), summarize_and_exclude,
+                        state_dir=state, session_id='session',
+                    )
+
+                marker = attachment_memory._source_changed_marker_path(
+                    state, source.parent.name,
+                )
+                self.assertTrue(marker.is_file())
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), mock.Mock(return_value=summary),
+                        state_dir=state, session_id='other',
+                    )
+
+    def test_source_change_without_receipt_clears_marker_after_successful_retry(self):
+        summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+        for outcome in ('FLUSH_BOS', summary):
+            with self.subTest(empty=outcome == 'FLUSH_BOS'), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                home = root / 'home'
+                source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+                source.parent.mkdir(parents=True)
+                source.write_text('Stable source.', encoding='utf-8')
+                text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+                state = root / 'state'
+
+                def summarize_and_change(_prompt: str) -> str:
+                    replacement = source.with_name('replacement.txt')
+                    replacement.write_text('Changed source.', encoding='utf-8')
+                    replacement.replace(source)
+                    return outcome
+
+                marker = attachment_memory._source_changed_marker_path(
+                    state, source.parent.name,
+                )
+                with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                    with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                        attachment_memory.capture_sources(
+                            [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                            frozenset(), summarize_and_change, state_dir=state,
+                        )
+                    self.assertTrue(marker.is_file())
+                    source.write_text('Stable source.', encoding='utf-8')
+                    retry = mock.Mock(return_value=outcome)
+                    result = attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), retry, state_dir=state,
+                    )
+                    self.assertFalse(marker.exists())
+                    source.unlink()
+                    self.assertEqual(
+                        attachment_memory.capture_sources(
+                            [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                            frozenset(), retry, state_dir=state,
+                        ),
+                        result,
+                    )
+                retry.assert_called_once()
+
+    def test_preload_source_change_invalidates_all_envelope_mappings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            first_text = f'# Files pasted by the user:\n\n## "First": {source}\n\n## My request:\nFirst request.\n'
+            second_text = f'# Files pasted by the user:\n\n## "Second": {source}\n\n## My request:\nSecond request.\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            summarize = mock.Mock(return_value=summary)
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                attachment_memory.capture_sources(
+                    [('user', first_text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), summarize, state_dir=state,
+                )
+                attachment_memory.capture_sources(
+                    [('user', second_text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), summarize, state_dir=state,
+                )
+                source.write_text('Changed source.', encoding='utf-8')
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', first_text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), summarize, state_dir=state,
+                    )
+
+                mapping_paths = [
+                    attachment_memory._mapping_path(
+                        state, source.parent.name,
+                        attachment_memory._attachment_digest(envelope.rstrip()),
+                    )
+                    for envelope in (first_text, second_text)
+                ]
+                for mapping_path in mapping_paths:
+                    self.assertTrue(json.loads(mapping_path.read_text(encoding='utf-8'))['source_changed'])
+                source.unlink()
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', second_text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), summarize, state_dir=state,
+                    )
+
+    def test_reused_receipt_rechecks_source_before_success(self):
+        summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+        for outcome in ('FLUSH_BOS', summary):
+            with self.subTest(empty=outcome == 'FLUSH_BOS'), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                home = root / 'home'
+                source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+                source.parent.mkdir(parents=True)
+                source.write_text('Stable source.', encoding='utf-8')
+                text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+                state = root / 'state'
+                with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), mock.Mock(return_value=outcome), state_dir=state,
+                    )
+                    real_scope = attachment_memory._publication_scope
+                    calls = 0
+
+                    @contextmanager
+                    def replace_on_reuse_scope(scope_state: Path, session: str | None):
+                        nonlocal calls
+                        calls += 1
+                        with real_scope(scope_state, session):
+                            if calls == 2:
+                                replacement = source.with_name('replacement.txt')
+                                replacement.write_text('Changed source.', encoding='utf-8')
+                                replacement.replace(source)
+                            yield
+
+                    with mock.patch.object(
+                        attachment_memory,
+                        '_publication_scope',
+                        side_effect=replace_on_reuse_scope,
+                    ):
+                        with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                            attachment_memory.capture_sources(
+                                [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                                frozenset(), mock.Mock(return_value=outcome), state_dir=state,
+                            )
+
+    def test_source_change_before_publication_guard_failure_is_recorded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Stable source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nStored summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                attachment_memory.capture_sources(
+                    [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                    frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                )
+                real_scope = attachment_memory._publication_scope
+                calls = 0
+
+                @contextmanager
+                def remove_before_guard(scope_state: Path, session: str | None):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 2:
+                        source.unlink()
+                        mark_session_only(scope_state, session or 'session')
+                    with real_scope(scope_state, session):
+                        yield
+
+                with mock.patch.object(
+                    attachment_memory,
+                    '_publication_scope',
+                    side_effect=remove_before_guard,
+                ):
+                    with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                        attachment_memory.capture_sources(
+                            [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                            frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                            session_id='session',
+                        )
+
+                marker = attachment_memory._source_changed_marker_path(
+                    state, source.parent.name,
+                )
+                self.assertTrue(marker.is_file())
+                with self.assertRaisesRegex(ValueError, 'attachment-content-changed'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc),
+                        frozenset(), mock.Mock(return_value=summary), state_dir=state,
+                    )
 
     def test_empty_source_receipt_does_not_cross_suppression_revision(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -560,6 +1210,56 @@ class AttachmentMemoryTests(unittest.TestCase):
                         [('user', text)], root, dt.datetime.now(dt.timezone.utc), frozenset(),
                         summarize, state_dir=state,
                     )
+
+    def test_missing_source_does_not_promote_prepared_mapping_after_install_gap(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'home'
+            source = home / 'attachments/11111111-1111-4111-8111-111111111111/pasted-text.txt'
+            source.parent.mkdir(parents=True)
+            source.write_text('Prepared source.', encoding='utf-8')
+            text = f'# Files pasted by the user:\n\n## "Example": {source}\n\n## My request:\n'
+            summary = '\n\n'.join('## ' + h + '\nPrepared summary.' for h in flush.EXPECTED_SECTIONS)
+            state = root / 'state'
+            real_write = attachment_memory._write_mapping
+            write_count = 0
+
+            def fail_after_install(path, mapping):
+                nonlocal write_count
+                write_count += 1
+                if write_count == 2:
+                    raise OSError('interrupted mapping commit')
+                return real_write(path, mapping)
+
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}), \
+                 mock.patch.object(attachment_memory, '_write_mapping', side_effect=fail_after_install):
+                with self.assertRaisesRegex(OSError, 'interrupted mapping commit'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc), frozenset(),
+                        mock.Mock(return_value=summary), state_dir=state,
+                    )
+
+            mapping_path = attachment_memory._mapping_path(
+                state, source.parent.name, attachment_memory._attachment_digest(text.rstrip()),
+            )
+            mapping_text = mapping_path.read_text(encoding='utf-8')
+            prepared = json.loads(mapping_text)
+            self.assertEqual(prepared['status'], 'prepared')
+            note = root / prepared['note_relative']
+            self.assertTrue(note.is_file())
+            note_text = note.read_text(encoding='utf-8')
+            source.unlink()
+            retry = mock.Mock(return_value=summary)
+            with mock.patch.dict('os.environ', {'CODEX_HOME': str(home)}):
+                with self.assertRaisesRegex(ValueError, 'attachment-recovery-unavailable'):
+                    attachment_memory.capture_sources(
+                        [('user', text)], root, dt.datetime.now(dt.timezone.utc), frozenset(),
+                        retry, state_dir=state,
+                    )
+
+            retry.assert_not_called()
+            self.assertEqual(mapping_path.read_text(encoding='utf-8'), mapping_text)
+            self.assertEqual(note.read_text(encoding='utf-8'), note_text)
 
     def test_rebuilds_reused_summary_when_new_suppression_hides_source(self):
         with tempfile.TemporaryDirectory() as temp:
