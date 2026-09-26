@@ -1,22 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 import datetime as dt
 import hashlib
 import io
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import time
 import tokenize
 from typing import Callable, Iterator, Sequence
 import unicodedata
 
-from file_lock import locked, timeout_for_deadline
+from file_lock import LockUnavailable, locked, timeout_for_deadline
 from compile_state import PolicyError, PublicationSnapshot, require_publication_snapshot
-from state_store import atomic_write_text
-from profile_guard import PROFILE_RELATIVE, check_profile
+from state_store import _pinned_windows_directory, atomic_write_text
+from profile_guard import PROFILE_RELATIVE, _reparse, check_profile
 from quote_grammar import QUOTED_CASE_SUFFIX, QUOTED_CONTENT
 from user_evidence import filter_evidence, USER_LINK, proof_for_link
 
@@ -1445,6 +1448,377 @@ def _suppression_path(private_root: Path) -> Path:
     return private_root / "controls" / "suppressions.jsonl"
 
 
+def _suppression_path_key(path: Path) -> str:
+    value = os.path.normcase(os.path.normpath(os.fspath(path)))
+    if value.startswith("\\\\?\\unc\\"):
+        return "\\\\" + value[8:]
+    if value.startswith("\\\\?\\"):
+        return value[4:]
+    return value
+
+
+def _suppression_lstat(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+    except (OSError, RuntimeError) as exc:
+        raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
+
+
+def _checked_suppression_path(private_root: Path) -> Path:
+    """Keep the suppression ledger and its lock inside private memory."""
+    private = Path(private_root)
+    path = _suppression_path(private)
+    absolute_private = private.absolute()
+    filesystem_root = Path(absolute_private.anchor or Path.cwd().anchor)
+    controls = absolute_private / "controls"
+    absolute_path = controls / "suppressions.jsonl"
+    lock = absolute_path.with_suffix(".lock")
+    try:
+        if any(
+            _reparse(candidate, filesystem_root)
+            for candidate in (absolute_private, controls, absolute_path, lock)
+        ):
+            raise ValueError("linked suppression path")
+        private_resolved = absolute_private.resolve(strict=False)
+        controls_resolved = controls.resolve(strict=False)
+        path_resolved = absolute_path.resolve(strict=False)
+        private_metadata = _suppression_lstat(absolute_private)
+        controls_metadata = _suppression_lstat(controls)
+        if (
+            _suppression_path_key(controls_resolved)
+            != _suppression_path_key(private_resolved / "controls")
+            or _suppression_path_key(path_resolved)
+            != _suppression_path_key(
+                private_resolved / "controls" / "suppressions.jsonl"
+            )
+            or (
+                private_metadata is not None
+                and not stat.S_ISDIR(private_metadata.st_mode)
+            )
+            or (
+                controls_metadata is not None
+                and not stat.S_ISDIR(controls_metadata.st_mode)
+            )
+        ):
+            raise ValueError("suppression path escaped private memory")
+        for candidate in (absolute_path, lock):
+            metadata = _suppression_lstat(candidate)
+            if metadata is not None:
+                candidate_resolved = candidate.resolve(strict=False)
+                if (
+                    _suppression_path_key(candidate_resolved)
+                    != _suppression_path_key(
+                        private_resolved / "controls" / candidate.name
+                    )
+                    or not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                ):
+                    raise ValueError("linked suppression file")
+    except MemoryPreferenceError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
+    return path
+
+
+class _SuppressionDirectoryBusy(OSError):
+    """Another writer still holds the checked directory entry."""
+
+
+_SUPPRESSION_DIRECTORY_PINNED: ContextVar[str | None] = ContextVar(
+    "suppression_directory_pinned",
+    default=None,
+)
+
+
+def _suppression_existing_ancestor(path: Path) -> Path:
+    candidate = Path(path).absolute()
+    while _suppression_lstat(candidate) is None:
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    return candidate
+
+
+def _pin_suppression_directory(
+    stack: ExitStack,
+    path: Path,
+    *,
+    expected: os.stat_result | None = None,
+) -> os.stat_result | None:
+    opened = stack.enter_context(_pinned_windows_directory(path))
+    current = _suppression_lstat(path)
+    if current is None or not stat.S_ISDIR(current.st_mode):
+        raise MemoryPreferenceError("memory-suppression-path-invalid")
+    if opened is not None and (
+        (
+            expected is not None
+            and (opened.st_dev, opened.st_ino, opened.st_nlink)
+            != (expected.st_dev, expected.st_ino, expected.st_nlink)
+        )
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        or opened.st_nlink != 1
+        or current.st_nlink != 1
+    ):
+        raise MemoryPreferenceError("memory-suppression-path-invalid")
+    return opened
+
+
+def _ensure_pinned_suppression_directory(
+    stack: ExitStack,
+    target: Path,
+    ancestor: Path,
+    private_root: Path,
+    expected: os.stat_result | None = None,
+) -> None:
+    pending: list[Path] = []
+    current = Path(target).absolute()
+    ancestor_key = _suppression_path_key(Path(ancestor).absolute())
+    while _suppression_path_key(current) != ancestor_key:
+        pending.append(current)
+        parent = current.parent
+        if parent == current:
+            raise MemoryPreferenceError("memory-suppression-path-invalid")
+        current = parent
+    for candidate in reversed(pending):
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
+        created_metadata = _suppression_lstat(candidate)
+        if created_metadata is None or not stat.S_ISDIR(created_metadata.st_mode):
+            raise MemoryPreferenceError("memory-suppression-path-invalid")
+        _checked_suppression_path(private_root)
+        _pin_suppression_directory(
+            stack,
+            candidate,
+            expected=expected if expected is not None else created_metadata,
+        )
+        expected = None
+        _checked_suppression_path(private_root)
+
+
+@contextmanager
+def _suppression_controls_scope(
+    private_root: Path,
+    *,
+    pin_directory: bool = True,
+    ensure_directory: bool = False,
+) -> Iterator[Path]:
+    private = Path(private_root).absolute()
+    path = _suppression_path(private)
+    controls = path.parent
+    pre_private_metadata = _suppression_lstat(private)
+    private_absent_snapshot = pre_private_metadata is None
+    pre_ancestor = (
+        _suppression_existing_ancestor(private.parent)
+        if private_absent_snapshot
+        else private
+    )
+    pre_ancestor_metadata = _suppression_lstat(pre_ancestor)
+
+    if ensure_directory:
+        with ExitStack() as stack:
+            try:
+                _pin_suppression_directory(
+                    stack,
+                    pre_ancestor,
+                    expected=pre_ancestor_metadata,
+                )
+                if private_absent_snapshot and _suppression_lstat(private) is not None:
+                    raise MemoryPreferenceError("memory-suppression-path-invalid")
+                if not private_absent_snapshot and _suppression_lstat(private) is None:
+                    raise MemoryPreferenceError("memory-suppression-path-invalid")
+                pre_controls_metadata = _suppression_lstat(controls)
+                _checked_suppression_path(private_root)
+                _ensure_pinned_suppression_directory(
+                    stack, private, pre_ancestor, private_root
+                )
+                _ensure_pinned_suppression_directory(
+                    stack,
+                    controls,
+                    private,
+                    private_root,
+                    pre_controls_metadata,
+                )
+                path = _checked_suppression_path(private_root)
+            except MemoryPreferenceError:
+                raise
+            except OSError as exc:
+                if os.name == "nt" and getattr(exc, "winerror", None) in {32, 33}:
+                    raise _SuppressionDirectoryBusy("suppression directory busy") from exc
+                raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
+            pin_token = _SUPPRESSION_DIRECTORY_PINNED.set(
+                _suppression_path_key(private)
+            )
+            try:
+                yield path
+            finally:
+                _SUPPRESSION_DIRECTORY_PINNED.reset(pin_token)
+        return
+
+    if not pin_directory or os.name != "nt":
+        path = _checked_suppression_path(private_root)
+        yield path
+        return
+    # An absent controls entry has no handle of its own; keep its existing
+    # private-memory parent pinned and reject changes observed across the read.
+    with ExitStack() as stack:
+        try:
+            opened = _pin_suppression_directory(
+                stack,
+                pre_ancestor,
+                expected=pre_ancestor_metadata,
+            )
+            current_private = _suppression_lstat(private)
+            if private_absent_snapshot:
+                if current_private is not None:
+                    raise ValueError("suppression private root appeared")
+            elif current_private is None:
+                raise ValueError("suppression private root disappeared")
+            pre_controls_metadata = _suppression_lstat(controls)
+            path = _checked_suppression_path(private_root)
+            controls_metadata = _suppression_lstat(controls)
+            if pre_controls_metadata is not None and controls_metadata is None:
+                raise ValueError("suppression controls disappeared")
+            if controls_metadata is not None:
+                _pin_suppression_directory(
+                    stack,
+                    controls,
+                    expected=pre_controls_metadata,
+                )
+                _checked_suppression_path(private_root)
+            parent_snapshot = (
+                not private_absent_snapshot
+                and _suppression_path_key(pre_ancestor)
+                == _suppression_path_key(private)
+                and controls_metadata is None
+            )
+            controls_absent_snapshot = controls_metadata is None
+        except MemoryPreferenceError:
+            raise
+        except OSError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) in {32, 33}:
+                raise _SuppressionDirectoryBusy("suppression directory busy") from exc
+            raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
+        except (RuntimeError, ValueError) as exc:
+            raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
+        pin_token = _SUPPRESSION_DIRECTORY_PINNED.set(
+            _suppression_path_key(Path(private_root).absolute())
+        )
+        try:
+            yield path
+        finally:
+            _SUPPRESSION_DIRECTORY_PINNED.reset(pin_token)
+        if private_absent_snapshot and _suppression_lstat(private) is not None:
+            raise MemoryPreferenceError("memory-suppression-path-invalid")
+        if controls_absent_snapshot and _suppression_lstat(controls) is not None:
+            raise MemoryPreferenceError("memory-suppression-path-invalid")
+        if parent_snapshot:
+            current = _suppression_lstat(private)
+            if current is None or opened is None or (
+                (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+                or opened.st_nlink != 1
+                or current.st_nlink != 1
+                or opened.st_mtime_ns != current.st_mtime_ns
+                or opened.st_ctime_ns != current.st_ctime_ns
+            ):
+                raise MemoryPreferenceError("memory-suppression-path-invalid")
+
+
+@contextmanager
+def _suppression_write_scope(
+    private_root: Path,
+    *,
+    timeout: float | None,
+) -> Iterator[tuple[Path, object]]:
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        stack = ExitStack()
+        try:
+            path = stack.enter_context(
+                _suppression_controls_scope(private_root, ensure_directory=True)
+            )
+        except _SuppressionDirectoryBusy:
+            stack.close()
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LockUnavailable("lock-busy")
+                time.sleep(min(0.05, remaining))
+            else:
+                time.sleep(0.05)
+            continue
+        with stack:
+            lock_timeout = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            with locked(path, timeout=lock_timeout) as lock_handle:
+                _checked_suppression_path(private_root)
+                _checked_suppression_lock_handle(private_root, lock_handle)
+                yield path, lock_handle
+                return
+
+
+def _checked_suppression_lock_handle(private_root: Path, handle: object) -> None:
+    lock = _suppression_path(private_root).with_suffix(".lock")
+    try:
+        current = lock.lstat()
+        opened = os.fstat(handle.fileno())  # type: ignore[attr-defined]
+        if (
+            (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            or opened.st_nlink != 1
+            or current.st_nlink != 1
+        ):
+            raise MemoryPreferenceError("memory-suppression-path-invalid")
+    except MemoryPreferenceError:
+        raise
+    except (OSError, AttributeError) as exc:
+        raise MemoryPreferenceError("memory-suppression-path-invalid") from exc
+
+
+def _read_suppression_lines(private_root: Path, path: Path) -> list[str]:
+    # A missing file is only a valid empty ledger if it was already absent.
+    ledger_metadata = _suppression_lstat(path)
+    try:
+        handle = path.open("r", encoding="utf-8")
+    except FileNotFoundError:
+        _checked_suppression_path(private_root)
+        if ledger_metadata is not None:
+            raise MemoryPreferenceError("memory-suppression-path-invalid")
+        return []
+    except (OSError, UnicodeError) as exc:
+        raise MemoryPreferenceError("memory-suppression-unreadable") from exc
+    try:
+        with handle:
+            _checked_suppression_path(private_root)
+            opened = os.fstat(handle.fileno())
+            current = path.lstat()
+            if (
+                (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+                or opened.st_nlink != 1
+                or current.st_nlink != 1
+            ):
+                raise MemoryPreferenceError("memory-suppression-path-invalid")
+            return handle.read().splitlines()
+    except FileNotFoundError:
+        _checked_suppression_path(private_root)
+        if ledger_metadata is not None:
+            raise MemoryPreferenceError("memory-suppression-path-invalid")
+        return []
+    except MemoryPreferenceError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise MemoryPreferenceError("memory-suppression-unreadable") from exc
+
+
 def _suppression_hashes_from_lines(lines: Sequence[str]) -> frozenset[str]:
     hashes: set[str] = set()
     for raw in lines:
@@ -1464,15 +1838,28 @@ def _suppression_hashes_from_lines(lines: Sequence[str]) -> frozenset[str]:
 
 
 def load_suppressed_hashes(private_root: Path) -> frozenset[str]:
-    path = _suppression_path(private_root)
-    try:
-        # Writers atomically replace the file; read-only callers need no lock file.
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        return frozenset()
-    except (OSError, UnicodeError) as exc:
-        raise MemoryPreferenceError('memory-suppression-unreadable') from exc
-    return _suppression_hashes_from_lines(lines)
+    pin_directory = (
+        _SUPPRESSION_DIRECTORY_PINNED.get()
+        != _suppression_path_key(Path(private_root).absolute())
+    )
+    while True:
+        stack = ExitStack()
+        try:
+            path = stack.enter_context(
+                _suppression_controls_scope(
+                    private_root,
+                    pin_directory=pin_directory,
+                )
+            )
+        except _SuppressionDirectoryBusy:
+            stack.close()
+            time.sleep(0.05)
+            continue
+        with stack:
+            # Writers atomically replace the file; read-only callers need no lock file.
+            return _suppression_hashes_from_lines(
+                _read_suppression_lines(private_root, path)
+            )
 
 
 def memory_syntactic_units(value: str) -> Iterator[str]:
@@ -1847,9 +2234,8 @@ def suppression_guard(
     timeout: float | None = None,
 ) -> Iterator[None]:
     """Fence a short publication against a concurrent forget request."""
-    path = _suppression_path(private_root)
-    with locked(path, timeout=timeout):
-        lines = path.read_text(encoding='utf-8').splitlines() if path.exists() else []
+    with _suppression_write_scope(private_root, timeout=timeout) as (path, _lock_handle):
+        lines = _read_suppression_lines(private_root, path)
         if _suppression_hashes_from_lines(lines) != expected:
             raise ValueError('memory-preferences-changed')
         yield
@@ -1863,12 +2249,13 @@ def suppress_derived_memory(
     deadline: float | None = None,
 ) -> Path:
     target_hash = memory_text_hash(target)
-    path = _suppression_path(private_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with locked(path, timeout=timeout_for_deadline(deadline)):
+    with _suppression_write_scope(
+        private_root,
+        timeout=timeout_for_deadline(deadline),
+    ) as (path, _lock_handle):
         if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError("memory-suppression-deadline")
-        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        lines = _read_suppression_lines(private_root, path)
         if target_hash in _suppression_hashes_from_lines(lines):
             return path
         record = {
@@ -1895,5 +2282,6 @@ def suppress_derived_memory(
         lines.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
         if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError("memory-suppression-deadline")
+        _checked_suppression_path(private_root)
         atomic_write_text(path, '\n'.join(lines) + '\n', deadline=deadline)
     return path

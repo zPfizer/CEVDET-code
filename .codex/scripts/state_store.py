@@ -10,7 +10,7 @@ from pathlib import Path
 import stat
 import tempfile
 import time
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from file_lock import locked
 
@@ -85,6 +85,42 @@ def _windows_open(path: Path) -> Any:
     if value in (None, -1, ctypes.c_void_p(-1).value):
         raise ctypes.WinError(ctypes.get_last_error())
     return handle
+
+
+@contextmanager
+def _pinned_windows_directory(path: Path) -> Iterator[os.stat_result | None]:
+    """Keep a checked directory entry from being replaced during I/O."""
+    if os.name != "nt":
+        yield None
+        return
+    import msvcrt
+
+    api = _windows_api()
+    handle = api.CreateFileW(
+        str(path),
+        0x00010080,  # DELETE | FILE_READ_ATTRIBUTES
+        0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+        None,
+        3,  # OPEN_EXISTING
+        0x02000000 | 0x00200000,  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+        None,
+    )
+    value = getattr(handle, "value", handle)
+    if value in (None, -1, ctypes.c_void_p(-1).value):
+        raise ctypes.WinError(ctypes.get_last_error())
+    descriptor = None
+    try:
+        descriptor = msvcrt.open_osfhandle(
+            _windows_handle_value(handle),
+            os.O_RDONLY | os.O_BINARY,
+        )
+        handle = None
+        yield os.fstat(descriptor)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        elif handle is not None:
+            api.CloseHandle(handle)
 
 
 @contextmanager
